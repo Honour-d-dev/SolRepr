@@ -1,28 +1,55 @@
-
 use std::mem;
 
-use la_arena::{Arena, Idx};
+use la_arena::{Arena, ArenaMap, Idx};
 use rustc_hash::FxHashMap;
 use tree_sitter::Node;
+use triomphe::Arc;
 
 use crate::ast::kinds::{FieldKind, NodeKind};
-use crate::ast::{AstNode, Contract, Enum, Error, Event, Function, FunctionKind, HasName, Import, ImportType, Interface, Library, Modifier, NodeRange, Struct, ToAstNode, Udvt, Using, Var};
-use crate::hir::body_map::{ByteOffset, Local, LocalId, Location, SemanticId, VariableKind};
+use crate::ast::{
+    AstIdMap, AstNode, Contract, Enum, Error, Event, Function, FunctionId, FunctionKind,
+    HasMembers, HasName, Import, ImportKind, Interface, Item, Library, Modifier, NodeRange, Struct,
+    ToAstNode, Udvt, Using, Var,
+};
+use crate::hir::body_map::{ByteOffset, Local, LocalId};
 use crate::hir::exprs::{Expr, ExprBuilder, ExprId, Name};
-use crate::hir::types::{Mutability, Primitive, TypeBuilder, TypeId, TypeKey, TypeName, Visibility};
+use crate::hir::types::{
+    Location, Mutability, Primitive, RefKind, TyName, TyNameId, TypeBuilder, VariableKind,
+    Visibility,
+};
+use crate::salsa::FileId;
 
-#[derive(PartialEq, Eq)]
-pub struct ExprStore {
-    pub types: Arena<TypeName>,
-    pub exprs: Arena<Expr>,
-    pub range_to_semantic: FxHashMap<NodeRange, SemanticId>
+pub type FieldId = Idx<Field>;
+pub type VariantId = Idx<Variant>;
+
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum SemanticId {
+    //Local semantics
+    Local(LocalId),
+    Field(FieldId),
+    Variant(VariantId),
+    // Global semantics
+    Expr(ExprId),
+    Type(TyNameId),
 }
 
-impl Default for ExprStore {
+#[derive(PartialEq, Eq)]
+pub struct SyntaxStore {
+    pub types: Arena<TyName>,
+    pub exprs: Arena<Expr>,
+    pub expr_ranges: ArenaMap<ExprId, NodeRange>,
+    pub ty_ref_ranges: ArenaMap<TyNameId, NodeRange>,
+    pub range_to_semantic: FxHashMap<NodeRange, SemanticId>,
+}
+
+impl Default for SyntaxStore {
     fn default() -> Self {
         Self {
             types: Arena::new(),
             exprs: Arena::new(),
+            expr_ranges: ArenaMap::new(),
+            ty_ref_ranges: ArenaMap::new(),
             range_to_semantic: FxHashMap::default(),
         }
     }
@@ -30,37 +57,38 @@ impl Default for ExprStore {
 
 #[derive(Default, PartialEq, Eq)]
 pub struct ImportData {
-    pub expr_store: ExprStore
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq)]
 pub struct VarData {
     pub name: Name,
-    pub type_name: TypeId,
+    pub ty_ref: TyNameId,
+    /// Effective visibility: the written keyword, or the default when omitted.
     pub vis: Visibility,
+    /// Source range of the written visibility keyword; `None` when inferred.
+    pub vis_range: Option<NodeRange>,
+    pub override_specifier: Option<OverrideSpecifier>,
     pub kind: VariableKind,
     pub loc: Location,
+    pub range: NodeRange,
     /// Initializer expression for constant/immutable variables
     pub init: Option<ExprId>,
-    /// Var type can be a complex type e.g mapping(x.y => y.z)
-    /// we need a store of the component types so we can resove the type on demand
-    pub expr_store: ExprStore
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq, Hash)]
 pub struct Field {
     pub name: Name,
-    pub type_name: TypeId,
+    pub ty_ref: TyNameId,
     pub range: NodeRange,
 }
-
-pub type FieldId = Idx<Field>;
 
 #[derive(PartialEq, Eq)]
 pub struct StructData {
     pub name: Name,
     pub fields: Arena<Field>,
-    pub expr_store: ExprStore,
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -69,14 +97,11 @@ pub struct Variant {
     pub range: NodeRange,
 }
 
-pub type VariantId = Idx<Variant>;
-
-
 #[derive(PartialEq, Eq)]
 pub struct EnumData {
     pub name: Name,
     pub variants: Arena<Variant>,
-    pub expr_store: ExprStore,
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq)]
@@ -84,95 +109,103 @@ pub struct FunctionData {
     pub name: Name,
     pub kind: FunctionKind,
     pub vis: Visibility,
+    pub vis_range: Option<NodeRange>,
     pub mutability: Mutability,
-    //TODO - Modifier invocations
-    pub parameters: Arena<Local>,//parameters and returns
-    pub return_parameters: Arena<Local>,
-    pub expr_store: ExprStore,
-}
-
-#[derive(PartialEq, Eq)]
-pub struct FunctionSignature {
-    pub params: Box<[TypeKey]>,
-    pub returns: Box<[TypeKey]>,
+    pub is_virtual: bool,
+    pub override_specifier: Option<OverrideSpecifier>,
+    pub has_body: bool,
+    pub parameters: Arena<Local>,
+    pub args: Vec<LocalId>,
+    pub rets: Vec<LocalId>,
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq)]
 pub struct EventData {
     pub name: Name,
+    pub anonymous: bool,
     pub parameters: Arena<Local>,
-    pub expr_store: ExprStore,
-}
-
-#[derive(PartialEq, Eq)]
-pub struct EventSignature {
-    pub params: Box<[TypeKey]>,
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq)]
 pub struct ErrorData {
     pub name: Name,
     pub parameters: Arena<Local>,
-    pub expr_store: ExprStore,
-}
-
-#[derive(PartialEq, Eq)]
-pub struct ErrorSignature {
-    pub params: Box<[TypeKey]>,
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq)]
 pub struct ModifierData {
     pub name: Name,
+    pub is_virtual: bool,
+    pub override_specifier: Option<OverrideSpecifier>,
+    pub has_body: bool,
     pub parameters: Arena<Local>,
-    pub expr_store: ExprStore,
-}
-
-#[derive(PartialEq, Eq)]
-pub struct ModifierSignature {
-    pub params: Box<[TypeKey]>,
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq)]
 pub struct ContractData {
     pub name: Name,
-    pub bases: Box<[TypeId]>,
-    pub expr_store: ExprStore,
+    pub is_abstract: bool,
+    pub bases: Box<[ExprId]>,
+    pub constructor: Option<FunctionId>,
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq)]
 pub struct InterfaceData {
     pub name: Name,
-    pub bases: Box<[TypeId]>,
-    pub expr_store: ExprStore,
+    pub bases: Box<[ExprId]>,
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq)]
 pub struct LibraryData {
     pub name: Name,
-    pub expr_store: ExprStore,
+    pub syntax_store: SyntaxStore,
 }
-
 
 #[derive(PartialEq, Eq)]
 pub struct UdvtData {
     pub name: Name,
     pub underlying: Primitive,
-    pub expr_store: ExprStore,
+    pub syntax_store: SyntaxStore,
 }
 
 #[derive(PartialEq, Eq)]
 pub struct UsingData {
-    pub target: Option<TypeId>,
+    pub target: Option<TyNameId>,
     pub sources: Box<[ExprId]>,
     pub global: bool,
-    pub expr_store: ExprStore,
+    pub syntax_store: SyntaxStore,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum OverrideSpecifier {
+    Bare {
+        range: NodeRange,
+    },
+    List {
+        paths: Box<[OverridePath]>,
+        range: NodeRange,
+    },
+}
+
+/// One contract named in `override(A.B, C)`. The range is kept even when the
+/// path does not resolve to a type, so diagnostics can still point at it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OverridePath {
+    pub ty_ref: Option<TyNameId>,
+    pub range: NodeRange,
+}
 
 pub struct ItemBuilder {
     root: AstNode,
-    expr_store: ExprStore
+    file: FileId,
+    ast_id_map: Arc<AstIdMap>,
+    syntax_store: SyntaxStore,
 }
 
 impl ExprBuilder for ItemBuilder {
@@ -180,67 +213,81 @@ impl ExprBuilder for ItemBuilder {
         &self.root
     }
 
-    fn alloc_expr(&mut self, expr: Expr, node: Node) -> ExprId {
-        let expr_id = self.expr_store.exprs.alloc(expr);
-        self.expr_store.range_to_semantic.insert(NodeRange::from(&node), SemanticId::Expr(expr_id));
+    fn alloc_expr_range(&mut self, expr: Expr, range: NodeRange) -> ExprId {
+        let expr_id = self.syntax_store.exprs.alloc(expr);
+        self.syntax_store.expr_ranges.insert(expr_id, range);
+        self.syntax_store
+            .range_to_semantic
+            .insert(range, SemanticId::Expr(expr_id));
         expr_id
     }
 
-    fn alloc_member_expr(&mut self, member: Expr, node: Node, prop: NodeRange) -> ExprId {
-        let mem_id = self.alloc_expr(member, node);
-        self.expr_store.range_to_semantic.insert(prop, SemanticId::Expr(mem_id));
+    fn alloc_member_expr(&mut self, member: Expr, range: NodeRange, prop: NodeRange) -> ExprId {
+        let mem_id = self.alloc_expr_range(member, range);
+        self.syntax_store
+            .range_to_semantic
+            .insert(prop, SemanticId::Expr(mem_id));
         mem_id
     }
 
     fn alloc_call_expr(&mut self, call: Expr, node: Node, ident: Option<NodeRange>) -> ExprId {
         let call_id = self.alloc_expr(call, node);
         if let Some(ident) = ident {
-             self.expr_store.range_to_semantic.insert(ident, SemanticId::Expr(call_id));
+            self.syntax_store
+                .range_to_semantic
+                .insert(ident, SemanticId::Expr(call_id));
         };
         call_id
+    }
+
+    fn alloc_wrapper_expr(&mut self, expr: Expr, node: Node) -> ExprId {
+        let expr_id = self.syntax_store.exprs.alloc(expr);
+        self.syntax_store
+            .expr_ranges
+            .insert(expr_id, NodeRange::from(&node));
+        expr_id
     }
 }
 
 impl TypeBuilder for ItemBuilder {
-    fn alloc_type(&mut self, ty: TypeName, node: Node) -> TypeId {
-        let seg_count = ty.seg_count();
-        let ty_id = self.expr_store.types.alloc(ty);
-        let ptr = NodeRange::from(&node);
-        self.expr_store.range_to_semantic.insert(ptr, SemanticId::Type(ty_id));
-        if seg_count > 1 {
-            self.alloc_segments(node, ty_id);
-        }
-        ty_id
-    }
-
-    fn alloc_segments(&mut self, node: Node, ty: TypeId) {
-        for (seg, child) in node.named_children(&mut node.walk()).filter(|n| n.kind_id() == NodeKind::IDENTIFIER).enumerate() {
-            self.expr_store.range_to_semantic.insert(NodeRange::from(&child), SemanticId::TypeSegment { ty, segment: seg as u8 });
-        }
+    fn alloc_type(&mut self, ty: TyName, node: Node) -> TyNameId {
+        let ty_ref_id = self.syntax_store.types.alloc(ty);
+        let range = NodeRange::from(&node);
+        self.syntax_store.ty_ref_ranges.insert(ty_ref_id, range);
+        self.syntax_store
+            .range_to_semantic
+            .insert(range, SemanticId::Type(ty_ref_id));
+        ty_ref_id
     }
 }
 
 impl ItemBuilder {
-    pub fn new(root: AstNode) -> Self {
+    pub fn new(root: AstNode, file: FileId, ast_id_map: Arc<AstIdMap>) -> Self {
         Self {
             root,
-            expr_store: ExprStore::default(),
+            file,
+            ast_id_map,
+            syntax_store: SyntaxStore::default(),
         }
     }
 
-       ////////////////////////////////////////////////////////////////////////////////////////////////////////
-     ///                                  MARK: IMPORT BUILDER                                             ///
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    
+    // ── Import Builder ───────────────────────────────────────────────────
+
     pub fn build_import(&mut self, import: &Import) -> ImportData {
-        let import_type = import.import_type();
-        let import_node = import.raw().node();
-        match import_type {
-            ImportType::Named { symbols } => {
+        let import_kind = import.import_kind();
+        let import_node = import.to_node_ref().node();
+        match import_kind {
+            ImportKind::Named { symbols } => {
                 let mut name_cursor = import_node.walk();
                 let mut alias_cursor = import_node.walk();
-                let mut names = import.raw().node().children_by_field_id(FieldKind::IMPORT_NAME.into(), &mut name_cursor);
-                let mut aliases = import.raw().node().children_by_field_id(FieldKind::ALIAS.into(), &mut alias_cursor);
+                let mut names = import
+                    .to_node_ref()
+                    .node()
+                    .children_by_field_id(FieldKind::IMPORT_NAME.into(), &mut name_cursor);
+                let mut aliases = import
+                    .to_node_ref()
+                    .node()
+                    .children_by_field_id(FieldKind::ALIAS.into(), &mut alias_cursor);
                 for symbol in symbols {
                     let expr = if let Some(alias) = symbol.alias {
                         let alias_node = aliases.next().unwrap();
@@ -253,96 +300,148 @@ impl ItemBuilder {
                     let name_node = names.next().unwrap();
                     self.alloc_expr(expr, name_node);
                 }
-            },
-            ImportType::Namespace { alias } => {
+            }
+            ImportKind::Namespace { alias } => {
                 let expr = Expr::Ident(alias);
-                let node = import_node.child_by_field_id(FieldKind::ALIAS.into()).unwrap();
+                let node = import_node
+                    .child_by_field_id(FieldKind::ALIAS.into())
+                    .unwrap();
                 self.alloc_expr(expr, node);
-
-            },
-            ImportType::Full => {}//only has path
+            }
+            ImportKind::Full => {} //only has path
         };
 
-        let node = import_node.child_by_field_id(FieldKind::SOURCE.into()).unwrap();
-        let path = import.raw().text_by_range(node.byte_range()).trim_matches(['"', '\'']);
+        let node = import_node
+            .child_by_field_id(FieldKind::SOURCE.into())
+            .unwrap();
+        let path = import
+            .to_node_ref()
+            .text_by_range(node.byte_range())
+            .trim_matches(['"', '\'']);
         let expr = Expr::Path(path.into());
         self.alloc_expr(expr, node);
 
-        ImportData { expr_store: mem::take(&mut self.expr_store) }
+        ImportData {
+            syntax_store: mem::take(&mut self.syntax_store),
+        }
     }
 
+    // ── Variable Builder ─────────────────────────────────────────────────
 
-
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                MARK: VARIABLE BUILDER                                             ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-    
     pub fn build_var(&mut self, var: &Var) -> VarData {
-        let node = var.raw().node();
+        let node = var.to_node_ref().node();
         let mut name = Name::default();
+        let mut range = NodeRange::from(&node); //just a placeholder
         let mut vis = Visibility::default();
-        let mut kind = VariableKind::State;
-        let mut type_name = None;
+        let mut vis_range = None;
+        let mut override_specifier = None;
+        let mut kind = VariableKind::StateVariable;
+        let mut ty_ref = None;
         let mut init = None;
         for child in node.children(&mut node.walk()) {
             match child.kind_id().into() {
-                NodeKind::TYPE_NAME => type_name = self.lower_type(child),
+                NodeKind::TYPE_NAME => ty_ref = self.lower_type(child),
                 NodeKind::CONSTANT => kind = VariableKind::Const,
                 NodeKind::IMMUTABLE => kind = VariableKind::Immutable,
-                NodeKind::VISIBILITY => vis = Visibility::parse(self.root().text_by_range(child.byte_range()).trim()),
+                NodeKind::VISIBILITY => {
+                    vis = Visibility::parse(self.root().text_by_range(child.byte_range()).trim());
+                    vis_range = Some(NodeRange::from(&child));
+                }
+                NodeKind::OVERRIDE_SPECIFIER => {
+                    override_specifier = Some(self.lower_override_specifier(child));
+                }
                 NodeKind::IDENTIFIER => {
                     self.lower_expr(child);
                     name = self.root.text_by_range(child.byte_range()).trim().into();
+                    range = NodeRange::from(&child);
                 }
-                NodeKind::EXPRESSION => { init = self.lower_expr(child); },
+                NodeKind::EXPRESSION => {
+                    init = self.lower_expr(child);
+                }
                 _ => {}
             }
         }
         VarData {
             name,
-            type_name: type_name.unwrap(),
+            ty_ref: ty_ref.unwrap(),
             vis,
+            vis_range,
+            override_specifier,
             kind,
-            loc: if kind == VariableKind::State {Location::Storage} else {Location::Stack},
+            loc: if kind == VariableKind::StateVariable {
+                Location::Storage(RefKind::Reference)
+            } else {
+                Location::Stack
+            },
+            range,
             init,
-            expr_store: std::mem::take(&mut self.expr_store),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                MARK: STRUCT BUILDER                                               ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-    
+    fn lower_override_specifier(&mut self, node: Node) -> OverrideSpecifier {
+        let range = NodeRange::from(&node);
+        if !node
+            .children(&mut node.walk())
+            .any(|child| child.kind_id() == NodeKind::LPAREN)
+        {
+            return OverrideSpecifier::Bare { range };
+        }
+        let paths = node
+            .named_children(&mut node.walk())
+            .filter(|path| path.kind_id() == NodeKind::USER_DEFINED_TYPE)
+            .map(|path| OverridePath {
+                ty_ref: self.lower_type(path),
+                range: NodeRange::from(&path),
+            })
+            .collect();
+        OverrideSpecifier::List { paths, range }
+    }
+
+    // ── Struct Builder ───────────────────────────────────────────────────
+
     pub fn build_struct(&mut self, strukt: &Struct) -> StructData {
-        let node = strukt.raw().node();
+        let node = strukt.to_node_ref().node();
         let name = strukt.name().unwrap_or_default();
         let mut fields = Arena::new();
 
-        node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
+        node.child_by_field_id(FieldKind::NAME.into())
+            .map(|n| self.lower_expr(n));
 
         if let Some(body) = node.child_by_field_id(FieldKind::BODY.into()) {
             for member in body.named_children(&mut body.walk()) {
                 match member.kind_id().into() {
                     NodeKind::STRUCT_MEMBER => {
-                        let Some((name, range)) = member
-                            .child_by_field_id(FieldKind::NAME.into())
-                            .map(|n| {
-                                (self.root().text_by_range(n.byte_range()).trim().into(), NodeRange::from(&n))
-                            }) else {continue;};
+                        let Some((name, range)) =
+                            member.child_by_field_id(FieldKind::NAME.into()).map(|n| {
+                                (
+                                    self.root().text_by_range(n.byte_range()).trim().into(),
+                                    NodeRange::from(&n),
+                                )
+                            })
+                        else {
+                            continue;
+                        };
 
-                        let Some(type_name) = member
+                        let Some(ty_ref) = member
                             .child_by_field_id(FieldKind::TYPE.into())
                             .and_then(|ty| self.lower_type(ty))
-                            else {continue;};
+                        else {
+                            continue;
+                        };
 
                         let field_id = fields.alloc(Field {
                             name,
-                            type_name,
+                            ty_ref,
                             range: NodeRange::from(&member),
                         });
 
-                        self.expr_store.range_to_semantic.insert(NodeRange::from(&member), SemanticId::Field(field_id));
-                        self.expr_store.range_to_semantic.insert(range, SemanticId::Field(field_id));
+                        self.syntax_store
+                            .range_to_semantic
+                            .insert(NodeRange::from(&member), SemanticId::Field(field_id));
+                        self.syntax_store
+                            .range_to_semantic
+                            .insert(range, SemanticId::Field(field_id));
                     }
                     _ => {}
                 }
@@ -352,20 +451,19 @@ impl ItemBuilder {
         StructData {
             name,
             fields,
-            expr_store: std::mem::take(&mut self.expr_store),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                MARK: ENUM BUILDER                                                 ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-    
+    // ── Enum Builder ─────────────────────────────────────────────────────
+
     pub fn build_enum(&mut self, enum_: &Enum) -> EnumData {
-        let node = enum_.raw().node();
+        let node = enum_.to_node_ref().node();
         let name = enum_.name().unwrap_or_default();
         let mut variants = Arena::new();
 
-        node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
+        node.child_by_field_id(FieldKind::NAME.into())
+            .map(|n| self.lower_expr(n));
 
         if let Some(body) = node.child_by_field_id(FieldKind::BODY.into()) {
             for value in body.named_children(&mut body.walk()) {
@@ -376,7 +474,9 @@ impl ItemBuilder {
                         name,
                         range: NodeRange::from(&value),
                     });
-                    self.expr_store.range_to_semantic.insert(NodeRange::from(&value), SemanticId::Variant(variant_id));
+                    self.syntax_store
+                        .range_to_semantic
+                        .insert(NodeRange::from(&value), SemanticId::Variant(variant_id));
                 }
             }
         }
@@ -384,58 +484,58 @@ impl ItemBuilder {
         EnumData {
             name,
             variants,
-            expr_store: std::mem::take(&mut self.expr_store),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                MARK: EVENT BUILDER                                                ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-
+    // ── Event Builder ────────────────────────────────────────────────────
 
     pub fn build_event(mut self, event: &Event) -> EventData {
-        let node = event.raw().node();
+        let node = event.to_node_ref().node();
         let name = event.name().unwrap_or_default();
         let mut parameters = Arena::new();
+        let mut anonymous = false;
 
-        node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
+        node.child_by_field_id(FieldKind::NAME.into())
+            .map(|n| self.lower_expr(n));
 
-        for child in node.named_children(&mut node.walk()) {
+        for child in node.children(&mut node.walk()) {
             match child.kind_id().into() {
                 NodeKind::EVENT_PARAMETER => {
                     self.build_parameter(&mut parameters, child);
-                }   
-                _ => {}
+                }
+                _ => {
+                    // `anonymous` is an unnamed token, matched by kind text.
+                    if child.kind() == "anonymous" {
+                        anonymous = true;
+                    }
+                }
             }
         }
 
         EventData {
             name,
+            anonymous,
             parameters,
-            expr_store: std::mem::take(&mut self.expr_store),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
-
-
-
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                MARK: ERROR BUILDER                                                ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-
+    // ── Error Builder ────────────────────────────────────────────────────
 
     pub fn build_error(mut self, error: &Error) -> ErrorData {
-        let node = error.raw().node();
+        let node = error.to_node_ref().node();
         let name = error.name().unwrap_or_default();
         let mut parameters = Arena::new();
 
-        node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
+        node.child_by_field_id(FieldKind::NAME.into())
+            .map(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
             match child.kind_id().into() {
                 NodeKind::ERROR_PARAMETER => {
                     self.build_parameter(&mut parameters, child);
-                }   
+                }
                 _ => {}
             }
         }
@@ -443,90 +543,120 @@ impl ItemBuilder {
         ErrorData {
             name,
             parameters,
-            expr_store: std::mem::take(&mut self.expr_store),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
-
-
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                MARK: MODIFIER BUILDER                                             ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-
+    // ── Modifier Builder ─────────────────────────────────────────────────
 
     pub fn build_modifier(mut self, modifier: &Modifier) -> ModifierData {
-        let node = modifier.raw().node();
+        let node = modifier.to_node_ref().node();
         let name = modifier.name().unwrap_or_default();
+        let mut marked_virtual = false;
+        let mut override_specifier = None;
         let mut parameters = Arena::new();
 
-        node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
+        // node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
             match child.kind_id().into() {
                 NodeKind::PARAMETER => {
                     self.build_parameter(&mut parameters, child);
-                }   
+                }
+                NodeKind::VIRTUAL => marked_virtual = true,
+                NodeKind::OVERRIDE_SPECIFIER => {
+                    override_specifier = Some(self.lower_override_specifier(child));
+                }
                 _ => {}
             }
         }
 
         ModifierData {
             name,
+            is_virtual: marked_virtual,
+            override_specifier,
+            has_body: node.child_by_field_id(FieldKind::BODY.into()).is_some(),
             parameters,
-            expr_store: std::mem::take(&mut self.expr_store),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
+    // ── Function Builder ─────────────────────────────────────────────────
 
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                MARK: FUNCTION BUILDER                                             ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-    
     pub fn build_fn(mut self, func: &Function) -> FunctionData {
-        let node = func.raw().node();
+        let node = func.to_node_ref().node();
         let name = func.name().unwrap_or_default();
         let mut vis = Visibility::Internal;
+        let mut vis_range = None;
         let mut mutability = Mutability::NonPayable;
+        let mut is_virtual = false;
+        let mut override_specifier = None;
         let mut parameters = Arena::new();
-        let mut return_parameters = Arena::new();
+        let mut args = vec![];
+        let mut rets = vec![];
 
-        for child in node.named_children(&mut node.walk()) {
+        // node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
+
+        for child in node.children(&mut node.walk()) {
             match child.kind_id().into() {
                 NodeKind::PARAMETER => {
-                    self.build_parameter(&mut parameters, child);
+                    args.push(self.build_parameter(&mut parameters, child));
                 }
                 NodeKind::RETURN_DEFINITION => {
                     for ret_child in child.named_children(&mut child.walk()) {
                         if ret_child.kind_id() == NodeKind::PARAMETER {
-                            self.build_parameter(&mut return_parameters, ret_child);
+                            rets.push(self.build_parameter(&mut parameters, ret_child));
                         }
                     }
                 }
-                NodeKind::VISIBILITY => {
-                    vis =  Visibility::parse(func.raw().text_by_range(child.byte_range()))
+                NodeKind::VISIBILITY | NodeKind::PUBLIC | NodeKind::INTERNAL => {
+                    vis = Visibility::parse(func.to_node_ref().text_by_range(child.byte_range()).trim());
+                    vis_range = Some(NodeRange::from(&child));
                 }
                 NodeKind::STATE_MUTABILITY => {
-                    mutability = Mutability::parse(func.raw().text_by_range(child.byte_range()))
+                    mutability =
+                        Mutability::parse(func.to_node_ref().text_by_range(child.byte_range()).trim());
+                }
+                NodeKind::PAYABLE => mutability = Mutability::Payable, //@NOTE is payable not under mutability in tree?
+                NodeKind::VIRTUAL => is_virtual = true,
+                NodeKind::OVERRIDE_SPECIFIER => {
+                    override_specifier = Some(self.lower_override_specifier(child));
                 }
                 _ => {}
             }
         }
 
+        let args = args
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
+        let rets = rets
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
+
         FunctionData {
             name,
             kind: func.kind(),
             vis,
+            vis_range,
             mutability,
+            is_virtual,
+            override_specifier,
+            has_body: node.child_by_field_id(FieldKind::BODY.into()).is_some(),
             parameters,
-            return_parameters,
-            expr_store: std::mem::take(&mut self.expr_store),
+            args,
+            rets,
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
     fn build_parameter(&mut self, parameters: &mut Arena<Local>, node: Node) -> Option<LocalId> {
         let mut name: Name = "".into();
-        let mut type_name = None;
-        let mut location = Location::default();
+        let mut ty = None;
+        let mut location = None;
         let mut name_range = None;
 
         for child in node.children(&mut node.walk()) {
@@ -535,120 +665,139 @@ impl ItemBuilder {
                     name = self.root().text_by_range(child.byte_range()).trim().into();
                     name_range = Some(NodeRange::from(&child));
                 }
-                NodeKind::TYPE_NAME => type_name = self.lower_type(child),
-                NodeKind::MEMORY => location = Location::Memory,
-                NodeKind::STORAGE => location = Location::Storage,
-                NodeKind::CALLDATA => location = Location::Calldata,
+                NodeKind::TYPE_NAME => {
+                    ty = self.lower_type(child).map(|ty_ref| (ty_ref, child))
+                }
+                NodeKind::MEMORY => location = Some(Location::Memory),
+                NodeKind::STORAGE => location = Some(Location::Storage(RefKind::Pointer)),
+                NodeKind::CALLDATA => location = Some(Location::Calldata),
                 _ => {}
             }
         }
 
-        let Some(type_name) = type_name else {
-            return None;
+        let (ty_ref, ty_node) = ty?;
+        let ty_ref = match location {
+            Some(loc) => self.alloc_type(TyName::Located { ty: ty_ref, loc }, ty_node),
+            None => ty_ref,
         };
+        let parameter_range = NodeRange::from(&node);
+        let local_range = name_range.unwrap_or(parameter_range);
         let local_id = parameters.alloc(Local::new(
             name,
             VariableKind::Parameter,
-            type_name,
-            location,
+            ty_ref,
+            local_range,
             node.start_byte() as ByteOffset,
             None,
         ));
-
-        self.expr_store.range_to_semantic.insert(NodeRange::from(&node), SemanticId::Local(local_id));
+        self.syntax_store
+            .range_to_semantic
+            .insert(parameter_range, SemanticId::Local(local_id));
 
         if let Some(range) = name_range {
-            self.expr_store.range_to_semantic.insert(range, SemanticId::Local(local_id));
+            self.syntax_store
+                .range_to_semantic
+                .insert(range, SemanticId::Local(local_id));
         }
         Some(local_id)
     }
 
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                MARK: CONTRACT BUILDER                                             ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // ── Contract Builder ─────────────────────────────────────────────────
 
     pub fn build_contract(mut self, contract: &Contract) -> ContractData {
-        let node = contract.raw().node();
+        let node = contract.to_node_ref().node();
         let name = contract.name().unwrap_or_default();
+        let is_abstract = node
+            .children(&mut node.walk())
+            .any(|child| child.kind_id() == NodeKind::ABSTRACT);
         let mut bases = Vec::new();
 
-        node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
+        node.child_by_field_id(FieldKind::NAME.into())
+            .map(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
-            if child.kind_id() == NodeKind::INHERITANCE_SPECIFIER {
-                if let Some(base_node) = child.named_children(&mut child.walk())
-                    .find(|n| n.kind_id() == NodeKind::USER_DEFINED_TYPE)
-                {
-                    if let Some(ty_id) = self.lower_type(base_node) {
-                        bases.push(ty_id);
-                    }
-                }
+            if child.kind_id() == NodeKind::INHERITANCE_SPECIFIER
+                && let Some(expr_id) = self.lower_expr(child)
+            {
+                bases.push(expr_id);
             }
         }
 
+        let constructor = contract
+            .members()
+            .into_iter()
+            .find_map(|member| match member {
+                Item::Function(func) if func.kind() == FunctionKind::Constructor => {
+                    self.ast_id_map.id(&func).map(|id| FunctionId {
+                        file: self.file,
+                        id,
+                    })
+                }
+                _ => None,
+            });
+
         ContractData {
             name,
+            is_abstract,
             bases: bases.into_boxed_slice(),
-            expr_store: std::mem::take(&mut self.expr_store),
+            constructor,
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
+    // ── Interface Builder ────────────────────────────────────────────────
 
-     /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                               MARK: INTERFACE BUILDER                                             ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-    
     pub fn build_interface(mut self, interface: &Interface) -> InterfaceData {
-        let node = interface.raw().node();
+        let node = interface.to_node_ref().node();
         let name = interface.name().unwrap_or_default();
         let mut bases = Vec::new();
 
-        node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
+        node.child_by_field_id(FieldKind::NAME.into())
+            .map(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
-            if child.kind_id() == NodeKind::INHERITANCE_SPECIFIER {
-                if let Some(base_node) = child.named_children(&mut child.walk())
-                    .find(|n| n.kind_id() == NodeKind::USER_DEFINED_TYPE)
-                {
-                    if let Some(ty_id) = self.lower_type(base_node) {
-                        bases.push(ty_id);
-                    }
-                }
+            if child.kind_id() == NodeKind::INHERITANCE_SPECIFIER
+                && let Some(expr_id) = self.lower_expr(child)
+            {
+                bases.push(expr_id);
             }
         }
 
         InterfaceData {
             name,
             bases: bases.into_boxed_slice(),
-            expr_store: std::mem::take(&mut self.expr_store),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
+    // ── Library Builder ──────────────────────────────────────────────────
 
-     /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                MARK: LIBRARY  BUILDER                                             ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-    
     pub fn build_library(mut self, library: &Library) -> LibraryData {
         let name = library.name().unwrap_or_default();
 
-        library.raw().node().child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
+        library
+            .to_node_ref()
+            .node()
+            .child_by_field_id(FieldKind::NAME.into())
+            .map(|n| self.lower_expr(n));
 
         LibraryData {
             name,
-            expr_store: std::mem::take(&mut self.expr_store),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
-     /////////////////////////////////////////////////////////////////////////////////////////////////////////
-    ///                                   MARK: UDVT  BUILDER                                             ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
-    
+    // ── Udvt Builder ─────────────────────────────────────────────────────
+
     pub fn build_udvt(mut self, udvt: &Udvt) -> UdvtData {
         let name = udvt.name().unwrap_or_default();
         let underlying = Primitive::parse(&udvt.underlying().unwrap_or_default());
 
-        for node in udvt.raw().node().named_children(&mut udvt.raw().node().walk()) {
+        for node in udvt
+            .to_node_ref()
+            .node()
+            .named_children(&mut udvt.to_node_ref().node().walk())
+        {
             if node.kind_id() == NodeKind::IDENTIFIER {
                 self.lower_expr(node);
             }
@@ -656,23 +805,20 @@ impl ItemBuilder {
                 self.lower_type(node);
             }
         }
-        
+
         UdvtData {
             name,
             underlying,
-            expr_store: std::mem::take(&mut self.expr_store),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
-
-      ////////////////////////////////////////////////////////////////////////////////////////////////////////
-     ///                                   MARK: USING  BUILDER                                           ///
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // ── Using Builder ────────────────────────────────────────────────────
 
     pub fn build_using(mut self, using: &Using) -> UsingData {
         let mut sources = vec![];
         let mut target = None;
-        let node = using.raw().node();
+        let node = using.to_node_ref().node();
 
         for child in node.named_children(&mut node.walk()) {
             match child.kind_id().into() {
@@ -688,11 +834,12 @@ impl ItemBuilder {
                 _ => {}
             }
         }
-        UsingData { 
-            target, 
+        UsingData {
+            target,
             sources: sources.into_boxed_slice(),
-            global: using.is_global(), 
-            expr_store: std::mem::take(&mut self.expr_store), 
+            global: using.is_global(),
+            syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 }
+

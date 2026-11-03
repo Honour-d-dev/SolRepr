@@ -1,11 +1,11 @@
-#![allow(unused)]
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
+use lsp_types::Position;
 use lsp_types::Url;
 use ropey::Rope;
-use serde::Serialize;
-use lsp_types::{Position};
+use tree_sitter::Point;
 
+use crate::workspace::Remapping;
 
 pub(crate) fn canonicalize_path(path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
     path.canonicalize_utf8()
@@ -31,8 +31,8 @@ pub(crate) fn to_utf8path(uri: &Url) -> anyhow::Result<Utf8PathBuf> {
     let path = uri
         .to_file_path()
         .map_err(|_| anyhow::anyhow!("failed to convert URI to path"))?;
-    let path = Utf8PathBuf::from_path_buf(path)
-        .map_err(|_| anyhow::anyhow!("path is not valid UTF-8"))?;
+    let path =
+        Utf8PathBuf::from_path_buf(path).map_err(|_| anyhow::anyhow!("path is not valid UTF-8"))?;
     Ok(normalize_path(&path))
 }
 
@@ -40,18 +40,34 @@ pub(crate) fn to_url(path: &Utf8Path) -> Url {
     Url::from_file_path(path).expect("failed to convert path to url")
 }
 
+/// A document's path, or `None` when the client used a non-`file:` URI.
+/// Notifications have no reply, so this only logs.
+pub(crate) fn document_path(uri: &lsp_types::Url) -> Option<Utf8PathBuf> {
+    match to_utf8path(uri) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            log_info(format!("ignoring non-file document URI {uri}: {error:#}"));
+            None
+        }
+    }
+}
+
 ///Resolves to a new path relative to a base path
-pub(crate) fn resolve_path(base: &Utf8PathBuf, rel_path: impl AsRef<Utf8Path>) -> anyhow::Result<Utf8PathBuf> {
-    let resolved_path = base.parent().context("Error: can't resolve path, base path has no parent")?
+pub(crate) fn resolve_path(
+    base: &Utf8PathBuf,
+    rel_path: impl AsRef<Utf8Path>,
+) -> anyhow::Result<Utf8PathBuf> {
+    let resolved_path = base
+        .parent()
+        .context("Error: can't resolve path, base path has no parent")?
         .join(rel_path);
-    canonicalize_path(&resolved_path)
+    Ok(normalize_path(&resolved_path))
 }
 
 /// Resolves a Solidity import string, checking remappings first, then falling back to relative resolution.
 pub(crate) fn resolve_import(
     base: &Utf8PathBuf,
     import_str: &str,
-    project_root: &Utf8Path,
     remappings: &[Remapping],
 ) -> anyhow::Result<Utf8PathBuf> {
     // Relative imports
@@ -59,57 +75,41 @@ pub(crate) fn resolve_import(
         return resolve_path(base, import_str);
     }
 
-    // Try remappings (longest prefix first to avoid false matches)
-    let mut best_match: Option<(&str, &Utf8Path)> = None;
-    for remapping in remappings {
-        if import_str.starts_with(&remapping.prefix) {
-            if best_match.map_or(true, |(best_prefix, _)| remapping.prefix.len() > best_prefix.len()) {
-                best_match = Some((&remapping.prefix, remapping.target.as_path()));
-            }
-        }
-    }
+    let best_match = remappings
+        .iter()
+        .filter(|remapping| {
+            import_str.starts_with(&remapping.prefix)
+                && remapping
+                    .context
+                    .as_ref()
+                    .is_none_or(|context| base.starts_with(context))
+        })
+        .max_by_key(|remapping| {
+            (
+                remapping.context.as_ref().map_or(0, |context| context.as_str().len()),
+                remapping.prefix.len(),
+            )
+        });
 
-    if let Some((prefix, target)) = best_match {
-        let suffix = &import_str[prefix.len()..];
-        let remap_root = if target.is_absolute() {
-            target.to_path_buf()
-        } else {
-            project_root.join(target)
-        };
-        let resolved = remap_root.join(suffix);
-        let resolved = canonicalize_path(&resolved)
-            .with_context(|| format!("failed to resolve remapped import `{import_str}` via {prefix}={target}"))?;
-        return Ok(resolved);
+    if let Some(remapping) = best_match {
+        let suffix = &import_str[remapping.prefix.len()..];
+        return Ok(normalize_path(&remapping.target.join(suffix)));
     }
 
     // Fallback: try relative resolution against the base file's parent
     resolve_path(base, import_str)
 }
 
-pub(crate) fn get_rope_idx(file: &Rope, pos: Position) -> usize {
-    //lsp characters are utf16 code units while rope functions operate on "chars" (unicode code points)
-    // so non-BMP characters (like emojis) will have length 2 in utf16 but length 1 in rope
-    let mut utf16_count = 0usize;
-    let mut char_count = 0usize;
-
-    for ch in file.line(pos.line as usize).chars() {
-        if ch == '\n' || utf16_count >= pos.character as usize {
-            break;
-        }
-        utf16_count += ch.len_utf16(); // key conversion step
-        char_count += 1;
-    }
-    
-    file.line_to_char(pos.line as usize) + char_count
-}
-
-
 #[inline]
 pub(crate) fn to_rope_idx(file: &Rope, pos: Position) -> usize {
-    file.line_to_char(pos.line as usize) + file.line(pos.line as usize).utf16_cu_to_char(pos.character as usize)
+    file.line_to_char(pos.line as usize)
+        + file
+            .line(pos.line as usize)
+            .utf16_cu_to_char(pos.character as usize)
 }
 
 #[inline]
+#[allow(unused)]
 pub(crate) fn to_rope_byte_idx(file: &Rope, pos: Position) -> usize {
     let l = file.line(pos.line as usize);
     let c = l.utf16_cu_to_char(pos.character as usize);
@@ -117,105 +117,90 @@ pub(crate) fn to_rope_byte_idx(file: &Rope, pos: Position) -> usize {
 }
 
 #[inline]
+pub(crate) fn byte_to_position(rope: &Rope, byte: usize) -> Position {
+    let byte = byte.min(rope.len_bytes());
+    let line = rope.byte_to_line(byte);
+    let char_index = rope.byte_to_char(byte) - rope.line_to_char(line);
+    let character = rope.line(line).char_to_utf16_cu(char_index);
+    Position {
+        line: line as u32,
+        character: character as u32,
+    }
+}
+
+#[inline]
+#[allow(unused)]
 pub(crate) fn position_to_point(r: &Rope, position: Position) -> Point {
-    Point { row: position.line as usize, column: r.line(position.line as usize).utf16_cu_to_char(position.character as usize) }
+    Point {
+        row: position.line as usize,
+        column: r
+        .line(position.line as usize)
+        .utf16_cu_to_char(position.character as usize),
+    }
 }
 
 #[inline]
-pub(crate) fn char_to_point(r: &Rope, char_idx: usize) -> Point {//assumes shar index is in unicode code points not utf16 code units
+#[allow(unused)]
+pub(crate) fn char_to_point(r: &Rope, char_idx: usize) -> Point {
+    //assumes shar index is in unicode code points not utf16 code units
     let ctl = r.char_to_line(char_idx);
-    Point { row: ctl, column: char_idx - r.line_to_char(ctl) }
+    Point {
+        row: ctl,
+        column: char_idx - r.line_to_char(ctl),
+    }
 }
 
 #[inline]
+#[allow(unused)]
 pub(crate) fn byte_to_point(r: &Rope, byte_idx: usize) -> Point {
     let ctl = r.byte_to_line(byte_idx);
-    Point { row: ctl, column: byte_idx - r.line_to_byte(ctl) }
-}
-
-
-
-#[allow(unused)]
-pub(crate) fn print_tree_old(node: tree_sitter::Node, indentation: usize, source_code: &str) -> String {
-    let indent = "  ".repeat(indentation);
-    let kind = node.kind();
-    let text = &source_code[node.byte_range()];
-    //let snippet = text.lines().next().unwrap_or("").trim();
-
-    //natspec comment is ignored is this from the solidity tree-sitter parser? or where? Its from above line lol
-    let mut result = format!("{}  {}: \"{}\"\n", indent, kind, text);
-
-    for child in node.children(&mut node.walk()) {
-        result.push_str(&print_tree_old(child, indentation + 1, source_code));
+    Point {
+        row: ctl,
+        column: byte_idx - r.line_to_byte(ctl),
     }
-
-    result
 }
 
-
-#[allow(unused)]
-pub(crate) fn print_tree(cursor: &mut tree_sitter::TreeCursor, source_code: &str, indentation: usize) -> String {
+pub(crate) fn print_tree(
+    cursor: &mut tree_sitter::TreeCursor,
+    source_code: &str,
+    indentation: usize,
+) -> String {
     let indent = "  ".repeat(indentation);
     let kind = cursor.node().kind();
     let text = &source_code[cursor.node().byte_range()].replace('\n', &format!("\n {indent} "));
 
-    let mut result = format!("\n{indent}{kind}: \"{text}\"");//add field name and id if present so wee see what its about
+    let mut result = format!("\n{indent}{kind}: \"{text}\""); //add field name and id if present so wee see what its about
 
     iterate_children!(cursor, {
         result.push_str(&print_tree(cursor, source_code, indentation + 2));
     });
-    return result;
+    result
 }
 
-#[allow(unused)]
-pub(crate) fn print_named_tree(cursor: &mut tree_sitter::TreeCursor, source_code: &str, indentation: usize) -> String {
-    if !cursor.node().is_named() { return "".to_string(); }
-    let indent = "  ".repeat(indentation);//todo for only named nodes
+pub(crate) fn print_named_tree(
+    cursor: &mut tree_sitter::TreeCursor,
+    source_code: &str,
+    indentation: usize,
+) -> String {
+    if !cursor.node().is_named() {
+        return "".to_string();
+    }
+    let indent = "  ".repeat(indentation); //todo for only named nodes
     let kind = cursor.node().kind();
-
 
     let text = &source_code[cursor.node().byte_range()];
     // dont  print bodies, blocks and statements
-    let mut result = if text.len() > 120 ||kind == "statement" || text.contains("{") {
+    let mut result = if text.len() > 120 || kind == "statement" || text.contains("{") {
         format!("\n{indent}{kind}:")
     } else {
-        text.replace('\n', &format!("\n {indent} "));
-        format!("\n{indent}{kind}: \"{text}\"")//add field name and id if present so wee see what its about
+        let text = text.replace('\n', &format!("\n {indent} "));
+        format!("\n{indent}{kind}: \"{text}\"") //add field name and id if present so wee see what its about
     };
 
     iterate_children!(cursor, {
         result.push_str(&print_named_tree(cursor, source_code, indentation + 2));
     });
-    return result;
-}
-
-#[derive(Serialize)]
-struct AstJsonNode {
-    kind: String,
-    text: Vec<String>,
-    children: Vec<AstJsonNode>,
-}
-
-fn tree_to_json(cursor: &mut tree_sitter::TreeCursor<'_>, source_code: &str) -> AstJsonNode {
-    let node = cursor.node();
-    let text = source_code[node.byte_range()]
-        .split('\n').map(str::to_owned).collect::<Vec<String>>();
-
-    let mut children = Vec::new();
-    iterate_children!(cursor, {
-        children.push(tree_to_json(cursor, source_code));
-    });
-
-    AstJsonNode {
-        kind: node.kind().to_string(),
-        text,
-        children,
-    }
-}
-
-pub(crate) fn print_tree_json(node: tree_sitter::Node<'_>, source_code: &str) -> anyhow::Result<String> {
-    serde_json::to_string_pretty(&tree_to_json(&mut node.walk(), source_code))
-        .context("failed to serialize tree as JSON")
+    result
 }
 
 pub(crate) fn log_info(message: impl Into<String>) {
@@ -254,10 +239,156 @@ macro_rules! iterate_children {
 }
 
 pub(crate) use iterate_children;
-use tree_sitter::Point;
-
-use crate::workspace::Remapping;
-
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+
+    #[test]
+    fn test_print_tree() {
+        //To run test:
+        //TESTPATH=/path/to/sol/file.sol cargo test test_print_tree_counter_user
+
+        let source = r#"// SPDX-License-Identifier: UNLICENSED
+        pragma solidity ^0.8.30;
+
+        contract A is B {
+
+            function testD(string memory s) external returns (string storage, bytes memory b) {
+               this.
+            }
+
+            function functionPointer() external view returns (uint256) {
+                function(uint256) internal pure returns (uint256) fn = this.identity;
+                return fn(1);
+            }
+
+            function identity(uint256 value) external pure returns (uint256) {
+                return value;
+            }
+        }"#;
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_solidity::LANGUAGE.into())
+            .expect("failed to set language");
+        let tree = parser.parse(source, None).expect("failed to parse");
+
+        let output = print_named_tree(&mut tree.root_node().walk(), source, 0);
+        assert!(!output.is_empty());
+        println!("{}", output);
+    }
+
+    #[test]
+    fn test_print_completion_context_trees() {
+        let cases = [
+            ("this_dot", "contract A { function f() { this.token. } }"),
+            ("msg_dot", "contract A { function f() { msg. } }"),
+            (
+                "token_dot",
+                "contract A { function f(IERC20 token) { token. } }",
+            ),
+            (
+                "cast_dot",
+                "contract A { function f(address token) { token.IERC20(token)..some } }",
+            ),
+            (
+                "emit",
+                "contract A { event E(); function f() { emit E(); } }",
+            ),
+            (
+                "emit_incomplete",
+                "contract A { event E(); function f() { emit } }",
+            ),
+            (
+                "revert",
+                "contract A { error E(); function f() { revert E(); } }",
+            ),
+            (
+                "revert_incomplete",
+                "contract A { error E(); function f() { revert } }",
+            ),
+            (
+                "type",
+                "contract A { function f() public returns (uint256) { return 0; } }",
+            ),
+            (
+                "type_incomplete",
+                "contract A { function f() public returns ( { return 0; } }",
+            ),
+            (
+                "expression",
+                "contract A { function f(uint256 value) { value; } }",
+            ),
+            (
+                "expression_incomplete",
+                "contract A { function f(uint256 value) { value + } }",
+            ),
+            (
+                "call_incomplete",
+                "contract A { function f(uint256 value) { foo( } }",
+            ),
+            ("item_list", "contract A { }"),
+        ];
+
+        for (name, source) in cases {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_solidity::LANGUAGE.into())
+                .expect("failed to set language");
+            let tree = parser.parse(source, None).expect("failed to parse");
+            let output = print_named_tree(&mut tree.root_node().walk(), source, 0);
+            assert!(!output.is_empty(), "empty AST for {name}");
+            println!("--- {name} ---\n{output}");
+        }
+    }
+
+    #[test]
+    fn context_remapping_wins_only_for_importers_in_its_context() {
+        let root_remapping = Remapping {
+            context: None,
+            prefix: "@openzeppelin/contracts/".to_string(),
+            target: Utf8PathBuf::from("/workspace/lib/openzeppelin-contracts/contracts"),
+        };
+        let nested_remapping = Remapping {
+            context: Some(Utf8PathBuf::from(
+                "/workspace/lib/openzeppelin-contracts-upgradeable",
+            )),
+            prefix: "@openzeppelin/contracts/".to_string(),
+            target: Utf8PathBuf::from(
+                "/workspace/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts",
+            ),
+        };
+        let remappings = [root_remapping, nested_remapping];
+        let import = "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+
+        let nested = resolve_import(
+            &Utf8PathBuf::from(
+                "/workspace/lib/openzeppelin-contracts-upgradeable/contracts/ERC721.sol",
+            ),
+            import,
+            &remappings,
+        )
+        .unwrap();
+        assert_eq!(
+            nested,
+            Utf8PathBuf::from(
+                "/workspace/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/token/ERC721/IERC721.sol"
+            )
+        );
+
+        let root = resolve_import(
+            &Utf8PathBuf::from("/workspace/src/MyNFT.sol"),
+            import,
+            &remappings,
+        )
+        .unwrap();
+        assert_eq!(
+            root,
+            Utf8PathBuf::from(
+                "/workspace/lib/openzeppelin-contracts/contracts/token/ERC721/IERC721.sol"
+            )
+        );
+    }
+}

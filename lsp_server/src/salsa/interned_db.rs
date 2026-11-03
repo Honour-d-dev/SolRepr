@@ -1,5 +1,3 @@
-
-//@TODO unify the ids. might use this directly in the defmaps
 use crate::ast;
 use crate::hir::body_map::BodyOwnerId;
 use crate::ir::def_map::DefId;
@@ -7,7 +5,7 @@ use crate::ir::def_map::DefId;
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Import<'db> {
-    pub id: ast::ImportId
+    pub id: ast::ImportId,
 }
 
 #[derive(PartialEq, Eq, Clone, Hash, Debug)]
@@ -19,92 +17,91 @@ pub enum DefWithBasesId {
 #[salsa::interned]
 #[derive(Debug)]
 pub struct DefWithBases<'db> {
-    pub id: DefWithBasesId
+    pub id: DefWithBasesId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct BodyOwner<'db> {
-    pub id: BodyOwnerId
+    pub id: BodyOwnerId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Contract<'db> {
-    pub id: ast::ContractId
+    pub id: ast::ContractId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Interface<'db> {
-    pub id: ast::InterfaceId
+    pub id: ast::InterfaceId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Library<'db> {
-    pub id: ast::LibraryId
+    pub id: ast::LibraryId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Function<'db> {
-    pub id: ast::FunctionId
+    pub id: ast::FunctionId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Modifier<'db> {
-    pub id: ast::ModifierId
+    pub id: ast::ModifierId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Struct<'db> {
-    pub id: ast::StructId
+    pub id: ast::StructId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Event<'db> {
-    pub id: ast::EventId
+    pub id: ast::EventId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Enum<'db> {
-    pub id: ast::EnumId
+    pub id: ast::EnumId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Error<'db> {
-    pub id: ast::ErrorId
+    pub id: ast::ErrorId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Var<'db> {
-    pub id: ast::VarId
+    pub id: ast::VarId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Udvt<'db> {
-    pub id: ast::UdvtId
+    pub id: ast::UdvtId,
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Using<'db> {
-    pub id: ast::UsingId
+    pub id: ast::UsingId,
 }
-
 
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Id {
-    pub id: DefId
+    pub id: DefId,
 }
 
 // pub enum DefId {
@@ -115,7 +112,3 @@ pub struct Id {
 //     Struct(Struct),
 //     Modifier(Modifier)
 // }
-
-
-
-

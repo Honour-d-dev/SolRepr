@@ -97,13 +97,69 @@ export async function activate(context: vscode.ExtensionContext) {
   // Registers a custom URI scheme so that view commands can display
   // output in read-only virtual files.
   const provider: vscode.TextDocumentContentProvider = {
+    onDidChange: virtualDocChanges.event,
+
     provideTextDocumentContent(uri: vscode.Uri): string {
       return virtualDocs.get(uri.toString()) ?? "";
     },
   };
   context.subscriptions.push(
+    virtualDocChanges,
     vscode.workspace.registerTextDocumentContentProvider(VIRTUAL_SCHEME, provider)
   );
+
+  // ── Ignored library dimming ───────────────────────────────────────
+  // The server reports library roots the package graph deduplicated out
+  // of the compilation unit in `initializeResult.capabilities.experimental
+  // .ignoredRoots`. A file decoration provider dims them in the explorer
+  const experimental = client.initializeResult?.capabilities.experimental as | { ignoredRoots?: string[] } | undefined;
+  const ignoredRoots = (experimental?.ignoredRoots ?? []).map(
+    (uri) => vscode.Uri.parse(uri).fsPath
+  );
+
+  const isIgnored = (fsPath: string | undefined): boolean =>
+    fsPath !== undefined &&
+    ignoredRoots.some(
+      (root) => fsPath === root || fsPath.startsWith(root + path.sep)
+    );
+
+  context.subscriptions.push(
+    vscode.window.registerFileDecorationProvider({
+      provideFileDecoration(uri) {
+        if (!isIgnored(uri.fsPath)) {
+          return undefined;
+        }
+        return {
+          color: new vscode.ThemeColor("list.deemphasizedForeground"),
+          tooltip: "Deduplicated dependency copy — outside the compilation unit",
+          propagate: true,
+        };
+      },
+    })
+  );
+
+  // Explorer dimming only covers the tree — an opened ignored file gets a
+  // status bar marker instead, the same signal rust-analyzer uses for files
+  // outside the project model.
+  const ignoredStatus = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left
+  );
+  ignoredStatus.text = "$(exclude) Outside compilation unit";
+  ignoredStatus.tooltip =
+    "This file is under a deduplicated dependency copy — the server provides no analysis for it.";
+  context.subscriptions.push(ignoredStatus);
+
+  const refreshIgnoredStatus = () => {
+    if (isIgnored(vscode.window.activeTextEditor?.document.uri.fsPath)) {
+      ignoredStatus.show();
+    } else {
+      ignoredStatus.hide();
+    }
+  };
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(refreshIgnoredStatus)
+  );
+  refreshIgnoredStatus();
 
   // ── View HIR command ──────────────────────────────────────────────
   // Sends a custom `solidity/viewHir` request with the user's selection
@@ -130,6 +186,8 @@ export async function activate(context: vscode.ExtensionContext) {
 /// Documents using this scheme are in-memory only — no file on disk,
 /// no "save changes?" prompt on close.
 const VIRTUAL_SCHEME = "solidity-lsp";
+
+const virtualDocChanges = new vscode.EventEmitter<vscode.Uri>();
 
 /// In-memory store of virtual document contents, keyed by URI.
 const virtualDocs = new Map<string, string>();
@@ -173,6 +231,7 @@ async function sendViewRequest(
     virtualDocs.set(uri.toString(), content);
 
     const doc = await vscode.workspace.openTextDocument(uri);
+    virtualDocChanges.fire(uri);
     await vscode.window.showTextDocument(doc, {
       viewColumn: vscode.ViewColumn.Beside,
       preview: false,

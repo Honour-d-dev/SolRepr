@@ -102,26 +102,63 @@ async function activate(context) {
     }
     // ── Virtual document provider ─────────────────────────────────────
     // Registers a custom URI scheme so that view commands can display
-    // output in read-only virtual documents — no file on disk, no
-    // "save changes?" prompt on close. This is the same approach
-    // rust-analyzer uses for macro expansion viewing.
+    // output in read-only virtual files.
     const provider = {
+        onDidChange: virtualDocChanges.event,
         provideTextDocumentContent(uri) {
             return virtualDocs.get(uri.toString()) ?? "";
         },
     };
-    context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(VIRTUAL_SCHEME, provider));
+    context.subscriptions.push(virtualDocChanges, vscode.workspace.registerTextDocumentContentProvider(VIRTUAL_SCHEME, provider));
+    // ── Ignored library dimming ───────────────────────────────────────
+    // The server reports library roots the package graph deduplicated out
+    // of the compilation unit in `initializeResult.capabilities.experimental
+    // .ignoredRoots`. A file decoration provider dims them in the explorer
+    const experimental = client.initializeResult?.capabilities.experimental;
+    const ignoredRoots = (experimental?.ignoredRoots ?? []).map((uri) => vscode.Uri.parse(uri).fsPath);
+    const isIgnored = (fsPath) => fsPath !== undefined &&
+        ignoredRoots.some((root) => fsPath === root || fsPath.startsWith(root + path.sep));
+    context.subscriptions.push(vscode.window.registerFileDecorationProvider({
+        provideFileDecoration(uri) {
+            if (!isIgnored(uri.fsPath)) {
+                return undefined;
+            }
+            return {
+                color: new vscode.ThemeColor("list.deemphasizedForeground"),
+                tooltip: "Deduplicated dependency copy — outside the compilation unit",
+                propagate: true,
+            };
+        },
+    }));
+    // Explorer dimming only covers the tree — an opened ignored file gets a
+    // status bar marker instead, the same signal rust-analyzer uses for files
+    // outside the project model.
+    const ignoredStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
+    ignoredStatus.text = "$(exclude) Outside compilation unit";
+    ignoredStatus.tooltip =
+        "This file is under a deduplicated dependency copy — the server provides no analysis for it.";
+    context.subscriptions.push(ignoredStatus);
+    const refreshIgnoredStatus = () => {
+        if (isIgnored(vscode.window.activeTextEditor?.document.uri.fsPath)) {
+            ignoredStatus.show();
+        }
+        else {
+            ignoredStatus.hide();
+        }
+    };
+    context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(refreshIgnoredStatus));
+    refreshIgnoredStatus();
     // ── View HIR command ──────────────────────────────────────────────
     // Sends a custom `solidity/viewHir` request with the user's selection
     // range and displays the lowered HIR expression tree in a virtual
-    // read-only document beside the editor.
+    // read-only file.
     context.subscriptions.push(vscode.commands.registerCommand("solidityLsp.viewHir", async () => {
         await sendViewRequest(client, "solidity/viewHir", "viewHir", "hir");
     }));
     // ── View AST command ──────────────────────────────────────────────
     // Sends a custom `solidity/viewAst` request with the user's selection
     // range and displays the raw tree-sitter named AST tree in a virtual
-    // read-only document beside the editor.
+    // read-only file.
     context.subscriptions.push(vscode.commands.registerCommand("solidityLsp.viewAst", async () => {
         await sendViewRequest(client, "solidity/viewAst", "viewAst", "ast");
     }));
@@ -130,6 +167,7 @@ async function activate(context) {
 /// Documents using this scheme are in-memory only — no file on disk,
 /// no "save changes?" prompt on close.
 const VIRTUAL_SCHEME = "solidity-lsp";
+const virtualDocChanges = new vscode.EventEmitter();
 /// In-memory store of virtual document contents, keyed by URI.
 const virtualDocs = new Map();
 /// Shared helper: reads the active editor's selection, sends a custom
@@ -161,6 +199,7 @@ async function sendViewRequest(client, method, label, kind) {
         const uri = vscode.Uri.parse(`${VIRTUAL_SCHEME}:${kind}.${kind === "hir" ? "rs" : "txt"}`);
         virtualDocs.set(uri.toString(), content);
         const doc = await vscode.workspace.openTextDocument(uri);
+        virtualDocChanges.fire(uri);
         await vscode.window.showTextDocument(doc, {
             viewColumn: vscode.ViewColumn.Beside,
             preview: false,

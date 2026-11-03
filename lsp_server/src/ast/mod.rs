@@ -1,11 +1,10 @@
+// `ast::ast` holds the node types; the nesting is the tree-sitter module layout.
+#[allow(clippy::module_inception)]
 pub mod ast;
+pub mod ids;
 pub mod kinds;
-pub mod ast_id;
-pub mod ast_nodes;
+pub mod nodes;
 
 pub use ast::*;
-pub use ast_id::*;
-pub use ast_nodes::*;
-
-
-
+pub use ids::*;
+pub use nodes::*;

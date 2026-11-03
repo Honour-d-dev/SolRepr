@@ -17,7 +17,7 @@ slotmap = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tree-sitter = "0.26.6"
-tree-sitter-solidity = { git = "https://github.com/Honour-d-dev/tree-sitter-solidity.git", rev = "20055bc03de1c708312d947d2633e0fb88a905cd", version = "1.2.13" }
+tree-sitter-solidity = { git = "https://github.com/Honour-d-dev/tree-sitter-solidity.git", rev = "3ba3dd3" }
 salsa = "0.26.2"
 toml = "1.1.2"
 tracing = "0.1"
@@ -28,3 +28,5 @@ parking_lot = "0.12.5"
 triomphe = "0.1.15"
 smallvec = "1.15.2"
 num-bigint = "0.4.6"
+dashmap = "6.2.1"
+glob = "0.3.4"

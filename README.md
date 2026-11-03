@@ -44,8 +44,7 @@ Then open the project (`extension/src/extension.ts`) in VS Code and press `F5` t
 - Hover 👍
 - Goto definition 👍
 - Auto-completion 👍
-
-...up next - Diagnostics.
+- Diagnostics (push) 👍
 
 ### Notice
 Windows pathing and hardhat/hardhat-foundry hybrid projects not fully supported yet.

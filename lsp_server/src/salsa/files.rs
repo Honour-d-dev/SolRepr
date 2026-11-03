@@ -1,83 +1,196 @@
-
-
 use camino::{Utf8Path, Utf8PathBuf};
-use rustc_hash::FxHashMap;
+use dashmap::DashMap;
+use lsp_types::TextDocumentContentChangeEvent;
+use ropey::Rope;
+use rustc_hash::FxBuildHasher;
 use salsa::{Durability, Setter};
 use triomphe::Arc;
 
-use crate::loader::SourceRootBundle;
-use crate::utilities::resolve_import;
-use super::db::{File, FileId, Packages, SourceRoot, SourceRootId};
-use super::root_db::RootDatabase;
+use super::db::{File, FileId, SourceRoot, SourceRootId};
+use super::root_db::RootDb;
+use crate::workspace::{LoadedFile, SourceRoot as WsSourceRoot};
+use crate::utilities::{normalize_path, resolve_import, to_rope_idx};
 
-#[derive(Default)]
+pub type FxDashMap<K, V> = DashMap<K, V, FxBuildHasher>;
+
+#[derive(Clone)]
 pub struct Files {
-    file: FxHashMap<Utf8PathBuf, File>,//TODO use fxDashMaps
-    source_roots: Vec<SourceRoot>,
-    pub(crate) file_source_root: FxHashMap<FileId, SourceRootId>,
+    files: Arc<FxDashMap<Utf8PathBuf, File>>,
+    file_source_root: Arc<FxDashMap<FileId, SourceRootId>>,
+    source_roots: Arc<[SourceRoot]>,
+    /// Roots kept out of the compilation unit — deduplicated library copies
+    /// and dependency dev dirs. Files beneath them get no `File`, no
+    /// diagnostics, and no features.
+    ignored_roots: Arc<[Utf8PathBuf]>,
+}
+
+impl Default for Files {
+    fn default() -> Self {
+        Self {
+            files: Arc::new(FxDashMap::default()),
+            source_roots: Arc::from(Vec::new()),
+            file_source_root: Arc::new(FxDashMap::default()),
+            ignored_roots: Arc::from(Vec::new()),
+        }
+    }
 }
 
 impl Files {
-    pub fn new(db: &mut dyn salsa::Database, roots: Vec<SourceRootBundle>) -> Files {
-        let mut file = FxHashMap::default();
-        let mut file_source_root = FxHashMap::default();
+    pub fn new(
+        db: &mut dyn salsa::Database,
+        roots: Vec<WsSourceRoot<LoadedFile>>,
+        ignored: Vec<Utf8PathBuf>,
+    ) -> Files {
+        let this = Files::default();
         let mut source_roots = Vec::new();
         for root in roots {
-            let is_dependency = root.is_dependency;
             let source_root = SourceRootId::builder(
                 root.root,
                 root.package_id,
                 Arc::from(Vec::new()),
-                is_dependency,
+                root.is_dependency,
             )
             .durability(Durability::HIGH)
             .new(db);
             source_roots.push(source_root);
 
-            let files = root.files.into_iter().map(|f| {
-                let durability = if is_dependency { Durability::HIGH } else { Durability::LOW };
-                let file_text = File::builder(f.text, f.path.clone()).durability(durability).new(db);
-                file.insert(f.path, file_text);
-                file_source_root.insert(file_text, source_root);
-                file_text
-            }).collect::<Vec<_>>();
-
-            source_root.set_files(db)
-                .with_durability(Durability::HIGH)
-                .to(files.into());
+            for file in root.files {
+                this.add_file(db, source_root, file.path, file.text);
+            }
         }
 
-        Files { file, file_source_root, source_roots }
+        Files {
+            source_roots: Arc::from(source_roots),
+            ignored_roots: Arc::from(ignored),
+            ..this
+        }
     }
 
-    pub fn get(&self, path: &Utf8PathBuf) -> Option<File> {
-        self.file.get(path).cloned()
+    /// Creates the salsa `File`, indexes it under `path` and `source_root`,
+    /// and appends it to the root's file list. Dependency files get HIGH
+    /// durability — they don't change during a session.
+    fn add_file(
+        &self,
+        db: &mut dyn salsa::Database,
+        source_root: SourceRootId,
+        path: Utf8PathBuf,
+        text: Rope,
+    ) -> File {
+        let durability = if source_root.is_dependency(db) {
+            Durability::HIGH
+        } else {
+            Durability::LOW
+        };
+        let file = File::builder(text, path.clone())
+            .durability(durability)
+            .new(db);
+        self.files.insert(path.clone(), file);
+        self.file_source_root.insert(file, source_root);
+
+        let mut files = source_root.files(db).to_vec();
+        files.push(file);
+        source_root
+            .set_files(db)
+            .with_durability(Durability::HIGH)
+            .to(files.into());
+        file
     }
 
-    pub fn source_root_for_path(&self, db: &dyn RootDatabase, path: &Utf8Path) -> Option<SourceRootId> {
-        self.source_roots.iter()
+    pub fn file(&self, path: &Utf8PathBuf) -> Option<File> {
+        self.files.get(path).map(|file| *file)
+    }
+
+    pub fn file_source_root(&self, file: FileId) -> Option<SourceRoot> {
+        self.file_source_root.get(&file).map(|root| *root)
+    }
+
+    /// `path` sits under a root kept out of the compilation unit — never
+    /// indexed: no `File`, no source root, no analysis.
+    pub fn is_ignored(&self, path: &Utf8Path) -> bool {
+        self.ignored_roots.iter().any(|root| path.starts_with(root))
+    }
+
+    /// The source root `path` belongs to, or `None` when the path is outside
+    /// the compilation unit
+    pub fn path_source_root(&self, db: &dyn RootDb, path: &Utf8Path) -> Option<SourceRootId> {
+        if self.is_ignored(path) {
+            return None;
+        }
+        self.source_roots
+            .iter()
             .filter(|root| path.starts_with(root.root(db)))
             .max_by_key(|root| root.root(db).components().count())
-            .copied()
+           .copied()
     }
 
-    pub fn insert_file(&mut self, path: Utf8PathBuf, file: File, source_root_id: SourceRootId) {
-        self.file.insert(path, file);
-        self.file_source_root.insert(file, source_root_id);
+    pub fn insert_file(
+        &self,
+        db: &mut dyn RootDb,
+        path: Utf8PathBuf,
+        rope: Rope,
+    ) -> Option<File> {
+        let source_root = self.path_source_root(db, &path)?;
+        Some(self.add_file(db, source_root, path, rope))
     }
 
-    pub fn resolve_to_file(&self, db: &dyn RootDatabase, from: FileId, rel_path: &str) -> Option<FileId> {
-        let source_root = self.file_source_root.get(&from).unwrap();
-        let package = &Packages::get(db).packages(db)[source_root.package_id(db).0];
+    pub fn open_file(
+        &self,
+        db: &mut dyn RootDb,
+        path: Utf8PathBuf,
+        text: String,
+    ) -> Option<File> {
+        let path = normalize_path(&path);
+        let rope = Rope::from_str(&text);
+        if let Some(file) = self.file(&path) {
+            // file already exixst, update with editor version
+            file.set_text(db).to(rope);
+            Some(file)
+        } else {
+            // new file, insert into files and source roots
+            self.insert_file(db, path, rope)
+        }
+    }
+
+    pub fn apply_changes(
+        &self,
+        db: &mut dyn RootDb,
+        path: Utf8PathBuf,
+        changes: Vec<TextDocumentContentChangeEvent>,
+    ) -> Option<File> {
+        let path = normalize_path(&path);
+        let file = self.file(&path)?;
+
+        for change in changes {
+            if let Some(range) = change.range {
+                let mut rope = file.text(db);
+                let start = to_rope_idx(&rope, range.start);
+                let end = to_rope_idx(&rope, range.end);
+                rope.remove(start..end);
+                rope.insert(start, &change.text);
+                file.set_text(db).to(rope);
+            } else {
+                file.set_text(db).to(Rope::from_str(&change.text));
+            }
+        }
+        Some(file)
+    }
+
+    pub fn resolve_to_file(
+        &self,
+        db: &dyn RootDb,
+        from: FileId,
+        rel_path: &str,
+    ) -> Option<FileId> {
+        let source_root = *self.file_source_root.get(&from)?;
+        let package = db.package_config(source_root);
         let resolved_path = resolve_import(
             from.path(db),
             rel_path,
-            &package.root,
-            &package.config.remappings,
+            &package.remappings,
         )
         .ok()?;
-        
-        self.file.get(&resolved_path).copied()
+
+        self.file(&resolved_path)
     }
 }
 

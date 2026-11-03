@@ -1,17 +1,28 @@
+use std::cell::RefCell;
+
+use camino::Utf8Path;
+use tree_sitter::Parser;
 use triomphe::Arc;
 
-use camino::Utf8PathBuf;
-use ropey::Rope;
-use tree_sitter::Tree;
-
-use crate::ast::{Ast, AstIdMap, AstNode};
-use crate::ir::def_map::{Collector, DefMap};
+use super::db::{File, FileId, Packages, Db, SourceRootId};
+use crate::ast::kinds::FieldKind;
+use crate::ast::{Ast, AstIdMap, AstNode, NodeRange};
+use crate::hir::analysis::Analysis;
+use crate::hir::exprs::Name;
+use crate::ir::def_map::{Collector, DefId, DefMap};
 use crate::ir::item_tree::{ItemTree, Lowerer};
 use crate::workspace::Package;
-use super::db::{File, FileId, Packages, SalsaDatabase, SourceRootId};
+
+thread_local! {
+    static PARSER: RefCell<Parser> = RefCell::new({
+        let mut parser = Parser::new();
+        parser.set_language(&tree_sitter_solidity::LANGUAGE.into()).expect("parser set language");
+        parser
+    });
+}
 
 //caching this so we only do it once per revision. but does this means we store 2 copies of all files?
-#[salsa::tracked]//manage lru
+#[salsa::tracked] //manage lru
 pub fn text(db: &dyn salsa::Database, file: File) -> Arc<str> {
     file.text(db).to_string().into()
 }
@@ -19,78 +30,102 @@ pub fn text(db: &dyn salsa::Database, file: File) -> Arc<str> {
 #[salsa::tracked(returns(ref))]
 pub fn package_config(db: &dyn salsa::Database, root: SourceRootId) -> Package {
     let package_id = root.package_id(db);
-    Packages::get(db).packages(db).get(package_id.0).cloned().unwrap()
+    Packages::get(db)
+        .packages(db)
+        .get(package_id.0)
+        .cloned()
+        .unwrap()
 }
 
 #[salsa::tracked]
-pub fn parse(db: &dyn RootDatabase, file: File) -> Arc<Ast> {
+pub fn parse(db: &dyn RootDb, file: File) -> Arc<Ast> {
     tracing::debug!(?file, "parse: cache miss");
-    // !untracked state/data used here to enable incremental reparsing
-    // However, the untracked data is kept in sync with salsa by the Incremental parser.
-    let tree = db.ts_incremental_parse(file);
-    Arc::new(Ast::new(tree, text(db, file)))
+    let source = text(db, file);
+    let tree = PARSER
+        .with(|parser| parser.borrow_mut().parse(source.as_ref(), None))
+        .expect("failed to parse Solidity source");
+    Arc::new(Ast::new(tree, source))
 }
 
 #[salsa::tracked]
-pub fn ast_id_map(db: &dyn RootDatabase, file: File) -> Arc<AstIdMap> {
+pub fn ast_id_map(db: &dyn RootDb, file: File) -> Arc<AstIdMap> {
     tracing::debug!(?file, "ast_id_map: cache miss");
     let ast = parse(db, file);
     Arc::new(AstIdMap::new(&ast.root()))
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn item_tree(db: &dyn RootDatabase, file: File) -> ItemTree {
+pub fn item_tree(db: &dyn RootDb, file: File) -> ItemTree {
     tracing::debug!(?file, "item_tree: cache miss");
     Lowerer::lower(db, file)
 }
 
 #[salsa::tracked]
-pub fn root_def_map(db: &dyn RootDatabase, root: SourceRootId) -> Arc<DefMap> {
+pub fn root_def_map_analysis(db: &dyn RootDb, root: SourceRootId) -> Analysis<DefMap> {
     tracing::debug!(?root, "root_def_map: cache miss");
-    Arc::new(Collector::collect_defmap(db, root))
+    Collector::collect_defmap(db, root)
 }
 
 #[salsa::db]
-pub trait RootDatabase: salsa::Database {
+pub trait RootDb: salsa::Database {
     fn text(&self, file: FileId) -> Arc<str>;
-    fn path(&self, file: FileId) -> &Utf8PathBuf;
-    fn rope(&self, file: FileId) -> Rope;
     fn file_source_root(&self, file: FileId) -> SourceRootId;
     fn package_config(&self, root_id: SourceRootId) -> &Package;
 
-    fn ts_incremental_parse(&self, file: File) -> Tree;
     fn ast(&self, file: File) -> Arc<Ast>;
     fn root(&self, file: File) -> AstNode;
     fn ast_id_map(&self, file: File) -> Arc<AstIdMap>;
     fn item_tree(&self, file: File) -> &ItemTree;
+    fn root_def_map_analysis(&self, root: SourceRootId) -> Analysis<DefMap>;
     fn root_def_map(&self, root: SourceRootId) -> Arc<DefMap>;
+    fn file_def_map(&self, file: File) -> Arc<DefMap>;
     fn resolve_to_file(&self, from: FileId, import_path: &str) -> Option<FileId>;
+    /// `path` sits under a deduplicated library root — outside the
+    /// compilation unit.
+    fn is_ignored_path(&self, path: &Utf8Path) -> bool;
+}
+
+/// A def's declaration node and its file's root — the shared walk behind
+/// `def_name_and_range` and `def_range`. `None` for defs with no AST node.
+fn def_node(db: &dyn RootDb, def: DefId) -> Option<(AstNode, AstNode)> {
+    let (file, ast_id) = def.file_and_id();
+    let ast_id = ast_id?;
+    let root = db.root(file);
+    let node = db.ast_id_map(file).get_node(&root, ast_id)?.clone();
+    Some((root, node))
+}
+
+/// The def's name as written and its range — `None` for unnamed declarations
+/// (fallback, receive, unnamed base) and defs with no AST node. For a display
+/// name that synthesizes for unnamed defs, use `hir_db::def_name`.
+pub fn def_name_and_range(db: &dyn RootDb, def: DefId) -> Option<(Name, NodeRange)> {
+    let (root, node) = def_node(db, def)?;
+    let name_node = node.node().child_by_field_id(FieldKind::NAME.into())?;
+    let name: Name = root.text_by_range(name_node.byte_range()).trim().into();
+    Some((name, NodeRange::from(&name_node)))
+}
+
+/// Where a def's diagnostics anchor: its written name's range when it has one,
+/// else the whole declaration node. Resolved from the AST at report time, so
+/// declaration data carries no ranges.
+pub fn def_range(db: &dyn RootDb, def: DefId) -> Option<NodeRange> {
+    let (_, node) = def_node(db, def)?;
+    let name = node.node().child_by_field_id(FieldKind::NAME.into());
+    Some(NodeRange::from(&name.unwrap_or(node.node())))
 }
 
 #[salsa::db]
-impl RootDatabase for SalsaDatabase {
+impl RootDb for Db {
     fn text(&self, file: FileId) -> Arc<str> {
         text(self, file)
     }
 
-    fn path(&self, file: FileId) -> &Utf8PathBuf {
-        file.path(self)
-    }
-
-    fn rope(&self, file: FileId) -> Rope {
-        file.text(self)
-    }
-
     fn file_source_root(&self, file: FileId) -> SourceRootId {
-        self.files.file_source_root.get(&file).cloned().expect("file has no root")
+        self.file_source_root(file).expect("file has no root")
     }
 
     fn package_config(&self, root: SourceRootId) -> &Package {
         package_config(self, root)
-    }
-
-    fn ts_incremental_parse(&self, file: File) -> Tree {
-        self.parser.lock().parse(self, file)
     }
 
     fn ast(&self, file: File) -> Arc<Ast> {
@@ -109,11 +144,24 @@ impl RootDatabase for SalsaDatabase {
         item_tree(self, file)
     }
 
+    fn root_def_map_analysis(&self, root: SourceRootId) -> Analysis<DefMap> {
+        root_def_map_analysis(self, root)
+    }
+
     fn root_def_map(&self, root: SourceRootId) -> Arc<DefMap> {
-        root_def_map(self, root)
+        self.root_def_map_analysis(root).data
+    }
+
+    fn file_def_map(&self, file: File) -> Arc<DefMap> {
+        let root = self.file_source_root(file).unwrap();
+        self.root_def_map(root)
     }
 
     fn resolve_to_file(&self, from: FileId, rel_path: &str) -> Option<FileId> {
-        self.files.resolve_to_file(self, from, rel_path)
+        self.resolve_to_file(from, rel_path)
+    }
+
+    fn is_ignored_path(&self, path: &Utf8Path) -> bool {
+        self.is_ignored_path(path)
     }
 }

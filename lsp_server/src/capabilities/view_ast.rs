@@ -1,10 +1,10 @@
-
+use anyhow::Context as _;
 use lsp_server::{Request, Response};
 use lsp_types::{Position, TextDocumentIdentifier};
 use tree_sitter::Node;
 
-use crate::ast::{NodeRange};
-use crate::salsa::{RootDatabase, SalsaDb};
+use crate::ast::NodeRange;
+use crate::salsa::{RootDb, Db};
 use crate::utilities::{log_info, print_named_tree, to_utf8path};
 
 /// Custom LSP request: `solidity/viewAst`
@@ -15,66 +15,72 @@ use crate::utilities::{log_info, print_named_tree, to_utf8path};
 /// Returns: `{ content: string }` — the raw tree-sitter named AST tree
 /// for the largest named node(s) fully enclosed by the selection,
 /// produced by `print_named_tree`.
-pub fn view_ast(db: &SalsaDb, request: Request) -> anyhow::Result<Response> {
+pub fn view_ast(db: &Db, request: Request) -> anyhow::Result<Response> {
     let params: ViewAstParams = serde_json::from_value(request.params)?;
     let path = to_utf8path(&params.text_document.uri)?;
-    log_info(format!("viewAst request for {path}"));
 
-    let (file, start_off) = db.convert(&path, params.start);
-    let (_, end_off) = db.convert(&path, params.end);
-    let selection = NodeRange { start: start_off, end: end_off };
+    let (file, start_off) = db
+        .convert(&path, params.start)
+        .context("document is not loaded")?;
+    let (_, end_off) = db
+        .convert(&path, params.end)
+        .context("document is not loaded")?;
+    let selection = NodeRange {
+        start: start_off,
+        end: end_off,
+    };
+    log_info(format!("viewAst request for {path} at {selection:?}"));
 
-    let root = db.root(file);
     let ast = db.ast(file);
+    let root = ast.root();
     let source = ast.source();
 
     // Find the largest named node(s) fully enclosed by the selection.
     // tree-sitter only provides `descendant_for_byte_range` (smallest
     // node *enclosing* the range), so we do a manual top-down walk:
 
-    let result = find_enclosed_node(root.node(), selection)
-        .map(|n| serde_json::json!({ "content": print_named_tree(&mut n.walk(), source, 0) }));
+    // let result = find_enclosed_node(root.node(), selection)
+    //     .map(|n| serde_json::json!({ "content": print_named_tree(&mut n.walk(), source, 0) }));
 
-    
+    let nodes = find_enclosed_nodes(root.node(), selection)
+        .into_iter()
+        .map(|n| print_named_tree(&mut n.walk(), source, 0))
+        .collect::<Vec<_>>()
+        .join("\n");
+    log_info(format!("found {} nodes", nodes.len()));
+
     Ok(Response {
         id: request.id,
-        result,
+        result: Some(serde_json::json!({ "content": nodes })),
         error: None,
     })
 }
-
 
 // ── Node discovery ───────────────────────────────────────────────────
 
 /// Find the largest named nodes whose range is fully contained within
 /// `selection`. Walks top-down; once a node is fully contained, its
 /// children are not visited (they'd be smaller and redundant).
+fn find_enclosed_nodes(node: Node, selection: NodeRange) -> Vec<Node> {
+    let range = NodeRange::from(&node);
 
-
-fn find_enclosed_node(node: Node, selection: NodeRange) -> Option<Node> {
-    let node_start = node.start_byte() as u32;
-    let node_end = node.end_byte() as u32;
-
-    // No overlap at all → skip.
-    if node_end <= selection.start || node_start >= selection.end {
-        return None;
+    if selection.contains(&range) {
+        return vec![node];
     }
 
-    // Fully enclosed → this is a root, don't recurse.
-    if node_start >= selection.start && node_end <= selection.end {
-        return Some(node);
+    // No overlap at all → skip children.
+    if range.end <= selection.start || range.start >= selection.end {
+        return vec![];
     }
 
     // Partially overlapping → recurse into children.
+    let mut nodes = vec![];
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if let Some(node) = find_enclosed_node(child, selection) {
-            return Some(node);
-        }
+        nodes.extend(find_enclosed_nodes(child, selection));
     }
-    None
+    nodes
 }
-
 
 // ── Request type ─────────────────────────────────────────────────────
 
@@ -98,5 +104,3 @@ pub struct ViewAstParams {
     pub start: Position,
     pub end: Position,
 }
-
-
