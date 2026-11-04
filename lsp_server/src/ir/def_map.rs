@@ -447,7 +447,7 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
         match scope.by_name.entry(name.clone()) {
             Entry::Occupied(mut entry) => {
                 let e = entry.get_mut();
-                if e.namespace == ns && ns.is_overloadable() {
+                if e.namespace == ns && ns.is_overloadable() && !is_special_name(&name) {
                     e.defs.push(id);
                 } else {
                     previous = Some(e.defs[0]);
@@ -471,6 +471,12 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
         };
         self.collector.defs.insert(id, def_data);
     }
+}
+
+/// Special functions carry their keyword as their def-map name and are unique
+/// per container: a second one is a redeclaration, not an overload.
+fn is_special_name(name: &Name) -> bool {
+    matches!(name.as_str(), "constructor" | "fallback" | "receive")
 }
 
 /// A named-import symbol that was not found in its dependency during the DFS. The dependency's

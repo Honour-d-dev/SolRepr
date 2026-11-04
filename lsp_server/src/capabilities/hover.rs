@@ -9,13 +9,15 @@ use crate::ast::{
 use crate::hir::body_map::{BodyOwnerId, Local, LocalId};
 use crate::hir::builtins::ParamSchema;
 use crate::hir::exprs::{Expr, ExprId, Literal};
-use crate::hir::item_data::{EnumData, SyntaxStore, Field, FieldId, SemanticId, VariantId};
+use crate::hir::item_data::{EnumData, Field, FieldId, SemanticId, VariantId};
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, Resolution};
 use crate::hir::types::{
     Location, Mutability, RefKind, Ty, TyKind, TyName, VariableKind, Visibility,
 };
 use crate::ir::def_map::DefId;
-use crate::salsa::hir_db::{owner_at, semantic_at};
+use crate::hir::syntax_store::semantic_at;
+use crate::salsa::hir_db::owner_at;
 use crate::salsa::{File, HirDb, RootDb, Db};
 use crate::utilities::{log_info, to_url, to_utf8path};
 

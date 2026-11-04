@@ -4,7 +4,7 @@ use crate::ast::NodeRange;
 use crate::hir::body_map::BodySourceMap;
 use crate::hir::types::VariableKind;
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Literal, Name, UnaryOp};
-use crate::hir::item_data::SyntaxStore;
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{CallableOrigin, Resolution};
 use crate::hir::resolver::Resolver;
 use crate::hir::types::{Primitive, TyKind, Type};

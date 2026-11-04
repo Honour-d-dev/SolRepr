@@ -6,7 +6,8 @@ use crate::hir::builtins::{
     Builtin, BuiltinField, BuiltinFn, BuiltinTy, ParamSchema,
 };
 use crate::hir::exprs::{Literal, Name};
-use crate::hir::item_data::{FieldId, SyntaxStore, VariantId};
+use crate::hir::item_data::{FieldId, VariantId};
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::types::{
     CallKind, EXTERNAL_CALL_OPTIONS, Fn, Type, ViaTypeKind, Visibility, def_to_type,
 };

@@ -212,6 +212,18 @@ define_diagnostics! {
         contract: DefId,
         range: NodeRange,
     },
+    MissingVirtual {
+        declaration: DefId,
+        range: NodeRange,
+    },
+    MissingImplementation {
+        declaration: DefId,
+        range: NodeRange,
+    },
+    VirtualInLibrary {
+        declaration: DefId,
+        range: NodeRange,
+    },
     UnresolvedImport {
         import: ImportId,
         range: NodeRange,
@@ -242,6 +254,9 @@ impl SemanticDiagnostic {
         match self {
             Self::Redeclaration { rejected, .. } => Some(rejected.file()),
             Self::DuplicateMemberSlot { declaration, .. } => Some(declaration.file()),
+            Self::MissingVirtual { declaration, .. }
+            | Self::MissingImplementation { declaration, .. }
+            | Self::VirtualInLibrary { declaration, .. } => Some(declaration.file()),
             Self::InheritedMemberConflict { contract, .. } => Some(contract.file()),
             Self::UnresolvedImport { import, .. } | Self::ImportSymbolNotFound { import, .. } => {
                 Some(import.file)

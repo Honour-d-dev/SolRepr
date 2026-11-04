@@ -415,7 +415,12 @@ fn semantic_diagnostic(db: &dyn HirDb, error: &SemanticDiagnostic) -> Diagnostic
         ),
         SemanticDiagnostic::Redeclaration { name, previous, .. } => (
             DiagnosticCode::Redeclaration,
-            format!("definition with same name already exists: `{name}`"),
+            match name.as_str() {
+                "constructor" => "more than one constructor defined".to_string(),
+                "fallback" => "only one fallback function is allowed".to_string(),
+                "receive" => "only one receive function is allowed".to_string(),
+                _ => format!("definition with same name already exists: `{name}`"),
+            },
             def_range(db, *previous)
                 .map(|range| RelatedDiagnostic {
                     file: previous.file(),
@@ -477,10 +482,16 @@ fn semantic_diagnostic(db: &dyn HirDb, error: &SemanticDiagnostic) -> Diagnostic
             declaration, base, ..
         } => (
             DiagnosticCode::UnimplementedOverride,
-            format!(
-                "implemented function `{}` cannot be overridden by an unimplemented function",
-                def_name(db, *base)
-            ),
+            {
+                let noun = match base {
+                    DefId::Modifier(_) => "modifier",
+                    _ => "function",
+                };
+                format!(
+                    "implemented {noun} `{}` cannot be overridden by an unimplemented {noun}",
+                    def_name(db, *base)
+                )
+            },
             related_declarations(
                 db,
                 &[*declaration],
@@ -516,6 +527,42 @@ fn semantic_diagnostic(db: &dyn HirDb, error: &SemanticDiagnostic) -> Diagnostic
                 "contract `{}` has unimplemented functions and must be marked `abstract`",
                 def_name(db, *contract)
             ),
+            Vec::new(),
+        ),
+        SemanticDiagnostic::MissingVirtual { declaration, .. } => (
+            DiagnosticCode::MissingVirtual,
+            match declaration {
+                DefId::Modifier(_) => format!(
+                    "modifier `{}` has no implementation and must be marked `virtual`",
+                    def_name(db, *declaration)
+                ),
+                _ => format!(
+                    "function `{}` has no implementation and must be marked `virtual`",
+                    def_name(db, *declaration)
+                ),
+            },
+            Vec::new(),
+        ),
+        SemanticDiagnostic::MissingImplementation { declaration, .. } => (
+            DiagnosticCode::MissingImplementation,
+            match db.owner(*declaration) {
+                Some(DefId::Library(_)) => format!(
+                    "library function `{}` must be implemented",
+                    def_name(db, *declaration)
+                ),
+                _ => format!(
+                    "free function `{}` must be implemented",
+                    def_name(db, *declaration)
+                ),
+            },
+            Vec::new(),
+        ),
+        SemanticDiagnostic::VirtualInLibrary { declaration, .. } => (
+            DiagnosticCode::VirtualInLibrary,
+            match declaration {
+                DefId::Modifier(_) => "modifiers in a library cannot be `virtual`".to_string(),
+                _ => "library functions cannot be `virtual`".to_string(),
+            },
             Vec::new(),
         ),
         SemanticDiagnostic::DuplicateMemberSlot {

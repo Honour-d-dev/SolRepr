@@ -3,7 +3,8 @@ use triomphe::Arc;
 
 use crate::hir::body_map::{Local, LocalId};
 use crate::hir::exprs::ExprId;
-use crate::hir::item_data::{FieldId, SemanticId, SyntaxStore, VariantId};
+use crate::hir::item_data::{FieldId, SemanticId, VariantId};
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::Resolution;
 use crate::hir::semantic_errors::SemanticDiagnostic;
 use crate::hir::types::{Mutability, Ty, TyNameId, Type};

@@ -1,7 +1,6 @@
 use std::mem;
 
-use la_arena::{Arena, ArenaMap, Idx};
-use rustc_hash::FxHashMap;
+use la_arena::{Arena, Idx};
 use tree_sitter::Node;
 use triomphe::Arc;
 
@@ -13,6 +12,7 @@ use crate::ast::{
 };
 use crate::hir::body_map::{ByteOffset, Local, LocalId};
 use crate::hir::exprs::{Expr, ExprBuilder, ExprId, Name};
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::types::{
     Location, Mutability, Primitive, RefKind, TyName, TyNameId, TypeBuilder, VariableKind,
     Visibility,
@@ -34,26 +34,6 @@ pub enum SemanticId {
     Type(TyNameId),
 }
 
-#[derive(PartialEq, Eq)]
-pub struct SyntaxStore {
-    pub types: Arena<TyName>,
-    pub exprs: Arena<Expr>,
-    pub expr_ranges: ArenaMap<ExprId, NodeRange>,
-    pub ty_ref_ranges: ArenaMap<TyNameId, NodeRange>,
-    pub range_to_semantic: FxHashMap<NodeRange, SemanticId>,
-}
-
-impl Default for SyntaxStore {
-    fn default() -> Self {
-        Self {
-            types: Arena::new(),
-            exprs: Arena::new(),
-            expr_ranges: ArenaMap::new(),
-            ty_ref_ranges: ArenaMap::new(),
-            range_to_semantic: FxHashMap::default(),
-        }
-    }
-}
 
 #[derive(Default, PartialEq, Eq)]
 pub struct ImportData {
@@ -141,6 +121,10 @@ pub struct ModifierData {
     pub is_virtual: bool,
     pub override_specifier: Option<OverrideSpecifier>,
     pub has_body: bool,
+    /// The body block's range, when the modifier has one.
+    pub body_range: Option<NodeRange>,
+    /// Whether the body contains the `_` placeholder statement.
+    pub has_placeholder: bool,
     pub parameters: Arena<Local>,
     pub syntax_store: SyntaxStore,
 }
@@ -548,6 +532,7 @@ impl ItemBuilder {
     }
 
     // ── Modifier Builder ─────────────────────────────────────────────────
+    
 
     pub fn build_modifier(mut self, modifier: &Modifier) -> ModifierData {
         let node = modifier.to_node_ref().node();
@@ -571,14 +556,28 @@ impl ItemBuilder {
             }
         }
 
+        let body = node.child_by_field_id(FieldKind::BODY.into());
         ModifierData {
             name,
             is_virtual: marked_virtual,
             override_specifier,
-            has_body: node.child_by_field_id(FieldKind::BODY.into()).is_some(),
+            has_body: body.is_some(),
+            body_range: body.map(|body| NodeRange::from(&body)),
+            has_placeholder: body
+                .is_some_and(|body| self.body_has_placeholder(body)),
             parameters,
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
+    }
+
+    fn body_has_placeholder(&self, node: Node) -> bool {
+        if node.kind_id() == NodeKind::EXPRESSION_STATEMENT {
+            return node.named_children(&mut node.walk())
+                .find(|child| child.kind_id() == NodeKind::EXPRESSION)
+                .is_some_and(|expr| self.root().text_by_range(expr.byte_range()).trim() == "_");
+        }
+        node.named_children(&mut node.walk())
+            .any(|child| self.body_has_placeholder(child))
     }
 
     // ── Function Builder ─────────────────────────────────────────────────

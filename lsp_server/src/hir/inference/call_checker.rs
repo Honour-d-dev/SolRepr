@@ -4,7 +4,7 @@ use num_bigint::{BigInt, Sign};
 use crate::ast::{EnumId, NodeRange, StructId};
 use crate::hir::builtins::{BuiltinFn, ParamSchema};
 use crate::hir::exprs::{Expr, ExprId, Name, NamedValues};
-use crate::hir::item_data::SyntaxStore;
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, CallableOrigin, Resolution};
 use crate::hir::semantic_errors::SemanticDiagnostic;
 use crate::hir::types::{
@@ -15,6 +15,7 @@ use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
 
 use super::Inferer;
+use super::return_invalid;
 use super::usage::UsageContext;
 
 // ── Call selection ───────────────────────────────────────────────────────

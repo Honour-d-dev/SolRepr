@@ -122,8 +122,8 @@ fn identity_separates_fallback_from_receive() {
         }
         "#,
     );
-    let first = OverrideSignature::of(&db, member(&db, file, "J", "", 0));
-    let second = OverrideSignature::of(&db, member(&db, file, "J", "", 1));
+    let first = OverrideSignature::of(&db, member(&db, file, "J", "fallback", 0));
+    let second = OverrideSignature::of(&db, member(&db, file, "J", "receive", 0));
     assert!(matches!((first, second), (Some(a), Some(b)) if a != b));
 }
 

@@ -8,7 +8,7 @@ use lsp_types::{Position, TextDocumentIdentifier};
 use crate::ast::NodeRange;
 use crate::hir::body_map::BodyOwnerId;
 use crate::hir::exprs::{Expr, ExprId, Literal};
-use crate::hir::item_data::SyntaxStore;
+use crate::hir::syntax_store::SyntaxStore;
 use crate::ir::def_map::DefId;
 use crate::salsa::{HirDb, Db};
 use crate::utilities::{log_info, to_utf8path};

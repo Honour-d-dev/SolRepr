@@ -15,6 +15,7 @@ pub mod semantic_errors;
 pub mod signatures;
 pub mod types;
 pub mod linearize;
+pub mod syntax_store;
 
 #[cfg(test)]
 pub mod tests;

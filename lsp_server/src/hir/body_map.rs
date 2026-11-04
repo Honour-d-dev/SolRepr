@@ -1,7 +1,8 @@
 use crate::ast::kinds::{FieldKind, NodeKind};
 use crate::ast::{AstNode, FunctionId, ModifierId, NodeRange};
 use crate::hir::exprs::{Expr, ExprBuilder, ExprId, Name};
-use crate::hir::item_data::{SemanticId, SyntaxStore};
+use crate::hir::item_data::SemanticId;
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::types::{Location, RefKind, TyName, TyNameId, TypeBuilder, VariableKind};
 use la_arena::{Arena, ArenaMap, Idx};
 use rustc_hash::FxHashMap;

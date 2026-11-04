@@ -11,6 +11,7 @@ use crate::ast::{
 };
 use crate::salsa::{File, RootDb};
 
+
 /// useful for pattern matching out of items to retain type info.
 /// similar to ast::Item, but on the id level.
 /// ErasedFileAstId -> FileAstId -> ItemId
@@ -153,7 +154,7 @@ impl Lowerer {
                         continue;
                     };
                     let function = Function {
-                        name: f.name().unwrap_or_default(),
+                        name: function_name(&f),
                         kind: f.kind(),
                     };
                     self.top_level.push(ItemId::Function(id));
@@ -259,7 +260,7 @@ impl Lowerer {
                         continue;
                     };
                     let function = Function {
-                        name: f.name().unwrap_or_default(),
+                        name: function_name(&f),
                         kind: f.kind(),
                     };
                     result.push(ItemId::Function(id));
@@ -337,6 +338,17 @@ impl Lowerer {
             top_level: self.top_level.into_boxed_slice(),
             data: self.data,
         }
+    }
+}
+
+/// Special functions are unnamed in source; the def map keys them by their
+/// keyword so that a second one collides as a redeclaration, not an overload.
+fn function_name(f: &ast::Function) -> Name {
+    match f.kind() {
+        FunctionKind::Constructor => "constructor".into(),
+        FunctionKind::Fallback => "fallback".into(),
+        FunctionKind::Receive => "receive".into(),
+        FunctionKind::Regular => f.name().unwrap_or_default(),
     }
 }
 

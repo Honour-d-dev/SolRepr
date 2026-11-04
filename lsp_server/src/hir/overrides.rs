@@ -40,8 +40,11 @@ pub struct OverrideEntry {
 }
 
 impl OverrideEntry {
+    /// An unimplemented declaration is an outstanding obligation — a concrete
+    /// contract must be marked `abstract`. Modifiers carry the same obligation
+    /// as functions; getters are always implemented.
     pub fn owes_implementation(&self) -> bool {
-        self.kind == DeclKind::Function && !self.implemented
+        matches!(self.kind, DeclKind::Function | DeclKind::Modifier) && !self.implemented
     }
 }
 
@@ -468,11 +471,12 @@ impl<'db> OverrideAnalyzer<'db> {
             });
         }
 
-        if declaration.kind == DeclKind::Function
+        let overridable = |kind: DeclKind| matches!(kind, DeclKind::Function | DeclKind::Modifier);
+        if overridable(declaration.kind)
             && !declaration.implemented
             && let Some(base) = candidates
                 .iter()
-                .find(|candidate| candidate.kind == DeclKind::Function && candidate.implemented)
+                .find(|candidate| overridable(candidate.kind) && candidate.implemented)
         {
             self.sink.push(SemanticDiagnostic::UnimplementedOverride {
                 declaration: def,

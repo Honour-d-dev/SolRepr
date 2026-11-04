@@ -201,3 +201,39 @@ fn legal_import_cycles_report_nothing() {
     let codes: Vec<_> = analysis.diagnostics.iter().map(|d| d.code()).collect();
     assert!(analysis.diagnostics.is_empty(), "{codes:?}");
 }
+
+#[test]
+fn duplicate_special_functions_are_reported() {
+    let db = db_with(&[(
+        "src/Test.sol",
+        "contract C { constructor() {} constructor(uint x) {} fallback() external {} fallback() external {} receive() external payable {} receive() external payable {} }",
+    )]);
+    let analysis = analysis_of(&db);
+    let scope = scope_of(&analysis.data, "C");
+
+    let reported = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(d, SemanticDiagnostic::Redeclaration { .. }))
+        .count();
+    assert_eq!(reported, 3);
+
+    // Each special name keeps exactly one lookup candidate.
+    for name in ["constructor", "fallback", "receive"] {
+        assert_eq!(
+            analysis.data.scopes[scope].by_name[name].defs.len(),
+            1,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn one_of_each_special_function_is_fine() {
+    let db = db_with(&[(
+        "src/Test.sol",
+        "contract C { constructor() {} fallback() external {} receive() external payable {} }",
+    )]);
+    let analysis = analysis_of(&db);
+    assert!(analysis.diagnostics.is_empty());
+}

@@ -1344,8 +1344,8 @@ fn returned_values_are_checked_against_the_signature() {
     let (db, file) = make_test_db(
         r#"
             contract C {
-                modifier ok() { return; }
-                modifier bad() { return 1; }
+                modifier ok() { return; _; }
+                modifier bad() { return 1; _; }
             }
             "#,
     );

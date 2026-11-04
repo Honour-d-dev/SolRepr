@@ -362,3 +362,45 @@ fn unavailable_signature_does_not_produce_an_override() {
         .is_empty()
     );
 }
+
+#[test]
+fn implemented_modifier_replaced_by_bodyless_is_reported() {
+    assert_eq!(
+        codes(
+            r#"
+            abstract contract A { modifier m() virtual { _; } }
+            abstract contract B is A { modifier m() override virtual; }
+            "#,
+            "B",
+        ),
+        vec![DiagnosticCode::UnimplementedOverride]
+    );
+}
+
+#[test]
+fn unimplemented_modifier_override_is_legal() {
+    assert!(
+        codes(
+            r#"
+            abstract contract A { modifier m() virtual; }
+            abstract contract B is A { modifier m() override virtual; }
+            "#,
+            "B",
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn concrete_contract_with_unimplemented_modifier_is_reported() {
+    assert_eq!(
+        codes(
+            r#"
+            abstract contract A { modifier m() virtual; }
+            contract B is A {}
+            "#,
+            "B",
+        ),
+        vec![DiagnosticCode::UnimplementedContract]
+    );
+}

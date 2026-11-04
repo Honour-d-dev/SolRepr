@@ -1,11 +1,20 @@
-use la_arena::Arena;
+mod call_checker;
+mod const_eval;
+mod declarations;
+mod lower;
+mod tables;
+mod usage;
+
 use num_bigint::BigInt;
 use triomphe::Arc;
+pub use tables::Inference;
+use const_eval::ConstErrorKind;
+use usage::UsageContext;
 
 use crate::ast::NodeRange;
-use crate::hir::body_map::{BodyOwnerId, BodySourceMap, Local};
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Name, UnaryOp};
-use crate::hir::item_data::{SyntaxStore, Field, VarData, Variant};
+use crate::hir::item_data::VarData;
+use crate::hir::syntax_store::OwnerStore;
 use crate::hir::resolution::{Field as ResolvedField, Resolution};
 use crate::hir::resolver::Resolver;
 use crate::hir::semantic_errors::{DiagnosticSink, SemanticDiagnostic};
@@ -15,11 +24,7 @@ use crate::hir::types::{
 };
 use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
-use crate::salsa::hir_db::def_name;
-use crate::salsa::interned_db::Id as InternedId;
 
-use self::const_eval::ConstErrorKind;
-use self::usage::UsageContext;
 
 /// Early short-circuit on an invalid type.
 macro_rules! return_invalid {
@@ -31,136 +36,8 @@ macro_rules! return_invalid {
         ty
     }};
 }
+pub(crate) use return_invalid;
 
-// ── Owner inputs ─────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy)]
-pub struct OwnerStore<'a> {
-    pub store: &'a SyntaxStore,
-    pub locals: Option<&'a Arena<Local>>,
-    pub fields: Option<&'a Arena<Field>>,
-    pub variants: Option<&'a Arena<Variant>>,
-    pub source_map: Option<&'a BodySourceMap>,
-}
-
-impl<'a> OwnerStore<'a> {
-    pub fn new(store: &'a SyntaxStore) -> Self {
-        Self {
-            store,
-            locals: None,
-            fields: None,
-            variants: None,
-            source_map: None,
-        }
-    }
-
-    pub fn with_locals(mut self, locals: &'a Arena<Local>) -> Self {
-        self.locals = Some(locals);
-        self
-    }
-
-    pub fn with_fields(mut self, fields: &'a Arena<Field>) -> Self {
-        self.fields = Some(fields);
-        self
-    }
-
-    pub fn with_variants(mut self, variants: &'a Arena<Variant>) -> Self {
-        self.variants = Some(variants);
-        self
-    }
-
-    pub fn with_source_map(mut self, source_map: &'a BodySourceMap) -> Self {
-        self.source_map = Some(source_map);
-        self
-    }
-}
-
-/// Runs `f` with the owner's inputs; `None` for a file. A callback because the
-/// inputs borrow a per-owner `Arc` and must not outlive this call.
-fn with_owner_store<R>(
-    db: &dyn HirDb,
-    owner: DefId,
-    f: impl FnOnce(OwnerStore<'_>) -> R,
-) -> Option<R> {
-    Some(match owner {
-        DefId::Function(id) => {
-            let (body, source_map) = db.body_and_source_map(BodyOwnerId::Function(id));
-            f(OwnerStore::new(&body.syntax_store)
-                .with_locals(&body.locals)
-                .with_source_map(&source_map))
-        }
-        DefId::Modifier(id) => {
-            let (body, source_map) = db.body_and_source_map(BodyOwnerId::Modifier(id));
-            f(OwnerStore::new(&body.syntax_store)
-                .with_locals(&body.locals)
-                .with_source_map(&source_map))
-        }
-        DefId::Event(id) => {
-            let data = db.event_data(id);
-            f(OwnerStore::new(&data.syntax_store).with_locals(&data.parameters))
-        }
-        DefId::Error(id) => {
-            let data = db.error_data(id);
-            f(OwnerStore::new(&data.syntax_store).with_locals(&data.parameters))
-        }
-        DefId::Struct(id) => {
-            let data = db.struct_data(id);
-            f(OwnerStore::new(&data.syntax_store).with_fields(&data.fields))
-        }
-        DefId::Enum(id) => {
-            let data = db.enum_data(id);
-            f(OwnerStore::new(&data.syntax_store).with_variants(&data.variants))
-        }
-        DefId::Import(id) => f(OwnerStore::new(&db.import_data(id).syntax_store)),
-        DefId::Udvt(id) => f(OwnerStore::new(&db.udvt_data(id).syntax_store)),
-        DefId::Using(id) => f(OwnerStore::new(&db.using_data(id).syntax_store)),
-        DefId::Contract(id) => f(OwnerStore::new(&db.contract_data(id).syntax_store)),
-        DefId::Interface(id) => f(OwnerStore::new(&db.interface_data(id).syntax_store)),
-        DefId::Library(id) => f(OwnerStore::new(&db.library_data(id).syntax_store)),
-        DefId::Var(id) => f(OwnerStore::new(&db.var_data(id).syntax_store)),
-        DefId::File(_) => return None,
-    })
-}
-
-// ── Salsa query ──────────────────────────────────────────────────────────
-
-/// Cycle fallback: initializers and struct fields can reference each other
-/// cyclically, so fill every allocated ID with `Invalid` to keep tables total.
-#[salsa::tracked(cycle_result = inference_cycle_result)]
-pub fn inference<'db>(db: &'db dyn HirDb, owner: InternedId<'db>) -> Arc<Inference> {
-    let owner = owner.id(db);
-    let name = def_name(db, owner);
-    tracing::debug!(%name, ?owner, "inference: cache miss");
-
-    match with_owner_store(db, owner, |input| Inferer::run(db, owner, input)) {
-        Some(inference) => inference.into(),
-        None => Inference::empty().into(),
-    }
-}
-
-fn inference_cycle_result<'db>(
-    db: &'db dyn HirDb,
-    _id: salsa::Id,
-    owner: InternedId<'db>,
-) -> Arc<Inference> {
-    let tables = match with_owner_store(db, owner.id(db), |input| {
-        Inference::invalid_for(db, input.store, input.locals, input.fields, input.variants)
-    }) {
-        Some(tables) => tables,
-        None => Inference::empty(),
-    };
-    tables.into()
-}
-
-mod call_checker;
-mod const_eval;
-mod lower;
-mod tables;
-mod usage;
-
-pub use tables::Inference;
-
-// ── Inference orchestrator ───────────────────────────────────────────────
 
 /// The single inference context: the owner, its name-resolution context, and
 /// the accumulated tables. Implementation is split across the sibling
@@ -204,6 +81,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             effect: Mutability::Pure,
             context: UsageContext::Empty,
         };
+        inferer.check_definition();
         inferer.infer_all();
 
         inferer

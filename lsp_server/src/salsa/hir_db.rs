@@ -14,12 +14,13 @@ use crate::hir::analysis::Analysis;
 use crate::hir::body_map::{BodyBuilder, BodyMap, BodyOwnerId, BodySourceMap, ByteOffset, LocalId};
 use crate::hir::member_map::{MemberBuilder, MemberMap};
 use crate::hir::docs::{docs, inline_docs};
-use crate::hir::exprs::{Expr, ExprId, Name};
-use crate::hir::inference::{Inference, Inferer, OwnerStore, inference as inference_query};
+use crate::hir::exprs::Name;
+use crate::hir::inference::{Inference, Inferer};
+use crate::hir::syntax_store::{OwnerStore, with_owner_store};
 use crate::hir::signatures::getter_signature;
 use crate::hir::item_data::{
-    ContractData, EnumData, ErrorData, EventData, SyntaxStore, FunctionData, ImportData,
-    InterfaceData, ItemBuilder, LibraryData, ModifierData, SemanticId, StructData, UdvtData,
+    ContractData, EnumData, ErrorData, EventData, FunctionData, ImportData,
+    InterfaceData, ItemBuilder, LibraryData, ModifierData, StructData, UdvtData,
     UsingData, VarData,
 };
 use crate::hir::linearize::Linearizer;
@@ -82,7 +83,7 @@ impl HirDb for Db {
     }
 
     fn inference(&self, owner: DefId) -> Arc<Inference> {
-        inference_query(self, Id::new(self, owner))
+        inference(self, Id::new(self, owner))
     }
 
     fn function_data(&self, id: ast::FunctionId) -> Arc<FunctionData> {
@@ -277,16 +278,6 @@ pub fn body_map<'db>(db: &'db dyn RootDb, owner: BodyOwner<'db>) -> (Arc<BodyMap
     (body.into(), source_map.into())
 }
 
-#[salsa::tracked]
-pub fn function_data<'db>(db: &'db dyn RootDb, f: Function<'db>) -> Arc<FunctionData> {
-    tracing::debug!(?f, "function_data: cache miss");
-    let id = f.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let func = ast_id_map.get(&root, id.id).unwrap();
-    Arc::new(ItemBuilder::new(root, id.file, ast_id_map).build_fn(&func))
-}
-
 /// Signature params — every parameter carries its default or written data
 /// location, so no slot needs to re-derive one.
 fn lower_params(
@@ -371,6 +362,16 @@ pub fn modifier_signature<'db>(db: &'db dyn HirDb, m: Modifier<'db>) -> Option<F
         params: lower_params(&mod_inference, &ids, db)?,
         ..Fn::default()
     })
+}
+
+#[salsa::tracked]
+pub fn function_data<'db>(db: &'db dyn RootDb, f: Function<'db>) -> Arc<FunctionData> {
+    tracing::debug!(?f, "function_data: cache miss");
+    let id = f.id(db);
+    let ast_id_map = db.ast_id_map(id.file);
+    let root = db.root(id.file);
+    let func = ast_id_map.get(&root, id.id).unwrap();
+    Arc::new(ItemBuilder::new(root, id.file, ast_id_map).build_fn(&func))
 }
 
 #[salsa::tracked]
@@ -497,14 +498,7 @@ pub fn using_data<'db>(db: &'db dyn RootDb, u: Using<'db>) -> Arc<UsingData> {
 ///
 /// Returns the linearized MRO including `def` itself as the first element,
 /// together with inheritance diagnostics (unresolved bases, cyclic or
-/// inconsistent hierarchies). The computation is `Resolver::c3_linearize`
-/// in the contract's own context — base names resolve through the same
-/// `resolve_path` used everywhere else.
-///
-/// `cycle_result` guards the self-referential queries this can trigger:
-/// `bases(C)` resolving a base name may re-enter `bases(C)` through the
-/// resolver's member/base traversal, and `A is B` / `B is A` recurses
-/// outright.
+/// inconsistent hierarchies).
 #[salsa::tracked(cycle_result = bases_cycle_error)]
 pub fn bases<'db>(db: &'db dyn HirDb, def: DefWithBases<'db>) -> Analysis<[DefId]> {
     tracing::debug!(?def, "bases: cache miss");
@@ -591,6 +585,35 @@ fn member_map_cycle_result<'db>(
     )
 }
 
+
+/// Cycle fallback: initializers and struct fields can reference each other
+/// cyclically, so fill every allocated ID with `Invalid` to keep tables total.
+#[salsa::tracked(cycle_result = inference_cycle_result)]
+pub fn inference<'db>(db: &'db dyn HirDb, owner: Id<'db>) -> Arc<Inference> {
+    let owner = owner.id(db);
+    let name = def_name(db, owner);
+    tracing::debug!(%name, ?owner, "inference: cache miss");
+
+    match with_owner_store(db, owner, |input| Inferer::run(db, owner, input)) {
+        Some(inference) => inference.into(),
+        None => Inference::empty().into(),
+    }
+}
+
+fn inference_cycle_result<'db>(
+    db: &'db dyn HirDb,
+    _id: salsa::Id,
+    owner: Id<'db>,
+) -> Arc<Inference> {
+    let tables = match with_owner_store(db, owner.id(db), |input| {
+        Inference::invalid_for(db, input.store, input.locals, input.fields, input.variants)
+    }) {
+        Some(tables) => tables,
+        None => Inference::empty(),
+    };
+    tables.into()
+}
+
 /// The declaration containing `offset` — the innermost enclosing container in
 /// `file`'s def map, or `DefId::File` when the position is outside every
 /// declaration.
@@ -599,49 +622,6 @@ pub fn owner_at(db: &Db, file: File, offset: ByteOffset) -> Option<DefId> {
     db.enclosing_containers(node.node(), file).last().copied()
 }
 
-/// Runs `f` on the owner's `SyntaxStore`; `None` when the owner has none.
-/// A callback because body and item stores live behind a per-owner `Arc`.
-fn with_store<R>(
-    db: &dyn HirDb,
-    owner: DefId,
-    f: impl FnOnce(&SyntaxStore) -> R,
-) -> Option<R> {
-    Some(match owner {
-        DefId::Function(id) => f(&db.body_map(BodyOwnerId::Function(id)).syntax_store),
-        DefId::Modifier(id) => f(&db.body_map(BodyOwnerId::Modifier(id)).syntax_store),
-        DefId::Contract(id) => f(&db.contract_data(id).syntax_store),
-        DefId::Interface(id) => f(&db.interface_data(id).syntax_store),
-        DefId::Library(id) => f(&db.library_data(id).syntax_store),
-        DefId::Struct(id) => f(&db.struct_data(id).syntax_store),
-        DefId::Enum(id) => f(&db.enum_data(id).syntax_store),
-        DefId::Event(id) => f(&db.event_data(id).syntax_store),
-        DefId::Error(id) => f(&db.error_data(id).syntax_store),
-        DefId::Var(id) => f(&db.var_data(id).syntax_store),
-        DefId::Udvt(id) => f(&db.udvt_data(id).syntax_store),
-        DefId::Using(id) => f(&db.using_data(id).syntax_store),
-        DefId::Import(id) => f(&db.import_data(id).syntax_store),
-        DefId::File(_) => return None,
-    })
-}
-
-pub fn semantic_at(db: &dyn HirDb, owner: DefId, range: NodeRange) -> Option<SemanticId> {
-    with_store(db, owner, |store| store.range_to_semantic.get(&range).copied())?
-}
-
-/// The callee an expression *denotes*: the expression itself, or — when it is a
-/// call or a call-options node — the expression in its `callee` field.
-///
-/// `alloc_call_expr` remaps a bare-identifier callee's *own* range onto the
-/// call, so reading through the call is what makes the callee reachable.
-pub fn callee_at(db: &dyn HirDb, owner: DefId, range: NodeRange) -> Option<ExprId> {
-    with_store(db, owner, |store| match store.range_to_semantic.get(&range) {
-        Some(SemanticId::Expr(expr)) => match &store.exprs[*expr] {
-            Expr::Call { callee, .. } | Expr::CallOptions { callee, .. } => Some(*callee),
-            _ => Some(*expr),
-        },
-        _ => None,
-    })?
-}
 
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct UsingIndex {
