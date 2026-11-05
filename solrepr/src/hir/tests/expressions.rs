@@ -570,7 +570,7 @@ fn ternary_lowers_every_branch_before_failing() {
         "the ternary should not be built when an arm fails to lower"
     );
     let false_branch = body.syntax_store.exprs.iter().any(|(_, e)| {
-        matches!(e, Expr::Literal(crate::hir::exprs::Literal::Number(n)) if n.as_str() == "42")
+        matches!(e, Expr::Literal(Literal::Number(n)) if n.as_str() == "42")
     });
     assert!(
         false_branch,

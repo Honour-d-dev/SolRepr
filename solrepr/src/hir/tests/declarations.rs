@@ -1,5 +1,8 @@
 use super::*;
 
+use crate::capabilities::diagnostics::diagnostics;
+use crate::hir::body_map::BodyOwnerId;
+
 /// solc's definition-shape rules: a bodyless function or modifier must be
 /// `virtual` (except interface functions, which are implicitly virtual), and
 /// library/free functions must have an implementation.
@@ -202,6 +205,8 @@ fn inference_is_stable_under_reflow() {
         panic!("fixture function should exist");
     };
     let before = db.inference(DefId::Function(id));
+    let before_data = db.function_data(id);
+    let before_body = db.body_map(BodyOwnerId::Function(id));
 
     let path = file.path(&db).to_path_buf();
     db.open_file(
@@ -217,9 +222,17 @@ fn inference_is_stable_under_reflow() {
         before == after,
         "a reflow outside the function must not change its inference result"
     );
+    assert!(
+        before_data == db.function_data(id),
+        "item content must not change under a reflow"
+    );
+    assert!(
+        before_body == db.body_map(BodyOwnerId::Function(id)),
+        "body content must not change under a reflow"
+    );
 
     // Anchors resolve against the *current* positions, not the cached ones.
-    let reported = crate::capabilities::diagnostics::diagnostics(&db, file);
+    let reported = diagnostics(&db, file);
     let mismatch = reported
         .iter()
         .find(|diagnostic| diagnostic.code == DiagnosticCode::TypeMismatch)
@@ -230,4 +243,44 @@ fn inference_is_stable_under_reflow() {
         "\"bad\"",
         "the diagnostic should point at the string literal after the reflow"
     );
+}
+
+/// The content builder and the source-map builder must allocate the same ids.
+#[test]
+fn source_maps_cover_every_allocated_id() {
+    let (db, file) = make_test_db(
+        r#"
+            contract C {
+                function f(uint a) external { uint x = a + 1; }
+                uint public s;
+            }
+            "#,
+    );
+    let DefId::Function(id) = find_function(&db, file, "f") else {
+        panic!("fixture function should exist");
+    };
+
+    let body = db.body_map(BodyOwnerId::Function(id));
+    let body_map = db.body_source_map(BodyOwnerId::Function(id));
+    for (expr, _) in body.syntax_store.exprs.iter() {
+        assert!(body_map.expr_ranges.get(expr).is_some(), "expr {expr:?}");
+    }
+    for (ty, _) in body.syntax_store.types.iter() {
+        assert!(body_map.ty_ref_ranges.get(ty).is_some(), "ty {ty:?}");
+    }
+    for (local, _) in body.locals.iter() {
+        assert!(body_map.local_ranges.get(local).is_some(), "local {local:?}");
+    }
+
+    let data = db.function_data(id);
+    let item_map = db.item_source_map(DefId::Function(id));
+    for (expr, _) in data.syntax_store.exprs.iter() {
+        assert!(item_map.expr_ranges.get(expr).is_some(), "item expr {expr:?}");
+    }
+    for (ty, _) in data.syntax_store.types.iter() {
+        assert!(item_map.ty_ref_ranges.get(ty).is_some(), "item ty {ty:?}");
+    }
+    for (local, _) in data.parameters.iter() {
+        assert!(item_map.local_ranges.get(local).is_some(), "item local {local:?}");
+    }
 }

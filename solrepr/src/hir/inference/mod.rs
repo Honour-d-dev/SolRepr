@@ -183,7 +183,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
     // ── Expression resolution ────────────────────────────────────────────
 
     fn infer_resolution(&mut self, expr: ExprId, resolution: Resolution) -> Ty {
-        let range = self.input.store.expr_ranges[expr];
+        let is_own_name = self.input.store.own_name_expr == Some(expr);
         self.tables.set_expr_resolution(expr, resolution.clone());
         self.check_resolution_mutability(expr, &resolution);
         match resolution {
@@ -208,7 +208,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     // The declaration-site occurrence is the only entry point for a
                     // variable's declaration checks; any other self-resolution
                     // (`uint a = a`) is an illegal self-read.
-                    if range == data.range {
+                    if is_own_name {
                         self.check_var_declaration(var_def, &data)
                     } else {
                         return self.fail(
@@ -318,7 +318,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn infer_expr_uncached(&mut self, expr: ExprId) -> Ty {
         match self.input.store.exprs[expr].clone() {
             Expr::Ident(name) => {
-                let range = self.input.store.expr_ranges[expr];
                 let scope = self
                     .input
                     .expr_scopes
@@ -328,9 +327,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     .expr_orders
                     .and_then(|map| map.get(expr).copied())
                     .unwrap_or_default();
+                let is_self_name = self.input.store.own_name_expr == Some(expr);
                 let resolved = self
                     .resolver
-                    .resolve_name_at(&name, scope, order, expr, range);
+                    .resolve_name_at(&name, scope, order, expr, is_self_name);
                 let Some(resolution) = resolved else {
                     return Ty::invalid(self.db);
                 };

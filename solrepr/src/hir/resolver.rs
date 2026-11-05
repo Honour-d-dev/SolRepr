@@ -2,7 +2,6 @@ use std::cell::RefCell;
 
 use triomphe::Arc;
 
-use crate::ast::NodeRange;
 use crate::hir::access::{AccessChecker, AccessDenial};
 use crate::hir::body_map::{BodyMap, BodyOwnerId, ScopeId};
 use crate::hir::builtins::BuiltinDb;
@@ -11,9 +10,9 @@ use crate::hir::member_lookup::MemberLookupResult;
 use crate::hir::resolution::{Callable, Local, Resolution};
 use crate::hir::semantic_errors::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::types::{Primitive, Ty, Type};
-use crate::ir::def_map::{DefId, DefMap, DefNamespace, ScopeData};
+use crate::ir::def_map::{DefId, DefMap, DefNamespace, ScopeData, ScopeId as DefScopeId};
 use crate::salsa::{File, HirDb};
-use crate::salsa::root_db::def_name_and_range;
+use crate::salsa::hir_db::def_name;
 
 /// The outcome of a bare-name lookup walk.
 enum NameOutcome {
@@ -123,20 +122,20 @@ impl<'db> Resolver<'db> {
         local_scope: Option<ScopeId>,
         order: u32,
     ) -> Option<Resolution> {
-        self.resolve_name_in(name, local_scope, order, None)
+        self.resolve_name_in(name, local_scope, order, false)
     }
 
     /// Name lookup at a source expression: `order` is the expression's
-    /// allocation order, `self_range` the occurrence used for the self-name
-    /// check.
+    /// allocation order, `is_self_name` whether it is the def's own name at its
+    /// declaration site.
     pub fn resolve_name_in(
         &self,
         name: &Name,
         local_scope: Option<ScopeId>,
         order: u32,
-        self_range: Option<NodeRange>,
+        is_self_name: bool,
     ) -> Option<Resolution> {
-        match self.resolve_name_inner(name, local_scope, order, self_range) {
+        match self.resolve_name_inner(name, local_scope, order, is_self_name) {
             NameOutcome::Found(resolution) => Some(resolution),
             NameOutcome::Conflict(_) | NameOutcome::Missed(_) => None,
         }
@@ -149,9 +148,9 @@ impl<'db> Resolver<'db> {
         local_scope: Option<ScopeId>,
         order: u32,
         expr: ExprId,
-        range: NodeRange,
+        is_self_name: bool,
     ) -> Option<Resolution> {
-        match self.resolve_name_inner(name, local_scope, order, Some(range)) {
+        match self.resolve_name_inner(name, local_scope, order, is_self_name) {
             NameOutcome::Found(resolution) => Some(resolution),
             NameOutcome::Conflict(declarations) => {
                 if !declarations.is_empty() {
@@ -179,12 +178,12 @@ impl<'db> Resolver<'db> {
         name: &Name,
         local_scope: Option<ScopeId>,
         order: u32,
-        self_range: Option<NodeRange>,
+        is_self_name: bool,
     ) -> NameOutcome {
         self
             .resolve_primitive(name)
             .or_else(|| self.resolve_local(name, local_scope, order))
-            .or_else(|| self.resolve_self(name, self_range))
+            .or_else(|| self.resolve_self(name, is_self_name))
             .map(NameOutcome::Found)
             .or_else(|| Some(self.resolve_def(name))).map(|o| match o {
                 NameOutcome::Missed(denials) => self
@@ -230,15 +229,11 @@ impl<'db> Resolver<'db> {
     ///
     /// This handles the case where we're resolving the def's own name at its
     /// definition site (e.g. the `foo` in `function foo() external {}`).
-    /// The occurrence-range check keeps a call to an overloaded function from
+    /// The declaration-site flag keeps a call to an overloaded function from
     /// inside its own body from being mistaken for a self-reference.
-    fn resolve_self(&self, name: &Name, self_range: Option<NodeRange>) -> Option<Resolution> {
-        let (self_name, range) = def_name_and_range(self.db, self.this)?;
-        if name == &self_name
-            && self_range.is_some_and(|occurrence| {
-                occurrence.start >= range.start && occurrence.end <= range.end
-            })
-        {
+    fn resolve_self(&self, name: &Name, is_self_name: bool) -> Option<Resolution> {
+        let self_name = def_name(self.db, self.this);
+        if name == &self_name && is_self_name {
             Some(self.defs_resolution(
                 DefNamespace::from(&self.this),
                 std::slice::from_ref(&self.this),
@@ -385,7 +380,7 @@ impl<'db> Resolver<'db> {
     pub(super) fn file_scopes(
         &self,
         file: File,
-    ) -> impl Iterator<Item = (Arc<DefMap>, crate::ir::def_map::ScopeId)> + '_ {
+    ) -> impl Iterator<Item = (Arc<DefMap>, DefScopeId)> + '_ {
         let defmap = self.def_map(&DefId::File(file));
         let file_data = defmap.files.get(&file).cloned();
         file_data.into_iter().flat_map(move |file_data| {

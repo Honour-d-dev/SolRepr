@@ -1,4 +1,5 @@
 use super::*;
+use crate::hir::builtins::BuiltinFn;
 use crate::hir::resolution::Callable;
 
 /// An overload set is usable as a callee but is not a value — solc's "No
@@ -650,7 +651,7 @@ fn abi_decode_produces_the_named_types() {
     assert!(
         expr_results(&inference).any(|(_, ty, resolution)| {
             matches!(resolution, Some(Resolution::Callable(c))
-            if matches!(c.builtin(), Some(crate::hir::builtins::BuiltinFn::Decode)))
+            if matches!(c.builtin(), Some(BuiltinFn::Decode)))
                 && matches!(ty.kind(&db), TyKind::Tuple(tuple) if tuple.elements.len() == 2)
         }),
         "expected the decode call to produce a two-element tuple"

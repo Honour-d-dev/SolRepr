@@ -1,5 +1,7 @@
 use super::{helper::*, resolver_helpers::*};
+use crate::hir::access::AccessDenial;
 use crate::hir::exprs::Name;
+use crate::hir::item_data::VariantId;
 use crate::hir::semantic_errors::SemanticDiagnostic;
 use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
@@ -134,7 +136,7 @@ fn enum_variants_are_visible_through_types() {
     };
     assert_eq!(
         variant.id,
-        crate::hir::item_data::VariantId::from_raw(0.into())
+        VariantId::from_raw(0.into())
     );
 }
 
@@ -315,10 +317,7 @@ fn resolve_reported_name(resolver: &Resolver, name: &str, offset: u32) -> Option
         None,
         offset,
         ExprId::from_raw(offset.into()),
-        crate::ast::NodeRange {
-            start: offset,
-            end: offset + 1,
-        },
+        false,
     )
 }
 
@@ -332,7 +331,7 @@ fn lookup_reported_member(
     resolver.lookup_member_at(ty, &name, ExprId::from_raw(offset.into()))
 }
 
-fn recorded_denials(resolver: &Resolver) -> Vec<crate::hir::access::AccessDenial> {
+fn recorded_denials(resolver: &Resolver) -> Vec<AccessDenial> {
     resolver
         .finish_diagnostics()
         .iter()

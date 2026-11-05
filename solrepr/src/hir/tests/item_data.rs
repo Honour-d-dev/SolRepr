@@ -1,6 +1,6 @@
 use crate::ast::kinds::NodeKind;
 use crate::ast::nodes::FunctionKind;
-use crate::ast::{Function, Var};
+use crate::ast::{Function, FunctionId, Var, VarId};
 use crate::hir::item_data::*;
 use crate::hir::tests::helper::{
     find_contract, find_first_kind, find_function, find_modifier, make_test_db,
@@ -21,7 +21,8 @@ fn function_header_facts_preserve_authored_specifiers() {
     let listed = db.function_data(listed_id);
     assert_eq!(listed.kind, FunctionKind::Regular);
     assert!(listed.vis == Visibility::Public);
-    let vis_range = listed
+    let vis_range = db
+        .item_source_map(DefId::Function(listed_id))
         .vis_range
         .expect("written visibility keeps its range");
     assert_eq!(
@@ -31,16 +32,17 @@ fn function_header_facts_preserve_authored_specifiers() {
     assert!(listed.mutability == Mutability::View);
     assert!(listed.is_virtual);
     assert!(!listed.has_body);
-    let Some(OverrideSpecifier::List { paths, range }) = &listed.override_specifier else {
+    let Some(OverrideSpecifier::List { paths }) = &listed.override_specifier else {
         panic!("expected an override list");
     };
     assert_eq!(paths.len(), 2);
+    let override_ranges = db.item_source_map(DefId::Function(listed_id)).override_ranges.clone();
     assert_eq!(
-        &source[range.start as usize..range.end as usize],
+        &source[override_ranges[0].start as usize..override_ranges[0].end as usize],
         "override(A.B, D)"
     );
     assert_eq!(
-        &source[paths[0].range.start as usize..paths[0].range.end as usize],
+        &source[override_ranges[1].start as usize..override_ranges[1].end as usize],
         "A.B"
     );
     let ty_of = |path: &OverridePath| {
@@ -56,7 +58,7 @@ fn function_header_facts_preserve_authored_specifiers() {
     let bare = db.function_data(bare_id);
     assert!(matches!(
         bare.override_specifier,
-        Some(OverrideSpecifier::Bare { .. })
+        Some(OverrideSpecifier::Bare)
     ));
 
     let DefId::Function(implemented_id) = find_function(&db, file, "implemented") else {
@@ -65,14 +67,14 @@ fn function_header_facts_preserve_authored_specifiers() {
     let implemented = db.function_data(implemented_id);
     assert!(implemented.has_body);
     assert!(!implemented.is_virtual);
-    assert!(implemented.vis_range.is_some());
+    assert!(db.item_source_map(DefId::Function(implemented_id)).vis_range.is_some());
 
     let DefId::Function(implicit_id) = find_function(&db, file, "implicit") else {
         unreachable!()
     };
     let implicit = db.function_data(implicit_id);
     assert!(implicit.vis == Visibility::Internal);
-    assert!(implicit.vis_range.is_none());
+    assert!(db.item_source_map(DefId::Function(implicit_id)).vis_range.is_none());
 }
 
 #[test]
@@ -116,9 +118,10 @@ fn state_variable_and_contract_headers_are_retained() {
         .ast_id_map(file)
         .id_of_node::<Var>(node)
         .expect("state variable should have an AstId");
-    let value = db.var_data(crate::ast::VarId { file, id });
+    let var_id = VarId { file, id };
+    let value = db.var_data(var_id);
     assert!(value.vis == Visibility::Public);
-    assert!(value.vis_range.is_some());
+    assert!(db.item_source_map(DefId::Var(var_id)).vis_range.is_some());
     let Some(OverrideSpecifier::List { paths, .. }) = &value.override_specifier else {
         panic!("expected a state-variable override list");
     };
@@ -151,10 +154,10 @@ fn constructor_header_reads_anonymous_visibility_and_mutability_tokens() {
         .ast_id_map(file)
         .id_of_node::<Function>(node)
         .expect("constructor should have an AstId");
-    let data = db.function_data(crate::ast::FunctionId { file, id });
+    let data = db.function_data(FunctionId { file, id });
     assert_eq!(data.kind, FunctionKind::Constructor);
     assert!(data.vis == Visibility::Public);
     assert!(data.mutability == Mutability::Payable);
-    assert!(data.vis_range.is_some());
+    assert!(db.item_source_map(DefId::Function(FunctionId { file, id })).vis_range.is_some());
     assert!(data.has_body);
 }

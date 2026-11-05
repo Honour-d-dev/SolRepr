@@ -10,6 +10,7 @@ use crate::ast::{NodeRange, kinds::NodeKind};
 use crate::hir::access::AccessDenial;
 use crate::hir::resolution::Callable;
 use crate::hir::semantic_errors::{DiagnosticCode, SemanticDiagnostic};
+use crate::hir::syntax_store::anchor_range;
 use crate::hir::signatures::OverrideMismatch;
 use crate::hir::types::Mutability;
 use crate::ir::def_map::DefId;
@@ -603,7 +604,7 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
     Diagnostic {
         code,
         severity: Severity::Error,
-        range: crate::hir::syntax_store::anchor_range(db, owner, error.anchor())
+        range: anchor_range(db, owner, error.anchor())
             .unwrap_or(NodeRange { start: 0, end: 0 }),
         message,
         related,

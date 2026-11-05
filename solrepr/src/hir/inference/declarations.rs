@@ -60,7 +60,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         let data = self.db.modifier_data(id);
         // solc reports the missing placeholder at the body block, before the
         // placement rules (which point at the declaration).
-        if data.body_range.is_some() && !data.has_placeholder {
+        if self.db.item_source_map(self.owner).body_range.is_some() && !data.has_placeholder {
             self.fail(
                 DiagnosticAnchor::Body(self.owner),
                 "modifier body does not contain `_`",

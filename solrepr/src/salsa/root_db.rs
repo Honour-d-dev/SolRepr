@@ -8,7 +8,6 @@ use super::db::{File, FileId, Packages, Db, SourceRootId};
 use crate::ast::kinds::FieldKind;
 use crate::ast::{Ast, AstIdMap, AstNode, NodeRange};
 use crate::hir::analysis::Analysis;
-use crate::hir::exprs::Name;
 use crate::ir::def_map::{Collector, DefId, DefMap};
 use crate::ir::item_tree::{ItemTree, Lowerer};
 use crate::workspace::Package;
@@ -85,24 +84,14 @@ pub trait RootDb: salsa::Database {
     fn is_ignored_path(&self, path: &Utf8Path) -> bool;
 }
 
-/// A def's declaration node and its file's root — the shared walk behind
-/// `def_name_and_range` and `def_range`. `None` for defs with no AST node.
+/// A def's declaration node and its file's root — the walk behind
+/// `def_range`. `None` for defs with no AST node.
 fn def_node(db: &dyn RootDb, def: DefId) -> Option<(AstNode, AstNode)> {
     let (file, ast_id) = def.file_and_id();
     let ast_id = ast_id?;
     let root = db.root(file);
     let node = db.ast_id_map(file).get_node(&root, ast_id)?.clone();
     Some((root, node))
-}
-
-/// The def's name as written and its range — `None` for unnamed declarations
-/// (fallback, receive, unnamed base) and defs with no AST node. For a display
-/// name that synthesizes for unnamed defs, use `hir_db::def_name`.
-pub fn def_name_and_range(db: &dyn RootDb, def: DefId) -> Option<(Name, NodeRange)> {
-    let (root, node) = def_node(db, def)?;
-    let name_node = node.node().child_by_field_id(FieldKind::NAME.into())?;
-    let name: Name = root.text_by_range(name_node.byte_range()).trim().into();
-    Some((name, NodeRange::from(&name_node)))
 }
 
 /// Where a def's diagnostics anchor: its written name's range when it has one,
@@ -112,12 +101,6 @@ pub fn def_range(db: &dyn RootDb, def: DefId) -> Option<NodeRange> {
     let (_, node) = def_node(db, def)?;
     let name = node.node().child_by_field_id(FieldKind::NAME.into());
     Some(NodeRange::from(&name.unwrap_or(node.node())))
-}
-
-/// The whole declaration node's range — the `Decl` diagnostic anchor.
-pub fn def_decl_range(db: &dyn RootDb, def: DefId) -> Option<NodeRange> {
-    let (_, node) = def_node(db, def)?;
-    Some(NodeRange::from(&node.node()))
 }
 
 #[salsa::db]

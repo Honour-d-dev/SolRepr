@@ -1,4 +1,5 @@
 use crate::capabilities::hover::*;
+use crate::hir::body_map::BodyOwnerId;
 use crate::hir::tests::helper::make_test_db;
 use crate::ir::def_map::DefId;
 use crate::salsa::root_db::RootDb;
@@ -62,7 +63,7 @@ fn local_hover_drops_stack_and_notes_pointer_kinds() {
         params[1]
     );
 
-    let (body, _) = db.body_and_source_map(crate::hir::body_map::BodyOwnerId::Function(fn_id));
+    let body = db.body_map(BodyOwnerId::Function(fn_id));
     let local = body
         .locals
         .iter()

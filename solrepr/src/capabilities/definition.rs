@@ -109,17 +109,25 @@ fn resolution_targets(db: &Db, resolution: Resolution) -> Vec<DefinitionTarget> 
 fn local_targets(db: &Db, owner: DefId, local_id: LocalId) -> Vec<DefinitionTarget> {
     let (file, _) = owner.file_and_id();
     let range = match owner {
-        DefId::Function(id) => {
-            let body = db.body_map(BodyOwnerId::Function(id));
-            body.locals[local_id].range()
-        }
-        DefId::Modifier(id) => {
-            let body = db.body_map(BodyOwnerId::Modifier(id));
-            body.locals[local_id].range()
-        }
-        DefId::Event(id) => db.event_data(id).parameters[local_id].range(),
-        DefId::Error(id) => db.error_data(id).parameters[local_id].range(),
+        DefId::Function(id) => db
+            .body_source_map(BodyOwnerId::Function(id))
+            .local_ranges
+            .get(local_id)
+            .copied(),
+        DefId::Modifier(id) => db
+            .body_source_map(BodyOwnerId::Modifier(id))
+            .local_ranges
+            .get(local_id)
+            .copied(),
+        DefId::Event(_) | DefId::Error(_) => db
+            .item_source_map(owner)
+            .local_ranges
+            .get(local_id)
+            .copied(),
         _ => return Vec::new(),
+    };
+    let Some(range) = range else {
+        return Vec::new();
     };
     vec![DefinitionTarget::Range(file, range)]
 }
@@ -128,22 +136,27 @@ fn field_targets(db: &Db, owner: DefId, field_id: FieldId) -> Vec<DefinitionTarg
     let DefId::Struct(struct_id) = owner else {
         return Vec::new();
     };
-    let data = db.struct_data(struct_id);
-    vec![DefinitionTarget::Range(
-        owner.file_and_id().0,
-        data.fields[field_id].range,
-    )]
+    let _ = db.struct_data(struct_id);
+    let Some(range) = db.item_source_map(owner).field_ranges.get(field_id).copied() else {
+        return Vec::new();
+    };
+    vec![DefinitionTarget::Range(owner.file_and_id().0, range)]
 }
 
 fn variant_targets(db: &Db, owner: DefId, variant_id: VariantId) -> Vec<DefinitionTarget> {
     let DefId::Enum(enum_id) = owner else {
         return Vec::new();
     };
-    let data = db.enum_data(enum_id);
-    vec![DefinitionTarget::Range(
-        owner.file_and_id().0,
-        data.variants[variant_id].range,
-    )]
+    let _ = db.enum_data(enum_id);
+    let Some(range) = db
+        .item_source_map(owner)
+        .variant_ranges
+        .get(variant_id)
+        .copied()
+    else {
+        return Vec::new();
+    };
+    vec![DefinitionTarget::Range(owner.file_and_id().0, range)]
 }
 
 fn ty_targets(db: &Db, ty: Ty) -> Vec<DefinitionTarget> {

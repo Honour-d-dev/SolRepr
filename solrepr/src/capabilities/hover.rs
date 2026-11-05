@@ -9,7 +9,7 @@ use crate::ast::{
 use crate::hir::body_map::{BodyOwnerId, Local, LocalId};
 use crate::hir::builtins::ParamSchema;
 use crate::hir::exprs::{Expr, ExprId, Literal};
-use crate::hir::item_data::{EnumData, Field, FieldId, SemanticId, VariantId};
+use crate::hir::item_data::{EnumData, Field, FieldId, SemanticId, VarData, VariantId};
 use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, Resolution};
 use crate::hir::types::{
@@ -112,7 +112,19 @@ impl<'db> Hover<'db> {
         };
         let struct_data = self.db.struct_data(struct_id);
         let (file, _) = owner.file_and_id();
-        Some(self.format_field(&struct_data.fields[field_id], &struct_data.syntax_store, file))
+        let range = self
+            .db
+            .item_source_map(owner)
+            .field_ranges
+            .get(field_id)
+            .copied()
+            .unwrap_or(NodeRange { start: 0, end: 0 });
+        Some(self.format_field(
+            &struct_data.fields[field_id],
+            &struct_data.syntax_store,
+            file,
+            range,
+        ))
     }
 
     fn hover_variant(&self, owner: DefId, variant_id: VariantId) -> Option<String> {
@@ -121,7 +133,14 @@ impl<'db> Hover<'db> {
         };
         let enum_data = self.db.enum_data(enum_id);
         let (file, _) = owner.file_and_id();
-        Some(self.format_variant(&enum_data, variant_id, file))
+        let range = self
+            .db
+            .item_source_map(owner)
+            .variant_ranges
+            .get(variant_id)
+            .copied()
+            .unwrap_or(NodeRange { start: 0, end: 0 });
+        Some(self.format_variant(&enum_data, variant_id, file, range))
     }
 
     fn hover_ty(&self, ty: Ty) -> Option<String> {
@@ -262,15 +281,15 @@ impl<'db> Hover<'db> {
     fn constant_signature(
         &self,
         var_id: VarId,
-        var_data: &crate::hir::item_data::VarData,
+        var_data: &VarData,
         signature: &str,
     ) -> String {
         let Some(init) = var_data.init else {
             return signature.to_string();
         };
         let Some(range) =
-            var_data
-                .syntax_store
+            self.db
+                .item_source_map(DefId::Var(var_id))
                 .range_to_semantic
                 .iter()
                 .find_map(|(range, semantic)| {
@@ -536,26 +555,38 @@ impl<'db> Hover<'db> {
         .render()
     }
 
-    fn format_field(&self, field: &Field, store: &SyntaxStore, file: File) -> String {
+    fn format_field(
+        &self,
+        field: &Field,
+        store: &SyntaxStore,
+        file: File,
+        range: NodeRange,
+    ) -> String {
         let ty = store.types[field.ty_ref].to_string(&store.types);
-        let doc = self.db.inline_docs(file, field.range);
+        let doc = self.db.inline_docs(file, range);
         HoverInfo {
             title: "Field".into(),
             signature: Some(format!("{ty} {}", field.name)),
             documentation: doc,
-            definition_link: Some(self.range_link(file, field.range)),
+            definition_link: Some(self.range_link(file, range)),
         }
         .render()
     }
 
-    fn format_variant(&self, enum_data: &EnumData, variant_id: VariantId, file: File) -> String {
+    fn format_variant(
+        &self,
+        enum_data: &EnumData,
+        variant_id: VariantId,
+        file: File,
+        range: NodeRange,
+    ) -> String {
         let variant = &enum_data.variants[variant_id];
-        let doc = self.db.inline_docs(file, variant.range);
+        let doc = self.db.inline_docs(file, range);
         HoverInfo {
             title: "Enum_variant".into(),
             signature: Some(format!("enum variant {}.{}", enum_data.name, variant.name)),
             documentation: doc,
-            definition_link: Some(self.range_link(file, variant.range)),
+            definition_link: Some(self.range_link(file, range)),
         }
         .render()
     }

@@ -148,7 +148,7 @@ fn invocation_wrapper_does_not_steal_the_semantic_mapping() {
         .iter()
         .find(|(_, expr)| matches!(expr, Expr::Emit(_)))
         .expect("the fixture has an emit statement");
-    let range = body.syntax_store.expr_ranges[wrapper];
+    let range = db.body_source_map(BodyOwnerId::Function(id)).expr_ranges[wrapper];
 
     let Some(SemanticId::Expr(mapped)) = semantic_at(&db, f, range) else {
         panic!("the emit statement's range should map to an expression");

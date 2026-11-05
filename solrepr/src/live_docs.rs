@@ -215,9 +215,11 @@ mod tests {
     use camino::Utf8PathBuf;
     use ropey::Rope;
 
+    use crate::salsa::Db;
+
     #[test]
     fn maintains_mru_order_and_evicts_lru() {
-        let db = crate::salsa::db::Db::default();
+        let db = Db::default();
         let file_a = File::builder(Rope::from_str(""), Utf8PathBuf::from("a.sol")).new(&db);
         let file_b = File::builder(Rope::from_str(""), Utf8PathBuf::from("b.sol")).new(&db);
         let file_c = File::builder(Rope::from_str(""), Utf8PathBuf::from("c.sol")).new(&db);
@@ -235,7 +237,7 @@ mod tests {
 
     #[test]
     fn reuses_removed_nodes() {
-        let db = crate::salsa::db::Db::default();
+        let db = Db::default();
         let file_a = File::builder(Rope::from_str(""), Utf8PathBuf::from("a.sol")).new(&db);
         let file_b = File::builder(Rope::from_str(""), Utf8PathBuf::from("b.sol")).new(&db);
         let mut files = LiveDocs::new();
@@ -254,7 +256,7 @@ mod tests {
     /// evicted document is still open.
     #[test]
     fn versions_track_the_document() {
-        let db = crate::salsa::db::Db::default();
+        let db = Db::default();
         let file_a = File::builder(Rope::from_str(""), Utf8PathBuf::from("a.sol")).new(&db);
         let file_b = File::builder(Rope::from_str(""), Utf8PathBuf::from("b.sol")).new(&db);
         let mut files = LiveDocs::with_capacity(1);
@@ -282,7 +284,7 @@ mod tests {
     /// at the front and evicts whoever is now least recent.
     #[test]
     fn touching_an_evicted_document_retracks_it() {
-        let db = crate::salsa::db::Db::default();
+        let db = Db::default();
         let file_a = File::builder(Rope::from_str(""), Utf8PathBuf::from("a.sol")).new(&db);
         let file_b = File::builder(Rope::from_str(""), Utf8PathBuf::from("b.sol")).new(&db);
         let mut files = LiveDocs::with_capacity(1);

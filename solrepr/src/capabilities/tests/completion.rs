@@ -1,4 +1,6 @@
 use crate::capabilities::completion::*;
+use crate::hir::body_map::BodyOwnerId;
+use crate::hir::exprs::Expr;
 use crate::hir::resolver::Resolver;
 use crate::hir::tests::helper::*;
 use crate::ir::def_map::DefId;
@@ -504,7 +506,7 @@ fn incomplete_pair_does_not_discard_completed_named_pairs() {
         "#,
     );
     let def = find_function(&db, file, "probe");
-    let body = db.body_map(crate::hir::body_map::BodyOwnerId::Function(match def {
+    let body = db.body_map(BodyOwnerId::Function(match def {
         DefId::Function(id) => id,
         _ => unreachable!(),
     }));
@@ -513,7 +515,7 @@ fn incomplete_pair_does_not_discard_completed_named_pairs() {
         .exprs
         .iter()
         .find_map(|(_, expr)| match expr {
-            crate::hir::exprs::Expr::NamedArgs(named) => Some(named),
+            Expr::NamedArgs(named) => Some(named),
             _ => None,
         })
         .expect("the braced argument should still lower");
@@ -532,7 +534,7 @@ fn incomplete_call_option_does_not_discard_completed_options() {
         "#,
     );
     let def = find_function(&db, file, "probe");
-    let body = db.body_map(crate::hir::body_map::BodyOwnerId::Function(match def {
+    let body = db.body_map(BodyOwnerId::Function(match def {
         DefId::Function(id) => id,
         _ => unreachable!(),
     }));
@@ -541,7 +543,7 @@ fn incomplete_call_option_does_not_discard_completed_options() {
         .exprs
         .iter()
         .find_map(|(_, expr)| match expr {
-            crate::hir::exprs::Expr::CallOptions { options, .. } => Some(options),
+            Expr::CallOptions { options, .. } => Some(options),
             _ => None,
         })
         .expect("the call-options group should still lower");

@@ -2,7 +2,7 @@ use crate::ast::kinds::{FieldKind, NodeKind};
 use crate::ast::{AstNode, FunctionId, ModifierId, NodeRange};
 use crate::hir::exprs::{Expr, ExprBuilder, ExprId, Name};
 use crate::hir::item_data::SemanticId;
-use crate::hir::syntax_store::SyntaxStore;
+use crate::hir::syntax_store::{SourceMap, SyntaxStore};
 use crate::hir::types::{Location, RefKind, TyName, TyNameId, TypeBuilder, VariableKind};
 use la_arena::{Arena, ArenaMap, Idx};
 use rustc_hash::FxHashMap;
@@ -21,7 +21,6 @@ pub type ScopeId = Idx<Scope>;
 #[derive(PartialEq, Eq)]
 pub struct Scope {
     parent: Option<ScopeId>,
-    range: NodeRange,
     pub(crate) by_name: FxHashMap<Name, LocalId>,
 }
 
@@ -34,9 +33,6 @@ impl Scope {
         self.parent
     }
 
-    pub fn range(&self) -> NodeRange {
-        self.range
-    }
 }
 
 pub type LocalId = Idx<Local>;
@@ -46,7 +42,6 @@ pub struct Local {
     name: Name,
     kind: VariableKind,
     ty_ref: TyNameId,
-    range: NodeRange,
     /// Allocation order in the body — replaces byte offsets for the
     /// declaration-order visibility check.
     decl_order: u32,
@@ -65,9 +60,8 @@ pub struct BodyMap {
     pub expr_orders: ArenaMap<ExprId, u32>,
 }
 
-/// The positional sibling of `BodyMap`; populated once ranges move here.
-#[derive(Default, PartialEq, Eq)]
-pub struct BodySourceMap;
+/// The positional sibling of `BodyMap`.
+pub type BodySourceMap = SourceMap;
 
 impl BodyMap {
     pub fn local(&self, decl: LocalId) -> &Local {
@@ -88,7 +82,6 @@ impl Local {
         name: Name,
         kind: VariableKind,
         ty_ref: TyNameId,
-        range: NodeRange,
         decl_order: u32,
         init: Option<ExprId>,
     ) -> Self {
@@ -96,7 +89,6 @@ impl Local {
             name,
             kind,
             ty_ref,
-            range,
             decl_order,
             init,
         }
@@ -122,10 +114,6 @@ impl Local {
         }
     }
 
-    pub fn range(&self) -> NodeRange {
-        self.range
-    }
-
     pub fn decl_order(&self) -> u32 {
         self.decl_order
     }
@@ -142,6 +130,7 @@ pub struct BodyBuilder {
     scopes: Arena<Scope>,
     locals: Arena<Local>,
     syntax_store: SyntaxStore,
+    source_map: SourceMap,
     expr_scopes: ArenaMap<ExprId, ScopeId>,
     expr_orders: ArenaMap<ExprId, u32>,
     order: u32,
@@ -152,10 +141,6 @@ impl BodyBuilder {
         let mut scopes = Arena::new();
         let root_scope = scopes.alloc(Scope {
             parent: None,
-            //we use "fn range" instead of the intuitive "body range" because parameters are visible from decl.
-            //if root scope starts at body then parameter offset < body offset(ie outside the fn scope)
-            //resolution fails @BodyMap::scope_at(offset)
-            range: NodeRange::from(&owner.node()),
             by_name: FxHashMap::default(),
         });
 
@@ -166,6 +151,7 @@ impl BodyBuilder {
             scopes,
             locals: Arena::new(),
             syntax_store: SyntaxStore::default(),
+            source_map: SourceMap::default(),
             expr_scopes: ArenaMap::new(),
             expr_orders: ArenaMap::new(),
             order: 1,
@@ -188,8 +174,8 @@ impl BodyBuilder {
         order
     }
 
-    fn push_scope(&mut self, range: NodeRange) {
-        self.current_scope = self.alloc_scope(range);
+    fn push_scope(&mut self) {
+        self.current_scope = self.alloc_scope();
     }
 
     fn pop_scope(&mut self) {
@@ -209,7 +195,7 @@ impl BodyBuilder {
                 | NodeKind::WHILE_STATEMENT
                 | NodeKind::DO_WHILE_STATEMENT => self.walk_block(child),
                 NodeKind::BLOCK_STATEMENT | NodeKind::FOR_STATEMENT | NodeKind::TRY_STATEMENT => {
-                    self.push_scope(NodeRange::from(&child));
+                    self.push_scope();
                     self.walk_block(child);
                     self.pop_scope();
                 }
@@ -255,7 +241,11 @@ impl BodyBuilder {
         for child in owner_node.named_children(&mut owner_node.walk()) {
             match child.kind_id().into() {
                 NodeKind::IDENTIFIER => {
-                    self.lower_expr(child);
+                    // The owner's own name at its declaration — an id, not a
+                    // range, so the resolver never reads the source map.
+                    if let Some(expr_id) = self.lower_expr(child) {
+                        self.syntax_store.own_name_expr = Some(expr_id);
+                    }
                 }
                 NodeKind::PARAMETER => {
                     self.add_local(child, VariableKind::Parameter, None);
@@ -309,7 +299,6 @@ impl BodyBuilder {
             name: name.clone(),
             kind,
             ty_ref,
-            range,
             decl_order,
             init,
         });
@@ -317,15 +306,15 @@ impl BodyBuilder {
         self.scopes[self.current_scope]
             .by_name
             .insert(name, local_id);
-        self.syntax_store
+        self.source_map.local_ranges.insert(local_id, range);
+        self.source_map
             .range_to_semantic
             .insert(range, SemanticId::Local(local_id));
     }
 
-    fn alloc_scope(&mut self, range: NodeRange) -> ScopeId {
+    fn alloc_scope(&mut self) -> ScopeId {
         self.scopes.alloc(Scope {
             parent: Some(self.current_scope),
-            range,
             by_name: FxHashMap::default(),
         })
     }
@@ -336,6 +325,7 @@ impl BodyBuilder {
             mut scopes,
             locals: mut decls,
             mut syntax_store,
+            mut source_map,
             mut expr_scopes,
             mut expr_orders,
             ..
@@ -344,7 +334,7 @@ impl BodyBuilder {
         decls.shrink_to_fit();
         syntax_store.exprs.shrink_to_fit();
         syntax_store.types.shrink_to_fit();
-        syntax_store.range_to_semantic.shrink_to_fit();
+        source_map.range_to_semantic.shrink_to_fit();
         expr_scopes.shrink_to_fit();
         expr_orders.shrink_to_fit();
         (
@@ -356,7 +346,7 @@ impl BodyBuilder {
                 expr_scopes,
                 expr_orders,
             },
-            BodySourceMap,
+            source_map,
         )
     }
 }
@@ -370,8 +360,8 @@ impl ExprBuilder for BodyBuilder {
         let expr_id = self.syntax_store.exprs.alloc(expr);
         let order = self.next_order();
         self.expr_orders.insert(expr_id, order);
-        self.syntax_store.expr_ranges.insert(expr_id, range);
-        self.syntax_store
+        self.source_map.expr_ranges.insert(expr_id, range);
+        self.source_map
             .range_to_semantic
             .insert(range, SemanticId::Expr(expr_id));
         self.expr_scopes.insert(expr_id, self.current_scope);
@@ -380,7 +370,7 @@ impl ExprBuilder for BodyBuilder {
 
     fn alloc_member_expr(&mut self, member: Expr, range: NodeRange, prop: NodeRange) -> ExprId {
         let mem_id = self.alloc_expr_range(member, range);
-        self.syntax_store
+        self.source_map
             .range_to_semantic
             .insert(prop, SemanticId::Expr(mem_id));
         mem_id
@@ -389,7 +379,7 @@ impl ExprBuilder for BodyBuilder {
     fn alloc_call_expr(&mut self, call: Expr, node: Node, ident: Option<NodeRange>) -> ExprId {
         let call_id = self.alloc_expr(call, node);
         if let Some(ident) = ident {
-            self.syntax_store
+            self.source_map
                 .range_to_semantic
                 .insert(ident, SemanticId::Expr(call_id));
         };
@@ -400,7 +390,7 @@ impl ExprBuilder for BodyBuilder {
         let expr_id = self.syntax_store.exprs.alloc(expr);
         let order = self.next_order();
         self.expr_orders.insert(expr_id, order);
-        self.syntax_store
+        self.source_map
             .expr_ranges
             .insert(expr_id, NodeRange::from(&node));
         self.expr_scopes.insert(expr_id, self.current_scope);
@@ -412,8 +402,8 @@ impl TypeBuilder for BodyBuilder {
     fn alloc_type(&mut self, ty: TyName, node: Node) -> TyNameId {
         let ty_ref_id = self.syntax_store.types.alloc(ty);
         let range = NodeRange::from(&node);
-        self.syntax_store.ty_ref_ranges.insert(ty_ref_id, range);
-        self.syntax_store
+        self.source_map.ty_ref_ranges.insert(ty_ref_id, range);
+        self.source_map
             .range_to_semantic
             .insert(range, SemanticId::Type(ty_ref_id));
         ty_ref_id

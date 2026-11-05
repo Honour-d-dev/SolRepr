@@ -1,6 +1,7 @@
 use crate::capabilities::diagnostics::*;
 use crate::ast::NodeRange;
 use crate::hir::semantic_errors::DiagnosticCode;
+use crate::hir::tests::helper::make_test_db;
 use tree_sitter::Parser;
 
 #[test]
@@ -55,7 +56,7 @@ fn normalizes_diagnostics_in_source_order_and_removes_duplicates() {
 
 #[test]
 fn identical_diagnostics_merge_and_deduplicate_related_links() {
-    let (_db, file) = crate::hir::tests::helper::make_test_db("contract C {}");
+    let (_db, file) = make_test_db("contract C {}");
     let range = NodeRange { start: 4, end: 5 };
     let link = |start: u32, message: &str| RelatedDiagnostic {
         file,
@@ -116,7 +117,7 @@ fn same_range_conflicts_keep_distinct_messages_and_links() {
         contract B { function f() public virtual {} function g() public virtual {} }
         contract C is A, B {}
     "#;
-    let (db, file) = crate::hir::tests::helper::make_test_db(source);
+    let (db, file) = make_test_db(source);
     let found = diagnostics(&db, file);
     let conflicts: Vec<_> = found
         .iter()
@@ -141,7 +142,7 @@ fn conflicted_member_use_links_every_base_declaration() {
         contract B { function f() public virtual {} }
         contract C is A, B { function probe(C c) external { c.f(); } }
     "#;
-    let (db, file) = crate::hir::tests::helper::make_test_db(source);
+    let (db, file) = make_test_db(source);
     let found = diagnostics(&db, file);
     let ambiguity = found
         .iter()
@@ -165,7 +166,7 @@ fn bare_conflicted_call_links_external_base_declarations() {
         contract A { function f() public virtual {} }
         contract C is I, A { function probe() external { f(); } }
     "#;
-    let (db, file) = crate::hir::tests::helper::make_test_db(source);
+    let (db, file) = make_test_db(source);
     let found = diagnostics(&db, file);
     let ambiguity = found
         .iter()
@@ -183,7 +184,7 @@ fn overloaded_conflicts_on_one_name_merge_related_links() {
         contract B { function f(uint) public virtual {} function f(bool) public virtual {} }
         contract C is A, B {}
     "#;
-    let (db, file) = crate::hir::tests::helper::make_test_db(source);
+    let (db, file) = make_test_db(source);
     let found = diagnostics(&db, file);
     let conflicts: Vec<_> = found
         .iter()
@@ -198,7 +199,7 @@ fn overloaded_conflicts_on_one_name_merge_related_links() {
 #[test]
 fn redeclaration_is_reported_at_the_rejected_name_with_the_previous_declaration() {
     let source = "contract C { uint x; uint x; }";
-    let (db, file) = crate::hir::tests::helper::make_test_db(source);
+    let (db, file) = make_test_db(source);
     let found = diagnostics(&db, file);
     let redeclared: Vec<_> = found
         .iter()
@@ -230,7 +231,7 @@ fn ambiguous_overload_formats_each_signature_as_plain_text() {
             function g() external { f(1); }
         }
     "#;
-    let (db, file) = crate::hir::tests::helper::make_test_db(source);
+    let (db, file) = make_test_db(source);
     let found = diagnostics(&db, file);
     let ambiguity = found
         .iter()
@@ -257,7 +258,7 @@ fn access_failure_includes_declaration_location() {
             function check(A a) external { a.internalOnly(); }
         }
     "#;
-    let (db, file) = crate::hir::tests::helper::make_test_db(source);
+    let (db, file) = make_test_db(source);
     let found = diagnostics(&db, file);
     let failure = found
         .iter()

@@ -4,7 +4,7 @@ use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
 use crate::hir::resolver::*;
 use crate::hir::resolution::*;
-use crate::hir::types::{CallKind, Ty, TyKind};
+use crate::hir::types::{BaseKind, CallKind, Ty, TyKind};
 use crate::hir::linearize::Linearizer;
 
 /// The declaration-phase constructor never loads its container's body map,
@@ -135,7 +135,7 @@ fn type_namespace_reference_tag_and_invocability_match_solc() {
     assert!(
         matches!(
             callable(this_contract, "fn").kind(),
-            CallKind::Base(crate::hir::types::BaseKind::SelfQualified)
+            CallKind::Base(BaseKind::SelfQualified)
         ),
         "self-qualified `C.fn` retains its type-qualified route",
     );

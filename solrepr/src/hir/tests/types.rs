@@ -1,3 +1,5 @@
+use crate::hir::builtins::BuiltinTy;
+use crate::hir::tests::helper::{find_contract, find_error, find_event, make_test_db};
 use crate::hir::types::*;
 use crate::ir::def_map::DefId;
 
@@ -8,7 +10,7 @@ fn primitive(value: Primitive) -> TyKind {
 
 #[test]
 fn error_and_event_type_display_include_parameter_lists() {
-    let (db, file) = crate::hir::tests::helper::make_test_db(
+    let (db, file) = make_test_db(
         r#"
         contract C {
             error Failure(uint256 code, address);
@@ -16,10 +18,10 @@ fn error_and_event_type_display_include_parameter_lists() {
         }
         "#,
     );
-    let DefId::Error(error) = crate::hir::tests::helper::find_error(&db, file, "Failure") else {
+    let DefId::Error(error) = find_error(&db, file, "Failure") else {
         unreachable!()
     };
-    let DefId::Event(event) = crate::hir::tests::helper::find_event(&db, file, "Changed") else {
+    let DefId::Event(event) = find_event(&db, file, "Changed") else {
         unreachable!()
     };
 
@@ -99,7 +101,7 @@ fn primitive_implicit_conversions_match_solidity_directions() {
 
 #[test]
 fn invalid_types_never_convert() {
-    let (db, _) = crate::hir::tests::helper::make_test_db("contract C {}");
+    let (db, _) = make_test_db("contract C {}");
     let uint = Type(Ty::primitive(&db, Primitive::Uint(256)));
     let invalid = Type(Ty::invalid(&db));
     assert_eq!(invalid.implicitly_converts_to(uint, &db), None);
@@ -121,7 +123,7 @@ fn invalid_types_never_convert() {
 
 #[test]
 fn non_assignable_types_are_never_conversion_targets() {
-    let (db, file) = crate::hir::tests::helper::make_test_db("contract C {}");
+    let (db, file) = make_test_db("contract C {}");
     let uint = Ty::primitive(&db, Primitive::Uint(256));
     let name = uint.narrow(&db).unwrap();
     let byte = Ty::primitive(&db, Primitive::Uint(8));
@@ -131,7 +133,7 @@ fn non_assignable_types_are_never_conversion_targets() {
         Ty::new(&db, TyKind::Type(name)),
         Ty::new(
             &db,
-            TyKind::Builtin(crate::hir::builtins::BuiltinTy::Msg),
+            TyKind::Builtin(BuiltinTy::Msg),
         ),
         Ty::new(&db, TyKind::Void),
         Ty::new(&db, TyKind::Literal(LiteralKind::Rational)),
@@ -185,7 +187,7 @@ fn non_assignable_types_are_never_conversion_targets() {
     // `super` and an imported module are receivers, not values. `super`
     // names a contract, but must not convert to it — a receiver is never
     // something you can assign.
-    let DefId::Contract(contract) = crate::hir::tests::helper::find_contract(&db, file, "C") else {
+    let DefId::Contract(contract) = find_contract(&db, file, "C") else {
         unreachable!("fixture declares contract C")
     };
     let contract_ty = Ty::new(&db, TyKind::Contract(contract));
@@ -368,7 +370,7 @@ fn primitive_explicit_conversions_match_solidity_directions() {
 /// not lowered, so `-1` arrives as `1` (see the unary entry in `TODO.md`).
 #[test]
 fn negative_literals_do_not_reach_unsigned_targets() {
-    let (db, _) = crate::hir::tests::helper::make_test_db("contract C {}");
+    let (db, _) = make_test_db("contract C {}");
     let negative = LiteralKind::Int {
         neg: true,
         min_bits: 0,

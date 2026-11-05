@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::ast::kinds::{FieldKind, NodeKind};
 use crate::ast::{AstNode, NodeRange, StructId};
-use crate::hir::body_map::{Local, LocalId};
+use crate::hir::body_map::{BodyOwnerId, Local, LocalId};
 use crate::hir::builtins::Builtin;
 use crate::hir::exprs::Name;
 use crate::hir::item_data::SemanticId;
@@ -681,12 +681,24 @@ pub(crate) fn complete_expr(
 
     // 1. Locals (if inside a function/modifier body)
     if let Some(body) = resolver.body() {
-        for (_, local) in body
-            .locals
-            .iter()
-            .filter(|(_, local)| local.range().start <= offset)
-        {
-            acc.push(completion_item_for_local(local, &body.syntax_store));
+        let local_ranges = match owner {
+            DefId::Function(id) => {
+                Some(db.body_source_map(BodyOwnerId::Function(id)))
+            }
+            DefId::Modifier(id) => Some(
+                db.body_source_map(BodyOwnerId::Modifier(id)),
+            ),
+            _ => None,
+        };
+        for (local_id, local) in body.locals.iter() {
+            let visible = local_ranges.as_ref().is_some_and(|map| {
+                map.local_ranges
+                    .get(local_id)
+                    .is_some_and(|range| range.start <= offset)
+            });
+            if visible {
+                acc.push(completion_item_for_local(local, &body.syntax_store));
+            }
         }
     }
 

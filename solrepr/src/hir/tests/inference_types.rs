@@ -23,7 +23,7 @@ fn inherited_constant_in_signature_type_is_resolved() {
         .function_signature(function)
         .expect("inherited array bound should resolve without body inference");
     assert_eq!(signature.params.len(), 1);
-    let TyKind::Ref(array, crate::hir::types::Location::Memory) = signature.params[0].kind(&db)
+    let TyKind::Ref(array, Location::Memory) = signature.params[0].kind(&db)
     else {
         panic!("expected a memory reference parameter");
     };
@@ -33,7 +33,7 @@ fn inherited_constant_in_signature_type_is_resolved() {
     assert_eq!(size, Some(BigInt::from(4u8)));
     assert!(matches!(
         elem.kind(&db),
-        TyKind::Primitive(crate::hir::types::Primitive::Uint(256))
+        TyKind::Primitive(Primitive::Uint(256))
     ));
 }
 
@@ -139,8 +139,7 @@ fn invalid_data_location_reports_diagnostic() {
         panic!("fixture function should exist");
     };
     let range = db
-        .body_map(BodyOwnerId::Function(id))
-        .syntax_store
+        .body_source_map(BodyOwnerId::Function(id))
         .ty_ref_ranges[*ty_ref_id];
     let text = db.text(file);
     assert!(text[range.start as usize..range.end as usize].contains("mapping"));
@@ -164,7 +163,7 @@ fn qualified_types_lower_to_identifier_chains() {
     let DefId::Function(function_id) = owner else {
         panic!("expected function owner");
     };
-    let (body, _) = db.body_and_source_map(BodyOwnerId::Function(function_id));
+    let body = db.body_map(BodyOwnerId::Function(function_id));
     let local_id = body.scopes[body.root_scope]
         .get(&"value".into())
         .expect("fixture should declare `value`");
@@ -182,8 +181,9 @@ fn qualified_types_lower_to_identifier_chains() {
     assert_eq!(name.as_str(), "Outer");
 
     let text = db.text(file);
-    let inner_range = body.syntax_store.ty_ref_ranges[ty_ref_id];
-    let outer_range = body.syntax_store.ty_ref_ranges[base_id];
+    let source_map = db.body_source_map(BodyOwnerId::Function(function_id));
+    let inner_range = source_map.ty_ref_ranges[ty_ref_id];
+    let outer_range = source_map.ty_ref_ranges[base_id];
     assert_eq!(
         &text[inner_range.start as usize..inner_range.end as usize],
         "Inner"
@@ -432,7 +432,7 @@ fn opaque_constants_stay_silent() {
     }
     let inference = var_inference(&db, file, "SLOT");
     assert!(expr_results(&inference).any(|(_, ty, _)| {
-        matches!(ty.kind(&db), TyKind::Primitive(crate::hir::types::Primitive::FixedBytes(32)))
+        matches!(ty.kind(&db), TyKind::Primitive(Primitive::FixedBytes(32)))
     }), "the keccak256 call should still infer to bytes32");
 }
 
@@ -537,8 +537,7 @@ fn unresolved_type_segments_report_once_on_the_failing_segment() {
             panic!("{source}: fixture function should exist");
         };
         let range = db
-            .body_map(BodyOwnerId::Function(id))
-            .syntax_store
+            .body_source_map(BodyOwnerId::Function(id))
             .ty_ref_ranges[ty_ref_id];
         let text = db.text(file);
         assert_eq!(

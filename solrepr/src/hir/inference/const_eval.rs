@@ -250,8 +250,8 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             .expr_orders
             .and_then(|map| map.get(expr).copied())
             .unwrap_or_default();
-        let self_range = self.store.expr_ranges.get(expr).copied();
-        self.resolver.resolve_name_in(name, scope, order, self_range)
+        let is_self_name = self.store.own_name_expr == Some(expr);
+        self.resolver.resolve_name_in(name, scope, order, is_self_name)
     }
 
     pub(super) fn eval(&mut self, expr: ExprId) -> Result<ConstValue, ConstError> {

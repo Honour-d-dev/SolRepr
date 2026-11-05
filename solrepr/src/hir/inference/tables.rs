@@ -3,7 +3,7 @@ use triomphe::Arc;
 
 use crate::hir::body_map::{Local, LocalId};
 use crate::hir::exprs::ExprId;
-use crate::hir::item_data::{FieldId, SemanticId, VariantId};
+use crate::hir::item_data::{Field, FieldId, SemanticId, Variant, VariantId};
 use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::Resolution;
 use crate::hir::semantic_errors::SemanticDiagnostic;
@@ -47,8 +47,8 @@ impl Inference {
         db: &dyn HirDb,
         store: &SyntaxStore,
         locals: Option<&Arena<Local>>,
-        fields: Option<&Arena<crate::hir::item_data::Field>>,
-        variants: Option<&Arena<crate::hir::item_data::Variant>>,
+        fields: Option<&Arena<Field>>,
+        variants: Option<&Arena<Variant>>,
     ) -> Self {
         let mut tables = Self::empty();
         for (ty_ref_id, _) in store.types.iter() {

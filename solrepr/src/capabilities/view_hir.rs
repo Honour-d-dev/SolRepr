@@ -8,7 +8,7 @@ use lsp_types::{Position, TextDocumentIdentifier};
 use crate::ast::NodeRange;
 use crate::hir::body_map::BodyOwnerId;
 use crate::hir::exprs::{Expr, ExprId, Literal};
-use crate::hir::syntax_store::SyntaxStore;
+use crate::hir::syntax_store::{SourceMap, SyntaxStore};
 use crate::ir::def_map::DefId;
 use crate::salsa::{HirDb, Db};
 use crate::utilities::{log_info, to_utf8path};
@@ -56,9 +56,9 @@ pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
     let mut found_any = false;
 
     macro_rules! process_store {
-        ($store:expr) => {
+        ($store:expr, $map:expr) => {
             let store: &SyntaxStore = $store;
-            let ranges = build_expr_ranges(store);
+            let ranges = build_expr_ranges(&$map);
             let roots = find_root_exprs(store, &ranges, selection);
             if !roots.is_empty() {
                 found_any = true;
@@ -73,58 +73,70 @@ pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
         DefId::Function(id) => {
             let fn_data = db.function_data(*id);
             let body = db.body_map(BodyOwnerId::Function(*id));
-            process_store!(&fn_data.syntax_store);
-            process_store!(&body.syntax_store);
+            process_store!(
+                &fn_data.syntax_store,
+                db.item_source_map(DefId::Function(*id))
+            );
+            process_store!(
+                &body.syntax_store,
+                db.body_source_map(BodyOwnerId::Function(*id))
+            );
         }
         DefId::Modifier(id) => {
             let mod_data = db.modifier_data(*id);
             let body = db.body_map(BodyOwnerId::Modifier(*id));
-            process_store!(&mod_data.syntax_store);
-            process_store!(&body.syntax_store);
+            process_store!(
+                &mod_data.syntax_store,
+                db.item_source_map(DefId::Modifier(*id))
+            );
+            process_store!(
+                &body.syntax_store,
+                db.body_source_map(BodyOwnerId::Modifier(*id))
+            );
         }
         DefId::Var(id) => {
             let data = db.var_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Var(*id)));
         }
         DefId::Struct(id) => {
             let data = db.struct_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Struct(*id)));
         }
         DefId::Enum(id) => {
             let data = db.enum_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Enum(*id)));
         }
         DefId::Event(id) => {
             let data = db.event_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Event(*id)));
         }
         DefId::Error(id) => {
             let data = db.error_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Error(*id)));
         }
         DefId::Contract(id) => {
             let data = db.contract_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Contract(*id)));
         }
         DefId::Interface(id) => {
             let data = db.interface_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Interface(*id)));
         }
         DefId::Library(id) => {
             let data = db.library_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Library(*id)));
         }
         DefId::Udvt(id) => {
             let data = db.udvt_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Udvt(*id)));
         }
         DefId::Using(id) => {
             let data = db.using_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Using(*id)));
         }
         DefId::Import(id) => {
             let data = db.import_data(*id);
-            process_store!(&data.syntax_store);
+            process_store!(&data.syntax_store, db.item_source_map(DefId::Import(*id)));
         }
         DefId::File(_) => {}
     }
@@ -167,8 +179,8 @@ pub struct ViewHirParams {
 // ── ExprId → NodeRange mapping ───────────────────────────────────────
 
 /// Build a map from `ExprId` to its source `NodeRange`.
-fn build_expr_ranges(store: &SyntaxStore) -> HashMap<ExprId, NodeRange> {
-    store
+fn build_expr_ranges(map: &SourceMap) -> HashMap<ExprId, NodeRange> {
+    map
         .expr_ranges
         .iter()
         .map(|(id, range)| (id, *range))

@@ -12,7 +12,7 @@ use crate::ast::{
 };
 use crate::hir::body_map::{Local, LocalId};
 use crate::hir::exprs::{Expr, ExprBuilder, ExprId, Name};
-use crate::hir::syntax_store::SyntaxStore;
+use crate::hir::syntax_store::{SourceMap, SyntaxStore};
 use crate::hir::types::{
     Location, Mutability, Primitive, RefKind, TyName, TyNameId, TypeBuilder, VariableKind,
     Visibility,
@@ -46,12 +46,9 @@ pub struct VarData {
     pub ty_ref: TyNameId,
     /// Effective visibility: the written keyword, or the default when omitted.
     pub vis: Visibility,
-    /// Source range of the written visibility keyword; `None` when inferred.
-    pub vis_range: Option<NodeRange>,
     pub override_specifier: Option<OverrideSpecifier>,
     pub kind: VariableKind,
     pub loc: Location,
-    pub range: NodeRange,
     /// Initializer expression for constant/immutable variables
     pub init: Option<ExprId>,
     pub syntax_store: SyntaxStore,
@@ -61,7 +58,6 @@ pub struct VarData {
 pub struct Field {
     pub name: Name,
     pub ty_ref: TyNameId,
-    pub range: NodeRange,
 }
 
 #[derive(PartialEq, Eq)]
@@ -74,7 +70,6 @@ pub struct StructData {
 #[derive(PartialEq, Eq, Hash)]
 pub struct Variant {
     pub name: Name,
-    pub range: NodeRange,
 }
 
 #[derive(PartialEq, Eq)]
@@ -89,7 +84,6 @@ pub struct FunctionData {
     pub name: Name,
     pub kind: FunctionKind,
     pub vis: Visibility,
-    pub vis_range: Option<NodeRange>,
     pub mutability: Mutability,
     pub is_virtual: bool,
     pub override_specifier: Option<OverrideSpecifier>,
@@ -121,8 +115,6 @@ pub struct ModifierData {
     pub is_virtual: bool,
     pub override_specifier: Option<OverrideSpecifier>,
     pub has_body: bool,
-    /// The body block's range, when the modifier has one.
-    pub body_range: Option<NodeRange>,
     /// Whether the body contains the `_` placeholder statement.
     pub has_placeholder: bool,
     pub parameters: Arena<Local>,
@@ -168,21 +160,16 @@ pub struct UsingData {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum OverrideSpecifier {
-    Bare {
-        range: NodeRange,
-    },
+    Bare,
     List {
         paths: Box<[OverridePath]>,
-        range: NodeRange,
     },
 }
 
-/// One contract named in `override(A.B, C)`. The range is kept even when the
-/// path does not resolve to a type, so diagnostics can still point at it.
+/// One contract named in `override(A.B, C)`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct OverridePath {
     pub ty_ref: Option<TyNameId>,
-    pub range: NodeRange,
 }
 
 pub struct ItemBuilder {
@@ -190,6 +177,7 @@ pub struct ItemBuilder {
     file: FileId,
     ast_id_map: Arc<AstIdMap>,
     syntax_store: SyntaxStore,
+    source_map: SourceMap,
 }
 
 impl ExprBuilder for ItemBuilder {
@@ -199,8 +187,8 @@ impl ExprBuilder for ItemBuilder {
 
     fn alloc_expr_range(&mut self, expr: Expr, range: NodeRange) -> ExprId {
         let expr_id = self.syntax_store.exprs.alloc(expr);
-        self.syntax_store.expr_ranges.insert(expr_id, range);
-        self.syntax_store
+        self.source_map.expr_ranges.insert(expr_id, range);
+        self.source_map
             .range_to_semantic
             .insert(range, SemanticId::Expr(expr_id));
         expr_id
@@ -208,7 +196,7 @@ impl ExprBuilder for ItemBuilder {
 
     fn alloc_member_expr(&mut self, member: Expr, range: NodeRange, prop: NodeRange) -> ExprId {
         let mem_id = self.alloc_expr_range(member, range);
-        self.syntax_store
+        self.source_map
             .range_to_semantic
             .insert(prop, SemanticId::Expr(mem_id));
         mem_id
@@ -217,7 +205,7 @@ impl ExprBuilder for ItemBuilder {
     fn alloc_call_expr(&mut self, call: Expr, node: Node, ident: Option<NodeRange>) -> ExprId {
         let call_id = self.alloc_expr(call, node);
         if let Some(ident) = ident {
-            self.syntax_store
+            self.source_map
                 .range_to_semantic
                 .insert(ident, SemanticId::Expr(call_id));
         };
@@ -226,7 +214,7 @@ impl ExprBuilder for ItemBuilder {
 
     fn alloc_wrapper_expr(&mut self, expr: Expr, node: Node) -> ExprId {
         let expr_id = self.syntax_store.exprs.alloc(expr);
-        self.syntax_store
+        self.source_map
             .expr_ranges
             .insert(expr_id, NodeRange::from(&node));
         expr_id
@@ -237,8 +225,8 @@ impl TypeBuilder for ItemBuilder {
     fn alloc_type(&mut self, ty: TyName, node: Node) -> TyNameId {
         let ty_ref_id = self.syntax_store.types.alloc(ty);
         let range = NodeRange::from(&node);
-        self.syntax_store.ty_ref_ranges.insert(ty_ref_id, range);
-        self.syntax_store
+        self.source_map.ty_ref_ranges.insert(ty_ref_id, range);
+        self.source_map
             .range_to_semantic
             .insert(range, SemanticId::Type(ty_ref_id));
         ty_ref_id
@@ -252,7 +240,13 @@ impl ItemBuilder {
             file,
             ast_id_map,
             syntax_store: SyntaxStore::default(),
+            source_map: SourceMap::default(),
         }
+    }
+
+    /// The positions collected while building this item.
+    pub fn take_source_map(&mut self) -> SourceMap {
+        mem::take(&mut self.source_map)
     }
 
     // ── Import Builder ───────────────────────────────────────────────────
@@ -315,9 +309,7 @@ impl ItemBuilder {
     pub fn build_var(&mut self, var: &Var) -> VarData {
         let node = var.to_node_ref().node();
         let mut name = Name::default();
-        let mut range = NodeRange::from(&node); //just a placeholder
         let mut vis = Visibility::default();
-        let mut vis_range = None;
         let mut override_specifier = None;
         let mut kind = VariableKind::StateVariable;
         let mut ty_ref = None;
@@ -329,15 +321,17 @@ impl ItemBuilder {
                 NodeKind::IMMUTABLE => kind = VariableKind::Immutable,
                 NodeKind::VISIBILITY => {
                     vis = Visibility::parse(self.root().text_by_range(child.byte_range()).trim());
-                    vis_range = Some(NodeRange::from(&child));
+                    self.source_map.vis_range = Some(NodeRange::from(&child));
                 }
                 NodeKind::OVERRIDE_SPECIFIER => {
                     override_specifier = Some(self.lower_override_specifier(child));
                 }
                 NodeKind::IDENTIFIER => {
-                    self.lower_expr(child);
+                    if let Some(expr_id) = self.lower_expr(child) {
+                        self.syntax_store.own_name_expr = Some(expr_id);
+                    }
                     name = self.root.text_by_range(child.byte_range()).trim().into();
-                    range = NodeRange::from(&child);
+                    self.source_map.decl_range = Some(NodeRange::from(&child));
                 }
                 NodeKind::EXPRESSION => {
                     init = self.lower_expr(child);
@@ -349,7 +343,6 @@ impl ItemBuilder {
             name,
             ty_ref: ty_ref.unwrap(),
             vis,
-            vis_range,
             override_specifier,
             kind,
             loc: if kind == VariableKind::StateVariable {
@@ -357,7 +350,6 @@ impl ItemBuilder {
             } else {
                 Location::Stack
             },
-            range,
             init,
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
@@ -369,17 +361,22 @@ impl ItemBuilder {
             .children(&mut node.walk())
             .any(|child| child.kind_id() == NodeKind::LPAREN)
         {
-            return OverrideSpecifier::Bare { range };
+            self.source_map.override_ranges = Box::from([range]);
+            return OverrideSpecifier::Bare;
         }
+        let mut ranges = vec![range];
         let paths = node
             .named_children(&mut node.walk())
             .filter(|path| path.kind_id() == NodeKind::USER_DEFINED_TYPE)
-            .map(|path| OverridePath {
-                ty_ref: self.lower_type(path),
-                range: NodeRange::from(&path),
+            .map(|path| {
+                ranges.push(NodeRange::from(&path));
+                OverridePath {
+                    ty_ref: self.lower_type(path),
+                }
             })
             .collect();
-        OverrideSpecifier::List { paths, range }
+        self.source_map.override_ranges = ranges.into_boxed_slice();
+        OverrideSpecifier::List { paths }
     }
 
     // ── Struct Builder ───────────────────────────────────────────────────
@@ -414,16 +411,15 @@ impl ItemBuilder {
                             continue;
                         };
 
-                        let field_id = fields.alloc(Field {
-                            name,
-                            ty_ref,
-                            range: NodeRange::from(&member),
-                        });
+                        let field_id = fields.alloc(Field { name, ty_ref });
 
-                        self.syntax_store
+                        self.source_map
+                            .field_ranges
+                            .insert(field_id, NodeRange::from(&member));
+                        self.source_map
                             .range_to_semantic
                             .insert(NodeRange::from(&member), SemanticId::Field(field_id));
-                        self.syntax_store
+                        self.source_map
                             .range_to_semantic
                             .insert(range, SemanticId::Field(field_id));
                     }
@@ -454,11 +450,11 @@ impl ItemBuilder {
                 if value.kind_id() == NodeKind::ENUM_VALUE {
                     let name = self.root().text_by_range(value.byte_range()).trim().into();
 
-                    let variant_id = variants.alloc(Variant {
-                        name,
-                        range: NodeRange::from(&value),
-                    });
-                    self.syntax_store
+                    let variant_id = variants.alloc(Variant { name });
+                    self.source_map
+                        .variant_ranges
+                        .insert(variant_id, NodeRange::from(&value));
+                    self.source_map
                         .range_to_semantic
                         .insert(NodeRange::from(&value), SemanticId::Variant(variant_id));
                 }
@@ -474,7 +470,7 @@ impl ItemBuilder {
 
     // ── Event Builder ────────────────────────────────────────────────────
 
-    pub fn build_event(mut self, event: &Event) -> EventData {
+    pub fn build_event(&mut self, event: &Event) -> EventData {
         let node = event.to_node_ref().node();
         let name = event.name().unwrap_or_default();
         let mut parameters = Arena::new();
@@ -507,7 +503,7 @@ impl ItemBuilder {
 
     // ── Error Builder ────────────────────────────────────────────────────
 
-    pub fn build_error(mut self, error: &Error) -> ErrorData {
+    pub fn build_error(&mut self, error: &Error) -> ErrorData {
         let node = error.to_node_ref().node();
         let name = error.name().unwrap_or_default();
         let mut parameters = Arena::new();
@@ -534,7 +530,7 @@ impl ItemBuilder {
     // ── Modifier Builder ─────────────────────────────────────────────────
     
 
-    pub fn build_modifier(mut self, modifier: &Modifier) -> ModifierData {
+    pub fn build_modifier(&mut self, modifier: &Modifier) -> ModifierData {
         let node = modifier.to_node_ref().node();
         let name = modifier.name().unwrap_or_default();
         let mut marked_virtual = false;
@@ -557,12 +553,12 @@ impl ItemBuilder {
         }
 
         let body = node.child_by_field_id(FieldKind::BODY.into());
+        self.source_map.body_range = body.map(|body| NodeRange::from(&body));
         ModifierData {
             name,
             is_virtual: marked_virtual,
             override_specifier,
             has_body: body.is_some(),
-            body_range: body.map(|body| NodeRange::from(&body)),
             has_placeholder: body
                 .is_some_and(|body| self.body_has_placeholder(body)),
             parameters,
@@ -582,11 +578,10 @@ impl ItemBuilder {
 
     // ── Function Builder ─────────────────────────────────────────────────
 
-    pub fn build_fn(mut self, func: &Function) -> FunctionData {
+    pub fn build_fn(&mut self, func: &Function) -> FunctionData {
         let node = func.to_node_ref().node();
         let name = func.name().unwrap_or_default();
         let mut vis = Visibility::Internal;
-        let mut vis_range = None;
         let mut mutability = Mutability::NonPayable;
         let mut is_virtual = false;
         let mut override_specifier = None;
@@ -610,7 +605,7 @@ impl ItemBuilder {
                 }
                 NodeKind::VISIBILITY | NodeKind::PUBLIC | NodeKind::INTERNAL => {
                     vis = Visibility::parse(func.to_node_ref().text_by_range(child.byte_range()).trim());
-                    vis_range = Some(NodeRange::from(&child));
+                    self.source_map.vis_range = Some(NodeRange::from(&child));
                 }
                 NodeKind::STATE_MUTABILITY => {
                     mutability =
@@ -640,7 +635,6 @@ impl ItemBuilder {
             name,
             kind: func.kind(),
             vis,
-            vis_range,
             mutability,
             is_virtual,
             override_specifier,
@@ -686,16 +680,16 @@ impl ItemBuilder {
             name,
             VariableKind::Parameter,
             ty_ref,
-            local_range,
             decl_order,
             None,
         ));
-        self.syntax_store
+        self.source_map.local_ranges.insert(local_id, local_range);
+        self.source_map
             .range_to_semantic
             .insert(parameter_range, SemanticId::Local(local_id));
 
         if let Some(range) = name_range {
-            self.syntax_store
+            self.source_map
                 .range_to_semantic
                 .insert(range, SemanticId::Local(local_id));
         }
@@ -704,7 +698,7 @@ impl ItemBuilder {
 
     // ── Contract Builder ─────────────────────────────────────────────────
 
-    pub fn build_contract(mut self, contract: &Contract) -> ContractData {
+    pub fn build_contract(&mut self, contract: &Contract) -> ContractData {
         let node = contract.to_node_ref().node();
         let name = contract.name().unwrap_or_default();
         let is_abstract = node
@@ -747,7 +741,7 @@ impl ItemBuilder {
 
     // ── Interface Builder ────────────────────────────────────────────────
 
-    pub fn build_interface(mut self, interface: &Interface) -> InterfaceData {
+    pub fn build_interface(&mut self, interface: &Interface) -> InterfaceData {
         let node = interface.to_node_ref().node();
         let name = interface.name().unwrap_or_default();
         let mut bases = Vec::new();
@@ -772,7 +766,7 @@ impl ItemBuilder {
 
     // ── Library Builder ──────────────────────────────────────────────────
 
-    pub fn build_library(mut self, library: &Library) -> LibraryData {
+    pub fn build_library(&mut self, library: &Library) -> LibraryData {
         let name = library.name().unwrap_or_default();
 
         library
@@ -789,7 +783,7 @@ impl ItemBuilder {
 
     // ── Udvt Builder ─────────────────────────────────────────────────────
 
-    pub fn build_udvt(mut self, udvt: &Udvt) -> UdvtData {
+    pub fn build_udvt(&mut self, udvt: &Udvt) -> UdvtData {
         let name = udvt.name().unwrap_or_default();
         let underlying = Primitive::parse(&udvt.underlying().unwrap_or_default());
 
@@ -815,7 +809,7 @@ impl ItemBuilder {
 
     // ── Using Builder ────────────────────────────────────────────────────
 
-    pub fn build_using(mut self, using: &Using) -> UsingData {
+    pub fn build_using(&mut self, using: &Using) -> UsingData {
         let mut sources = vec![];
         let mut target = None;
         let node = using.to_node_ref().node();
