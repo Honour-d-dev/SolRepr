@@ -1,12 +1,12 @@
 use std::borrow::Cow;
 use num_bigint::{BigInt, Sign};
 
-use crate::ast::{EnumId, NodeRange, StructId};
+use crate::ast::{EnumId, StructId};
 use crate::hir::builtins::{BuiltinFn, ParamSchema};
 use crate::hir::exprs::{Expr, ExprId, Name, NamedValues};
 use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, CallableOrigin, Resolution};
-use crate::hir::semantic_errors::SemanticDiagnostic;
+use crate::hir::semantic_errors::{DiagnosticAnchor, SemanticDiagnostic};
 use crate::hir::types::{
     CallKind, Callee, Fn, Location, Mutability, Primitive, Ty, TyKind,
     Type, ViaTypeKind, Visibility, option_type,
@@ -257,10 +257,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// Entry point for `Expr::New`: contract creation and dynamic array/bytes
     /// allocation.
     pub(super) fn check_new(&mut self, expr: ExprId, ty: ExprId, ty_expr_ty: Ty) -> Ty {
-        let range = self.input.store.expr_ranges[expr];
         return_invalid!(ty_expr_ty, self.db);
         let Some(Resolution::Type(name)) = self.tables.expr_resolution(ty).cloned() else {
-            return self.fail(range, "`new` requires a type name", Ty::invalid(self.db));
+            return self.fail(
+                DiagnosticAnchor::Expr(expr),
+                "`new` requires a type name",
+                Ty::invalid(self.db),
+            );
         };
         let name = name.peel_loc(self.db);
         let callable = match name.kind(self.db) {
@@ -270,7 +273,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     || members.data.has_unimplemented_members()
                 {
                     return self.fail(
-                        range,
+                        DiagnosticAnchor::Expr(expr),
                         "Cannot instantiate an abstract contract.",
                         Ty::invalid(self.db),
                     );
@@ -282,7 +285,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             TyKind::Array { size: None, .. } => Callable::new_allocation(name),
             TyKind::Array { size: Some(_), .. } => {
                 return self.fail(
-                    range,
+                    DiagnosticAnchor::Expr(expr),
                     "length has to be placed in parentheses after the array type for `new`",
                     Ty::invalid(self.db),
                 );
@@ -292,7 +295,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 Callable::new_allocation(name)
             }
             target => {
-                return self.fail(range, uninstantiable(target), Ty::invalid(self.db));
+                return self.fail(DiagnosticAnchor::Expr(expr), uninstantiable(target), Ty::invalid(self.db));
             }
         };
         self.tables
@@ -304,7 +307,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// forwards the callee's type and resolution
     /// The options expression types as the callee itself
     pub(super) fn check_call_options(&mut self, expr: ExprId, callee: ExprId, callee_ty: Ty, options: &NamedValues) -> Ty {
-        let range = self.input.store.expr_ranges[expr];
         
         // Carry the callee's identity to the enclosing call expr
         let resolution = self.tables.expr_resolution(callee).cloned();
@@ -313,7 +315,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
 
         if !self.in_callee() {
-            return self.fail( range, "options can only be set on a function call", callee_ty, );
+            return self.fail(DiagnosticAnchor::Expr(expr), "options can only be set on a function call", callee_ty, );
         }
 
         if callee_ty.is_invalid(self.db) && !matches!(resolution, Some(Resolution::Callables(_))) {
@@ -322,7 +324,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         // `{…}{…}` reject multiple options
         if matches!(&self.input.store.exprs[callee], Expr::CallOptions { .. }) {
             return self.fail(
-                range,
+                DiagnosticAnchor::Expr(expr),
                 "call options have already been set — combine them into a single `{…}`",
                 callee_ty,
             );
@@ -338,7 +340,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         };
         let Some(callee_options) = callee_options else {
             return self.fail(
-                range,
+                DiagnosticAnchor::Expr(expr),
                 "function call options can only be set on external function calls or contract creations",
                 callee_ty,
             );
@@ -355,17 +357,17 @@ impl<'db, 'store> Inferer<'db, 'store> {
         
         for (name, value) in options.iter() {
             let expected = match option_type(name) {
-                None => self.fail(range, format!("unknown call option: `{name}`"), None),
+                None => self.fail(DiagnosticAnchor::Expr(expr), format!("unknown call option: `{name}`"), None),
                 Some(primitive) if callee_options.contains(&name.as_str()) => {
                     Some(Ty::primitive(self.db, primitive))
                 }
                 Some(_) if name == "salt" => self.fail(
-                    range,
+                    DiagnosticAnchor::Expr(expr),
                     "call option: `salt` can only be used with `new`",
                     None,
                 ),
                 Some(_) => self.fail(
-                    range,
+                    DiagnosticAnchor::Expr(expr),
                     format!("call option: `{name}` cannot be used with `{host}`"),
                     None,
                 ),
@@ -379,7 +381,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 self.report(
                     SemanticDiagnostic::TypeMismatch {
                         expr: *value,
-                        range: self.input.store.expr_ranges[*value],
                         expected,
                         actual,
                     },
@@ -428,7 +429,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
         args: &[ExprId],
         arg_types: &[Ty],
     ) -> Ty {
-        let range = self.input.store.expr_ranges[expr];
         let callee_ty = self.tables.expr_ty(callee);
         match self.tables.expr_resolution(callee).cloned() {
             Some(Resolution::Callable(callable)) => {
@@ -455,7 +455,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 match target.kind(self.db) {
                     TyKind::Invalid => Ty::invalid(self.db),
                     TyKind::Struct(id) => {
-                        self.check_struct_construction(expr, range, id, args, arg_types, None)
+                        self.check_struct_construction(expr, id, args, arg_types, None)
                     }
                     _ if args.len() == 1 => {
                         let from = arg_types[0];
@@ -471,7 +471,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                             return self.report(
                                 SemanticDiagnostic::InvalidExplicitConversion {
                                     expr,
-                                    range,
                                     from,
                                     to: target,
                                 },
@@ -487,7 +486,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     _ => self.report(
                         SemanticDiagnostic::InvalidArgumentCount {
                             call: expr,
-                            range,
                             expected: 1,
                             actual: args.len(),
                         },
@@ -500,10 +498,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
             _ => match callee_ty.kind(self.db) {
                 TyKind::FnPtr(fnty) => {
                     let outcome = self.select_ptr(&fnty, args, arg_types);
-                    self.apply_call_outcome(expr, range, outcome)
+                    self.apply_call_outcome(expr, outcome)
                 }
                 TyKind::Invalid => Ty::invalid(self.db),
-                _ => self.fail(range, "expression is not callable", Ty::invalid(self.db)),
+                _ => self.fail(DiagnosticAnchor::Expr(expr), "expression is not callable", Ty::invalid(self.db)),
             },
         }
     }
@@ -515,11 +513,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
         named: &[(Name, ExprId)],
     ) -> Option<Ty> {
         let name = duplicate_name(named)?;
-        let range = self.input.store.expr_ranges[call];
         Some(self.report(
             SemanticDiagnostic::DuplicateNamedArgument {
                 call,
-                range,
                 name: name.clone(),
             },
             Ty::invalid(self.db),
@@ -534,7 +530,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
         named: &[(Name, ExprId)],
         arg_types: &[Ty],
     ) -> Ty {
-        let range = self.input.store.expr_ranges[call];
         let mut names = Vec::with_capacity(named.len());
         let mut values = Vec::with_capacity(named.len());
         for (name, value) in named.iter() {
@@ -545,15 +540,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
         match self.tables.expr_resolution(callee).cloned() {
             Some(Resolution::Type(ty)) => match ty.peel_loc(self.db).kind(self.db) {
                 TyKind::Invalid => {
-                    self.unknown_named_argument(range, named.first().map(|(name, _)| name))
+                    self.unknown_named_argument(call, named.first().map(|(name, _)| name))
                 }
                 TyKind::Contract(id) if self.in_modifier() => {
                     let callable = Callable::new_constructor(id);
-                    self.resolve_named_call(call, &callable, named, arg_types, range)
+                    self.resolve_named_call(call, &callable, named, arg_types)
                 }
                 TyKind::Struct(id) => self.check_struct_construction(
                     call,
-                    range,
                     id,
                     &values,
                     arg_types,
@@ -561,18 +555,18 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 ),
                 // A cast has no parameters to name.
                 _ => self.fail(
-                    range,
+                    DiagnosticAnchor::Expr(call),
                     "type conversion cannot allow named arguments",
                     Ty::invalid(self.db),
                 ),
             },
             Some(Resolution::Callable(callable)) => {
-                self.resolve_named_call(call, &callable, named, arg_types, range)
+                self.resolve_named_call(call, &callable, named, arg_types)
             }
             Some(Resolution::Callables(callables)) => {
-                self.resolve_named_callables(call, &callables, named, arg_types, range)
+                self.resolve_named_callables(call, &callables, named, arg_types)
             }
-            _ => self.unknown_named_argument(range, named.first().map(|(name, _)| name)),
+            _ => self.unknown_named_argument(call, named.first().map(|(name, _)| name)),
         }
     }
 
@@ -591,7 +585,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
         callable: &Callable,
         named: &[(Name, ExprId)],
         arg_types: &[Ty],
-        range: NodeRange,
     ) -> Ty {
         // A variadic builtin has no fixed parameter list to name.
         if matches!(
@@ -599,20 +592,19 @@ impl<'db, 'store> Inferer<'db, 'store> {
             ParamSchema::TypedTail | ParamSchema::AnyTail
         ) {
             return self.fail(
-                range,
+                DiagnosticAnchor::Expr(call),
                 "named arguments cannot be used for functions that take arbitrary parameters",
                 Ty::invalid(self.db),
             );
         }
         let Some(names) = self.parameter_names(callable) else {
-            return self.unknown_named_argument(range, named.first().map(|(name, _)| name));
+            return self.unknown_named_argument(call, named.first().map(|(name, _)| name));
         };
 
         if named.len() != names.len() {
             return self.report(
                 SemanticDiagnostic::InvalidArgumentCount {
                     call,
-                    range,
                     expected: names.len(),
                     actual: named.len(),
                 },
@@ -623,7 +615,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
             return self.report(
                 SemanticDiagnostic::UnknownNamedArgument {
                     call,
-                    range,
                     name: name.clone(),
                 },
                 Ty::invalid(self.db),
@@ -640,7 +631,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
         callables: &[Callable],
         named: &[(Name, ExprId)],
         arg_types: &[Ty],
-        range: NodeRange,
     ) -> Ty {
         self.tables.set_expr_resolution(
             call,
@@ -656,13 +646,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
             return self.report(
                 SemanticDiagnostic::NoMatchingOverload {
                     call,
-                    range,
                     candidates: callables.to_vec(),
                 },
                 Ty::invalid(self.db),
             );
         }
-        self.resolve_overload_candidates(call, range, callables, &matching, |this, callable| {
+        self.resolve_overload_candidates(call, callables, &matching, |this, callable| {
             let names = this.parameter_names(callable)?;
             let (_, types) = order_named(&names, named, arg_types)?;
             Some(Cow::Owned(types))
@@ -676,10 +665,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
         })
     }
 
-    fn unknown_named_argument(&mut self, range: NodeRange, name: Option<&Name>) -> Ty {
+    fn unknown_named_argument(&mut self, call: ExprId, name: Option<&Name>) -> Ty {
         let name = name.map_or(String::new(), Name::to_string);
         self.fail(
-            range,
+            DiagnosticAnchor::Expr(call),
             format!("named argument `{name}` does not match function declaration"),
             Ty::invalid(self.db),
         )
@@ -688,7 +677,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn check_struct_construction(
         &mut self,
         call: ExprId,
-        range: NodeRange,
         id: StructId,
         args: &[ExprId],
         arg_types: &[Ty],
@@ -706,7 +694,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
             return self.report(
                 SemanticDiagnostic::InvalidArgumentCount {
                     call,
-                    range,
                     expected: fields.len(),
                     actual: args.len(),
                 },
@@ -721,7 +708,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
             return self.report(
                 SemanticDiagnostic::UnknownNamedArgument {
                     call,
-                    range,
                     name: name.clone(),
                 },
                 Ty::invalid(self.db),
@@ -741,7 +727,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 return self.report(
                     SemanticDiagnostic::TypeMismatch {
                         expr: args[position],
-                        range: self.input.store.expr_ranges[args[position]],
                         expected: *field_ty,
                         actual,
                     },
@@ -813,18 +798,18 @@ impl<'db, 'store> Inferer<'db, 'store> {
         mutability.map(|mutability| mutability == Mutability::Payable)
     }
 
-    fn finish_call(&mut self, call: ExprId, callable: &Callable, range: NodeRange) -> Ty {
+    fn finish_call(&mut self, call: ExprId, callable: &Callable) -> Ty {
         self.tables
             .set_expr_resolution(call, Resolution::Callable(Callable::clone(callable)));
         if matches!(callable.origin(), CallableOrigin::Error(_)) && !self.in_revert() {
             return self.fail(
-                range,
+                DiagnosticAnchor::Expr(call),
                 "errors can only be used with revert statements or require functions",
                 Ty::invalid(self.db),
             );
         }
         if let Some(effect) = self.callable_mutability(callable) {
-            self.require_effect(range, effect, callable.def());
+            self.require_effect(call, effect, callable.def());
         }
         // Call options defer the checks that need the selected member: on an
         // overload set the picked member must be external (or a `new` creation),
@@ -838,7 +823,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             ) && !external
             {
                 return self.fail(
-                    self.input.store.expr_ranges[options_expr],
+                    DiagnosticAnchor::Expr(options_expr),
                     "function call options can only be set on external function calls or contract creations",
                     Ty::invalid(self.db),
                 );
@@ -851,13 +836,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 && self.accepts_value(callable) == Some(false)
             {
                 return self.fail(
-                    self.input.store.expr_ranges[options_expr],
+                    DiagnosticAnchor::Expr(options_expr),
                     "cannot set option `value` on a non-payable function",
                     Ty::invalid(self.db),
                 );
             }
         }
-        self.callable_sig(callable, range)
+        self.callable_sig(callable, call)
             .map(|sig| sig.result(self.db))
             .unwrap_or_else(|| Ty::invalid(self.db))
     }
@@ -871,16 +856,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
         callable: Callable,
         args: &[ExprId],
     ) -> Ty {
-        let range = self.input.store.expr_ranges[call];
         self.tables
             .set_expr_resolution(call, Resolution::Callable(callable));
         // An intrinsic bypasses selection, but not the effect lattice.
         if let Some(effect) = self.callable_mutability(&callable) {
-            self.require_effect(range, effect, callable.def());
+            self.require_effect(call, effect, callable.def());
         }
         let Some(builtin) = callable.builtin() else {
             return self.fail(
-                range,
+                DiagnosticAnchor::Expr(call),
                 "intrinsic call has no builtin identity",
                 Ty::invalid(self.db),
             );
@@ -924,7 +908,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 self.finish_abi_encode_call(call, args, &params)
             }
             _ => self.fail(
-                range,
+                DiagnosticAnchor::Expr(call),
                 format!("no intrinsic checker for `{}`", builtin.name()),
                 Ty::invalid(self.db),
             ),
@@ -938,13 +922,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
         args: &[ExprId],
         arg_types: &[Ty],
     ) -> Ty {
-        let range = self.input.store.expr_ranges[call];
         self.tables
             .set_expr_resolution(call, Resolution::Callable(callable));
         if !callable.is_invocable(self.db) {
-            return self.apply_call_outcome(call, range, CallOutcome::NotInvocable);
+            return self.apply_call_outcome(call, CallOutcome::NotInvocable);
         }
-        let Some(sig) = self.callable_sig(&callable, range) else {
+        let Some(sig) = self.callable_sig(&callable, call) else {
             return Ty::invalid(self.db);
         };
         let sig = if callable.encodes_args(&sig) {
@@ -953,16 +936,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
             sig
         };
         let outcome = self.select_one(&callable, &sig, args, arg_types);
-        self.apply_call_outcome(call, range, outcome)
+        self.apply_call_outcome(call, outcome)
     }
 
     fn resolve_callables(&mut self, call: ExprId, callables: &[Callable], arg_types: &[Ty]) -> Ty {
-        let range = self.input.store.expr_ranges[call];
         self.tables.set_expr_resolution(
             call,
             Resolution::Callables(callables.iter().cloned().collect()),
         );
-        self.resolve_overload_candidates(call, range, callables, callables, |_, _| {
+        self.resolve_overload_candidates(call, callables, callables, |_, _| {
             Some(Cow::Borrowed(arg_types))
         })
     }
@@ -970,7 +952,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn resolve_overload_candidates<'a>(
         &mut self,
         call: ExprId,
-        range: NodeRange,
         declared: &[Callable],
         viable: &[Callable],
         args_for: impl std::ops::Fn(&Self, &Callable) -> Option<Cow<'a, [Ty]>>,
@@ -997,28 +978,28 @@ impl<'db, 'store> Inferer<'db, 'store> {
             && let Some(unavailable) =
                 invocable.find(|callable| self.try_callable_sig(callable).is_err())
         {
-            self.callable_sig(unavailable, range);
+            self.callable_sig(unavailable, call);
             return Ty::invalid(self.db);
         }
         let outcome = self.select_overloads(declared, &candidates);
-        self.apply_call_outcome(call, range, outcome)
+        self.apply_call_outcome(call, outcome)
     }
 
     /// Turns a selection into the call's result and the diagnostic it implies —
     /// the one place call failures are spelled.
-    fn apply_call_outcome(&mut self, call: ExprId, range: NodeRange, outcome: CallOutcome<'_>) -> Ty {
+    fn apply_call_outcome(&mut self, call: ExprId, outcome: CallOutcome<'_>) -> Ty {
         match outcome {
-            CallOutcome::Selected(callable) => self.finish_call(call, callable, range),
+            CallOutcome::Selected(callable) => self.finish_call(call, callable),
             CallOutcome::SelectedPtr(fnty) => {
                 // A pointer call bypasses `finish_call` — there is no declaration
                 // to select — but a `value` option still needs a payable target.
-                self.require_effect(range, fnty.mutability, None);
+                self.require_effect(call, fnty.mutability, None);
                 if fnty.mutability != Mutability::Payable
                     && let Some((options_expr, options)) = self.call_options(call)
                     && options.iter().any(|(name, _)| name.as_str() == "value")
                 {
                     return self.fail(
-                        self.input.store.expr_ranges[options_expr],
+                        DiagnosticAnchor::Expr(options_expr),
                         "cannot set option `value` on a non-payable function",
                         Ty::invalid(self.db),
                     );
@@ -1026,14 +1007,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 fnty.result(self.db)
             }
             CallOutcome::NotInvocable => self.fail(
-                range,
+                DiagnosticAnchor::Expr(call),
                 "declaration-only function cannot be called",
                 Ty::invalid(self.db),
             ),
             CallOutcome::ArityMismatch { expected, actual } => self.report(
                 SemanticDiagnostic::InvalidArgumentCount {
                     call,
-                    range,
                     expected,
                     actual,
                 },
@@ -1044,7 +1024,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     self.report(
                         SemanticDiagnostic::TypeMismatch {
                             expr: mismatch.arg,
-                            range: self.input.store.expr_ranges[mismatch.arg],
                             expected: mismatch.expected,
                             actual: mismatch.actual,
                         },
@@ -1056,7 +1035,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
             CallOutcome::NoMatchingOverload { candidates } => self.report(
                 SemanticDiagnostic::NoMatchingOverload {
                     call,
-                    range,
                     candidates: candidates.to_vec(),
                 },
                 Ty::invalid(self.db),
@@ -1071,7 +1049,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 self.report(
                     SemanticDiagnostic::AmbiguousOverload {
                         call,
-                        range,
                         candidates: tied.into_vec(),
                     },
                     Ty::invalid(self.db),
@@ -1091,11 +1068,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
         if valid.contains(&actual) {
             return None;
         }
-        let range = self.input.store.expr_ranges[call];
         Some(self.report(
             SemanticDiagnostic::InvalidArgumentCount {
                 call,
-                range,
                 expected,
                 actual,
             },
@@ -1118,7 +1093,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     return self.report(
                         SemanticDiagnostic::TypeMismatch {
                             expr: *message,
-                            range: self.input.store.expr_ranges[*message],
                             expected,
                             actual,
                         },
@@ -1133,7 +1107,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     /// `abi.decode(data, (T1, T2, ..))`
     fn finish_abi_decode_call(&mut self, args: &[ExprId]) -> Ty {
-        let list_range = self.input.store.expr_ranges[args[1]];
 
         let names = match &self.input.store.exprs[args[1]] {
             Expr::Tuple(elems) => {
@@ -1141,14 +1114,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 for elem in elems.iter() {
                     let Some(elem) = elem else {
                         return self.fail(
-                            list_range,
+                            DiagnosticAnchor::Expr(args[1]),
                             "tuple component cannot be empty",
                             Ty::invalid(self.db),
                         );
                     };
                     let TyKind::Type(name) = self.tables.expr_ty(*elem).kind(self.db) else {
                         return self.fail(
-                            list_range,
+                            DiagnosticAnchor::Expr(args[1]),
                             "argument has to be a type name",
                             Ty::invalid(self.db),
                         );
@@ -1161,7 +1134,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 TyKind::Type(name) => vec![name],
                 _ => {
                     return self.fail(
-                        list_range,
+                        DiagnosticAnchor::Expr(args[1]),
                         "the second argument to `abi.decode` has to be a tuple of types",
                         Ty::invalid(self.db),
                     );
@@ -1181,24 +1154,23 @@ impl<'db, 'store> Inferer<'db, 'store> {
         target_expr: ExprId,
         target_ty: Ty,
     ) -> Option<Box<[Type]>> {
-        let range = self.input.store.expr_ranges[call];
         match self.tables.expr_resolution(target_expr).cloned() {
             Some(Resolution::Callable(target)) => {
                 // solc: "Cannot use library functions for abi.encodeCall."
                 if matches!(target.kind(), CallKind::ViaType(ViaTypeKind::Library)) {
                     return self.fail(
-                        range,
+                        DiagnosticAnchor::Expr(call),
                         "Cannot use library functions for abi.encodeCall.",
                         None,
                     );
                 }
-                let sig = self.callable_sig(&target, range)?;
+                let sig = self.callable_sig(&target, call)?;
                 // "Expected regular external function type, or external view on
                 // public function": `this.f`/`c.f` are external views, `C.f` is
                 // the external function type only for an `external` declaration.
                 if !target.is_external() && sig.visibility != Visibility::External {
                     return self.fail(
-                        range,
+                        DiagnosticAnchor::Expr(call),
                         "Expected regular external function type, or external view on public function.",
                         None,
                     );
@@ -1212,12 +1184,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     Some(sig.external_abi(self.db).params)
                 }
                 TyKind::FnPtr(_) => self.fail(
-                    range,
+                    DiagnosticAnchor::Expr(call),
                     "Expected regular external function type, or external view on public function.",
                     None,
                 ),
                 _ => self.fail(
-                    range,
+                    DiagnosticAnchor::Expr(call),
                     "The first argument of abi.encodeCall must be a function pointer.",
                     None,
                 ),
@@ -1231,8 +1203,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
         args: &[ExprId],
         params: &[Type],
     ) -> Ty {
-        let range = self.input.store.expr_ranges[call];
-        let list_range = self.input.store.expr_ranges[args[1]];
         // `(x)` is a parenthesized expression, not a one-component tuple, so a
         // lone argument is its own component.
         let components: Box<[Option<ExprId>]> = match &self.input.store.exprs[args[1]] {
@@ -1243,7 +1213,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
             return self.report(
                 SemanticDiagnostic::InvalidArgumentCount {
                     call,
-                    range,
                     expected: params.len(),
                     actual: components.len(),
                 },
@@ -1253,7 +1222,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         for (component, expected) in components.iter().zip(params.iter()) {
             let Some(component) = component else {
                 return self.fail(
-                    list_range,
+                    DiagnosticAnchor::Expr(args[1]),
                     "tuple component cannot be empty",
                     Ty::invalid(self.db),
                 );
@@ -1263,7 +1232,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 return self.report(
                     SemanticDiagnostic::TypeMismatch {
                         expr: *component,
-                        range: self.input.store.expr_ranges[*component],
                         expected: expected.ty(),
                         actual,
                     },
@@ -1323,10 +1291,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
     }
 
     /// [`Self::try_callable_sig`], reporting when the signature is unavailable.
-    fn callable_sig(&mut self, callable: &Callable, range: NodeRange) -> Option<Fn<Type>> {
+    fn callable_sig(&mut self, callable: &Callable, call: ExprId) -> Option<Fn<Type>> {
         match self.try_callable_sig(callable) {
             Ok(sig) => Some(sig),
-            Err(message) => self.fail(range, message, None),
+            Err(message) => self.fail(DiagnosticAnchor::Expr(call), message, None),
         }
     }
 

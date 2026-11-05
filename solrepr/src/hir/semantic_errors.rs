@@ -3,6 +3,7 @@ use triomphe::Arc;
 
 use crate::ast::{ImportId, NodeRange};
 use crate::hir::access::AccessDenial;
+use crate::hir::body_map::LocalId;
 use crate::hir::exprs::{ExprId, Name};
 use crate::hir::resolution::Callable;
 use crate::hir::signatures::OverrideMismatch;
@@ -10,12 +11,29 @@ use crate::hir::types::{Location, Mutability, Ty, TyNameId, Type};
 use crate::ir::def_map::DefId;
 use crate::salsa::File;
 
+/// Where a diagnostic anchors, as an id rather than a position. The layout
+/// resolves it to a range at emit, so semantic outputs stay position-free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DiagnosticAnchor {
+    Expr(ExprId),
+    TyRef(TyNameId),
+    Local(LocalId),
+    /// The def's written name — `def_range`.
+    Def(DefId),
+    /// The whole declaration node.
+    Decl(DefId),
+    /// The body block of a modifier.
+    Body(DefId),
+    /// A position with no id — parser diagnostics only.
+    Raw(NodeRange),
+}
+
 macro_rules! define_diagnostics {
     (
         $(
             $variant:ident {
                 $( $field:ident : $ty:ty ),* $(,)?
-            }
+            } => $anchor:expr
         ),* $(,)?
     ) => {
         #[repr(u8)]
@@ -42,205 +60,179 @@ macro_rules! define_diagnostics {
                 }
             }
 
-            pub fn range(&self) -> NodeRange {
+            #[allow(unused_variables)]
+            pub fn anchor(&self) -> DiagnosticAnchor {
                 match self {
                     $(
-                        Self::$variant { range, .. } => *range,
+                        Self::$variant { $( $field, )* .. } => $anchor,
                     )*
                 }
             }
 
             pub fn key(&self) -> DiagnosticKey {
-                DiagnosticKey(self.code(), self.range())
+                DiagnosticKey(self.code(), self.anchor())
             }
         }
     };
 }
 
 /// Identifies a diagnostic for deduplication. Codes anchored at a shared
-/// contract range rather than a unique syntax node opt out via
+/// contract id rather than a unique syntax node opt out via
 /// [`DiagnosticCode::allows_multiple`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct DiagnosticKey(DiagnosticCode, NodeRange);
+pub struct DiagnosticKey(DiagnosticCode, DiagnosticAnchor);
 
 define_diagnostics! {
     SyntaxError {
         range: NodeRange
-    },
+    } => DiagnosticAnchor::Raw(*range),
     UnresolvedName {
         expr: ExprId,
-        range: NodeRange,
         name: Name,
         denials: Vec<AccessDenial>,
-    },
+    } => DiagnosticAnchor::Expr(*expr),
     UnresolvedMember {
         expr: ExprId,
-        range: NodeRange,
         receiver: Ty,
         member: Name,
         denials: Vec<AccessDenial>,
-    },
+    } => DiagnosticAnchor::Expr(*expr),
     // A member reference whose slot holds more than one inherited
     // declaration with no effective winner. `declarations` are the
     // conflicting base declarations.
     AmbiguousMember {
         expr: ExprId,
-        range: NodeRange,
         name: Name,
         declarations: Vec<DefId>,
-    },
+    } => DiagnosticAnchor::Expr(*expr),
     InvalidArgumentCount {
         call: ExprId,
-        range: NodeRange,
         expected: usize,
         actual: usize,
-    },
+    } => DiagnosticAnchor::Expr(*call),
     TypeMismatch {
         expr: ExprId,
-        range: NodeRange,
         expected: Ty,
         actual: Ty,
-    },
+    } => DiagnosticAnchor::Expr(*expr),
     InvalidExplicitConversion {
         expr: ExprId,
-        range: NodeRange,
         from: Ty,
         to: Type,
-    },
+    } => DiagnosticAnchor::Expr(*expr),
     InvalidDataLocation {
-        range: NodeRange,
+        ty_ref_id: TyNameId,
         ty: Type,
         location: Location,
-    },
+    } => DiagnosticAnchor::TyRef(*ty_ref_id),
     DataLocationRequired {
-        range: NodeRange,
+        ty_ref_id: TyNameId,
         ty: Type,
-    },
+    } => DiagnosticAnchor::TyRef(*ty_ref_id),
     UnknownNamedArgument {
         call: ExprId,
-        range: NodeRange,
         name: Name,
-    },
+    } => DiagnosticAnchor::Expr(*call),
     DuplicateNamedArgument {
         call: ExprId,
-        range: NodeRange,
         name: Name,
-    },
+    } => DiagnosticAnchor::Expr(*call),
     UnresolvedType {
         ty_ref_id: TyNameId,
-        range: NodeRange,
         name: Name,
-    },
+    } => DiagnosticAnchor::TyRef(*ty_ref_id),
     NoMatchingOverload {
         call: ExprId,
-        range: NodeRange,
         candidates: Vec<Callable>,
-    },
+    } => DiagnosticAnchor::Expr(*call),
     AmbiguousOverload {
         call: ExprId,
-        range: NodeRange,
         candidates: Vec<Callable>,
-    },
+    } => DiagnosticAnchor::Expr(*call),
     InferenceFailure {
-        range: NodeRange,
+        anchor: DiagnosticAnchor,
         message: String,
-    },
+    } => *anchor,
     StateMutability {
-        range: NodeRange,
+        expr: ExprId,
         declared: Mutability,
         required: Mutability,
         callee: Option<DefId>,
-    },
+    } => DiagnosticAnchor::Expr(*expr),
     InheritanceFailure {
-        range: NodeRange,
+        contract: DefId,
         problems: Vec<String>,
-    },
+    } => DiagnosticAnchor::Def(*contract),
     Redeclaration {
         rejected: DefId,
-        range: NodeRange,
         name: Name,
         previous: DefId,
-    },
+    } => DiagnosticAnchor::Def(*rejected),
     MissingOverride {
         declaration: DefId,
-        range: NodeRange,
         bases: Vec<DefId>,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     UnnecessaryOverride {
         declaration: DefId,
-        range: NodeRange,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     NotVirtual {
         declaration: DefId,
-        range: NodeRange,
         base: DefId,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     IncompatibleOverride {
         declaration: DefId,
-        range: NodeRange,
         base: DefId,
         mismatch: OverrideMismatch,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     UnimplementedOverride {
         declaration: DefId,
-        range: NodeRange,
         base: DefId,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     OverrideListMismatch {
         declaration: DefId,
-        range: NodeRange,
         expected: Vec<DefId>,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     OverrideConflict {
         contract: DefId,
-        range: NodeRange,
         name: Name,
         declarations: Vec<DefId>,
-    },
+    } => DiagnosticAnchor::Def(*contract),
     DuplicateMemberSlot {
         declaration: DefId,
         previous: DefId,
-        range: NodeRange,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     InheritedMemberConflict {
         contract: DefId,
         name: Name,
         declarations: Vec<DefId>,
-        range: NodeRange,
-    },
+    } => DiagnosticAnchor::Def(*contract),
     UnimplementedContract {
         contract: DefId,
-        range: NodeRange,
-    },
+    } => DiagnosticAnchor::Def(*contract),
     MissingVirtual {
         declaration: DefId,
-        range: NodeRange,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     MissingImplementation {
         declaration: DefId,
-        range: NodeRange,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     VirtualInLibrary {
         declaration: DefId,
-        range: NodeRange,
-    },
+    } => DiagnosticAnchor::Def(*declaration),
     UnresolvedImport {
         import: ImportId,
-        range: NodeRange,
         path: Name,
-    },
+    } => DiagnosticAnchor::Def(DefId::Import(*import)),
     ImportSymbolNotFound {
         import: ImportId,
-        range: NodeRange,
         name: Name,
         path: Name,
-    },
+    } => DiagnosticAnchor::Def(DefId::Import(*import)),
 }
 
 impl DiagnosticCode {
-    /// Codes anchored at a shared contract name range, where each emission is
-    /// already distinct by construction and deduplication by `(code, range)`
-    /// would silently drop valid conflicts.
+    /// Codes anchored at a shared contract id, where each emission is
+    /// already distinct by construction and deduplication by
+    /// `(code, anchor)` would silently drop valid conflicts.
     pub fn allows_multiple(self) -> bool {
         matches!(self, Self::OverrideConflict | Self::InheritedMemberConflict)
     }
@@ -266,7 +258,7 @@ impl SemanticDiagnostic {
     }
 }
 
-/// Accumulates diagnostics with `(code, range)` deduplication — several
+/// Accumulates diagnostics with `(code, anchor)` deduplication — several
 /// producers can independently report what collapses to the same fact.
 #[derive(Default)]
 pub struct DiagnosticSink {

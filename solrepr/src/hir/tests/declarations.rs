@@ -190,3 +190,44 @@ fn initializer_sees_an_outer_binding() {
         );
     }
 }
+
+/// Diagnostics anchor by id, so reflow outside a function leaves its
+/// `Inference` output identical even though the query re-runs.
+#[test]
+fn inference_is_stable_under_reflow() {
+    let (mut db, file) = make_test_db(
+        r#"contract C { function f() external { uint x = "bad"; } }"#,
+    );
+    let DefId::Function(id) = find_function(&db, file, "f") else {
+        panic!("fixture function should exist");
+    };
+    let before = db.inference(DefId::Function(id));
+
+    let path = file.path(&db).to_path_buf();
+    db.open_file(
+        path,
+        r#"contract C {
+            function f() external { uint x = "bad"; }
+        }"#
+        .to_string(),
+    );
+
+    let after = db.inference(DefId::Function(id));
+    assert!(
+        before == after,
+        "a reflow outside the function must not change its inference result"
+    );
+
+    // Anchors resolve against the *current* positions, not the cached ones.
+    let reported = crate::capabilities::diagnostics::diagnostics(&db, file);
+    let mismatch = reported
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::TypeMismatch)
+        .expect("the type mismatch should still be reported");
+    let text = db.text(file);
+    assert_eq!(
+        &text[mismatch.range.start as usize..mismatch.range.end as usize],
+        "\"bad\"",
+        "the diagnostic should point at the string literal after the reflow"
+    );
+}

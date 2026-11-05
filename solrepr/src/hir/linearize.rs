@@ -1,5 +1,5 @@
 
-use crate::{ast::{HasBases, NodeRange}, hir::{analysis::Analysis, exprs::Name, resolution::Resolution, resolver::Resolver, semantic_errors::{DiagnosticSink, SemanticDiagnostic}}, ir::def_map::DefId, salsa::{HirDb, root_db::def_range}};
+use crate::{ast::HasBases, hir::{analysis::Analysis, exprs::Name, resolution::Resolution, resolver::Resolver, semantic_errors::{DiagnosticSink, SemanticDiagnostic}}, ir::def_map::DefId, salsa::HirDb};
 
 pub struct Linearizer<'db> {
     this: DefId,
@@ -18,7 +18,6 @@ impl<'db> Linearizer<'db> {
         let mut sink = DiagnosticSink::default();
         let resolver = &self.resolver;
         let this = self.this;
-        let range = def_range(resolver.db(), this).unwrap_or(NodeRange { start: 0, end: 0 });
         
         let bases = match this {
             DefId::Contract(id) => resolver.db().ast_id_map(id.file).get(&resolver.db().root(id.file), id.id).unwrap().bases(),
@@ -56,7 +55,7 @@ impl<'db> Linearizer<'db> {
             problems.push("inconsistent inheritance linearization".to_string());
         }
         if !problems.is_empty() {
-            sink.push(SemanticDiagnostic::InheritanceFailure { range, problems });
+            sink.push(SemanticDiagnostic::InheritanceFailure { contract: this, problems });
         }
         Analysis::new(linearized, sink.finish())
     }

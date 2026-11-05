@@ -1,13 +1,13 @@
 use la_arena::ArenaMap;
 use num_bigint::BigInt;
 
-use crate::ast::NodeRange;
 use crate::hir::body_map::ScopeId;
 use crate::hir::types::VariableKind;
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Literal, Name, UnaryOp};
 use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{CallableOrigin, Resolution};
 use crate::hir::resolver::Resolver;
+use crate::hir::semantic_errors::DiagnosticAnchor;
 use crate::hir::types::{Primitive, TyKind, Type};
 use crate::ir::def_map::{DefId, DefNamespace, ScopeData};
 use crate::salsa::hir_db::def_name;
@@ -118,7 +118,7 @@ fn to_be_bytes(value: &BigInt, width: usize) -> Box<[u8]> {
 /// points into the *caller's* store: failures inside a foreign constant's
 /// initializer re-anchor to the reference that reached it.
 pub(super) struct ConstError {
-    pub range: NodeRange,
+    pub expr: ExprId,
     pub kind: ConstErrorKind,
 }
 
@@ -158,13 +158,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// `eval_const` for consumers needing the folded integer — array lengths.
     /// `None` means no positive integer; the diagnostic is reported here.
     pub(super) fn const_size(&mut self, expr: ExprId) -> Option<BigInt> {
-        let range = self
-            .input
-            .store
-            .expr_ranges
-            .get(expr)
-            .copied()
-            .unwrap_or(NodeRange { start: 0, end: 0 });
         match self.eval_const(expr) {
             // solc keeps the length as `u256` — positive and < 2^256.
             Ok(value) => match value
@@ -175,7 +168,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 // An opaque constant can't size the array — the type
                 // lowers without one, but it is not an error.
                 None if matches!(value, ConstValue::Opaque) => None,
-                None => self.fail(range, "invalid array length", None),
+                None => self.fail(DiagnosticAnchor::Expr(expr), "invalid array length", None),
             },
             Err(error) => {
                 self.report_const_error(error, "array size must be a constant expression");
@@ -200,7 +193,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             }
             ConstErrorKind::Eval(message) => message.clone(),
         };
-        self.fail(error.range, message, ());
+        self.fail(DiagnosticAnchor::Expr(error.expr), message, ());
     }
 }
 
@@ -236,24 +229,16 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         }
     }
 
-    fn range(&self, expr: ExprId) -> NodeRange {
-        self.store
-            .expr_ranges
-            .get(expr)
-            .copied()
-            .unwrap_or(NodeRange { start: 0, end: 0 })
-    }
-
     fn not_constant(&self, expr: ExprId) -> ConstError {
         ConstError {
-            range: self.range(expr),
+            expr,
             kind: ConstErrorKind::NotConstant,
         }
     }
 
     fn eval_error(&self, expr: ExprId, message: impl Into<String>) -> ConstError {
         ConstError {
-            range: self.range(expr),
+            expr,
             kind: ConstErrorKind::Eval(message.into()),
         }
     }
@@ -367,7 +352,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         // `x / 0` errors whatever `x` is — even an opaque constant.
         if matches!(op, BinaryOp::Div | BinaryOp::Mod) && right.is_zero() {
             return Err(ConstError {
-                range: self.range(expr),
+                expr,
                 kind: ConstErrorKind::ZeroDivision {
                     modulo: matches!(op, BinaryOp::Mod),
                 },
@@ -430,7 +415,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     Ok(rat(num.pow(unsigned), den.pow(unsigned)))
                 } else if num == BigInt::from(0u8) {
                     Err(ConstError {
-                        range: self.range(expr),
+                        expr,
                         kind: ConstErrorKind::ZeroDivision { modulo: false },
                     })
                 } else {
@@ -732,7 +717,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         }
         if self.visiting.contains(&var_def) {
             return Err(ConstError {
-                range: self.range(expr),
+                expr,
                 kind: ConstErrorKind::Cyclic(var_def),
             });
         }
@@ -754,7 +739,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         child.visiting.pop();
         self.visiting = child.visiting;
         value.map_err(|mut error| {
-            error.range = self.range(expr);
+            error.expr = expr;
             match error.kind {
                 // A referenced non-constant makes this use non-constant too —
                 // solc reports at both declarations. Evaluation failures are

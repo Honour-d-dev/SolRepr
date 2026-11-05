@@ -206,10 +206,10 @@ fn distinct_conflicts_on_one_contract_all_report() {
         .iter()
         .filter(|diagnostic| diagnostic.code() == DiagnosticCode::OverrideConflict)
         .collect();
-    // Both slots anchor on the contract name and share a `(code, range)` key;
+    // Both slots anchor on the contract and share a `(code, anchor)` key;
     // this code intentionally permits one diagnostic for each signature.
     assert_eq!(conflicts.len(), 2);
-    assert!(conflicts.iter().all(|d| d.range() == conflicts[0].range()));
+    assert!(conflicts.iter().all(|d| d.anchor() == conflicts[0].anchor()));
     for member in ["f", "g"] {
         assert!(conflicts.iter().any(|diagnostic| {
             matches!(*diagnostic, SemanticDiagnostic::OverrideConflict { name, .. } if name.as_str() == member)

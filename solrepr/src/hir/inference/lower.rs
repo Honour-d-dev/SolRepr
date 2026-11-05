@@ -1,18 +1,17 @@
-use crate::ast::NodeRange;
 use crate::hir::body_map::LocalId;
 use crate::hir::item_data::FieldId;
 use crate::hir::resolution::Resolution;
-use crate::hir::semantic_errors::SemanticDiagnostic;
+use crate::hir::semantic_errors::{DiagnosticAnchor, SemanticDiagnostic};
 use crate::hir::types::{Fn, TyKind, TyName, TyNameId, Type};
 use crate::ir::def_map::DefId;
 
 use super::Inferer;
 
 impl<'db, 'store> Inferer<'db, 'store> {
-    pub(super) fn infer_local(&mut self, local: LocalId, range: NodeRange) -> Type {
+    pub(super) fn infer_local(&mut self, local: LocalId) -> Type {
         let Some(local_arena) = self.input.locals else {
             return self.fail(
-                range,
+                DiagnosticAnchor::Local(local),
                 "local resolution has no local arena",
                 Type::invalid(self.db),
             );
@@ -23,10 +22,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
         self.lower_type(ty_ref_id, located)
     }
 
-    pub(super) fn infer_field(&mut self, field: FieldId, range: NodeRange) -> Type {
+    pub(super) fn infer_field(&mut self, field: FieldId) -> Type {
         let Some(fields) = self.input.fields else {
             return self.fail(
-                range,
+                DiagnosticAnchor::Def(self.owner),
                 "struct field inferred outside a struct",
                 Type::invalid(self.db),
             );
@@ -34,10 +33,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
         self.lower_type(fields[field].ty_ref, false)
     }
 
-    pub(super) fn infer_variant(&mut self, range: NodeRange) -> Type {
+    pub(super) fn infer_variant(&mut self) -> Type {
         let DefId::Enum(enum_id) = self.owner else {
             return self.fail(
-                range,
+                DiagnosticAnchor::Def(self.owner),
                 "variant inferred outside an enum",
                 Type::invalid(self.db),
             );
@@ -52,18 +51,20 @@ impl<'db, 'store> Inferer<'db, 'store> {
         if let Some(cached) = self.tables.try_ty(ty_ref_id) {
             return cached;
         }
-        let range = self.input.store.ty_ref_ranges[ty_ref_id];
-        let ty = self.lower_ty_ref_uncached(ty_ref_id, located, range);
+        let ty = self.lower_ty_ref_uncached(ty_ref_id, located);
         
         let written = matches!(self.input.store.types[ty_ref_id], TyName::Located { .. });
         if located && !written && ty.default_loc(self.db).is_some() {
-            self.report(SemanticDiagnostic::DataLocationRequired { range, ty }, ());
+            self.report(
+                SemanticDiagnostic::DataLocationRequired { ty_ref_id, ty },
+                (),
+            );
         }
         self.tables.set_ty(ty_ref_id, ty);
         ty
     }
 
-    fn lower_ty_ref_uncached(&mut self, ty_ref_id: TyNameId, located: bool, range: NodeRange) -> Type {
+    fn lower_ty_ref_uncached(&mut self, ty_ref_id: TyNameId, located: bool) -> Type {
         match &self.input.store.types[ty_ref_id] {
             TyName::Primitive(primitive) => Type::primitive(self.db, *primitive),
             TyName::UserDefined { base, name } => {
@@ -87,7 +88,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     return self.report(
                         SemanticDiagnostic::UnresolvedType {
                             ty_ref_id,
-                            range,
                             name: name.clone(),
                         },
                         Type::invalid(self.db),
@@ -96,7 +96,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 match resolution {
                     Resolution::Type(ty) => ty,
                     _ => self.fail(
-                        range,
+                        DiagnosticAnchor::TyRef(ty_ref_id),
                         format!("`{name}` does not resolve to a type"),
                         Type::invalid(self.db),
                     ),
@@ -145,7 +145,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 if !is_valid {
                     return self.report(
                         SemanticDiagnostic::InvalidDataLocation {
-                            range,
+                            ty_ref_id,
                             ty: inner,
                             location: *loc,
                         },

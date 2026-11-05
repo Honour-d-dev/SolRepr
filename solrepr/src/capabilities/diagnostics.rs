@@ -263,7 +263,7 @@ fn collect_semantic_errors(db: &dyn HirDb, file: File) -> Vec<Diagnostic> {
         .diagnostics
         .iter()
         .filter(|error| error.declaration_file() == Some(file))
-        .map(|error| semantic_diagnostic(db, error))
+        .map(|error| semantic_diagnostic(db, DefId::File(file), error))
         .collect::<Vec<_>>();
     for owner in owners {
         let result = db.inference(owner);
@@ -271,21 +271,21 @@ fn collect_semantic_errors(db: &dyn HirDb, file: File) -> Vec<Diagnostic> {
             result
                 .diagnostics
                 .iter()
-                .map(|error| semantic_diagnostic(db, error)),
+                .map(|error| semantic_diagnostic(db, owner, error)),
         );
         if matches!(owner, DefId::Contract(_) | DefId::Interface(_)) {
             diagnostics.extend(
                 db.member_map(owner)
                     .diagnostics
                     .iter()
-                    .map(|error| semantic_diagnostic(db, error)),
+                    .map(|error| semantic_diagnostic(db, owner, error)),
             );
         }
     }
     diagnostics
 }
 
-fn semantic_diagnostic(db: &dyn HirDb, error: &SemanticDiagnostic) -> Diagnostic {
+fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic) -> Diagnostic {
     let (code, message, related) = match error {
         SemanticDiagnostic::SyntaxError { .. } => (
             DiagnosticCode::SyntaxError,
@@ -603,7 +603,8 @@ fn semantic_diagnostic(db: &dyn HirDb, error: &SemanticDiagnostic) -> Diagnostic
     Diagnostic {
         code,
         severity: Severity::Error,
-        range: error.range(),
+        range: crate::hir::syntax_store::anchor_range(db, owner, error.anchor())
+            .unwrap_or(NodeRange { start: 0, end: 0 }),
         message,
         related,
     }

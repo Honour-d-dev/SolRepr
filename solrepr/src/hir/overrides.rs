@@ -7,7 +7,7 @@
 use la_arena::Arena;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::ast::{FunctionKind, HasBases, NodeRange};
+use crate::ast::{FunctionKind, HasBases};
 use crate::hir::analysis::Analysis;
 use crate::hir::exprs::Name;
 use crate::hir::item_data::OverrideSpecifier;
@@ -167,7 +167,6 @@ struct OwnDeclaration {
 }
 
 struct OverrideList {
-    range: NodeRange,
     /// `None` when a listed path does not resolve to a contract. List
     /// validation is then skipped rather than reporting a guessed mismatch.
     listed: Option<Box<[DefId]>>,
@@ -277,13 +276,10 @@ impl<'db> OverrideAnalyzer<'db> {
                 self.check_declaration(&declaration, &inherited);
             }
             let (own, _) = self.slots.entry(sig).or_default();
-            if let Some(&previous) = own.first()
-                && let Some(range) = def_range(self.db, declaration.def)
-            {
+            if let Some(&previous) = own.first() {
                 self.sink.push(SemanticDiagnostic::DuplicateMemberSlot {
                     declaration: declaration.def,
                     previous,
-                    range,
                 });
             }
             own.push(declaration.def);
@@ -369,17 +365,14 @@ impl<'db> OverrideAnalyzer<'db> {
         types: &Arena<TyName>,
         specifier: Option<&OverrideSpecifier>,
     ) -> Option<OverrideList> {
-        let OverrideSpecifier::List { paths, range } = specifier? else {
+        let OverrideSpecifier::List { paths, .. } = specifier? else {
             return None;
         };
         let listed = paths
             .iter()
             .map(|path| self.listed_contract(types, path.ty_ref))
             .collect::<Option<Box<[_]>>>();
-        Some(OverrideList {
-            range: *range,
-            listed,
-        })
+        Some(OverrideList { listed })
     }
 
     fn listed_contract(&self, types: &Arena<TyName>, ty_ref: Option<TyNameId>) -> Option<DefId> {
@@ -428,9 +421,6 @@ impl<'db> OverrideAnalyzer<'db> {
 
     fn check_declaration(&mut self, declaration: &OwnDeclaration, inherited: &[DefId]) {
         let def = declaration.def;
-        let Some(range) = def_range(self.db, def) else {
-            return;
-        };
         let candidates: Box<[&OverrideEntry]> = inherited
             .iter()
             .filter_map(|def| self.known.get(def))
@@ -439,7 +429,6 @@ impl<'db> OverrideAnalyzer<'db> {
             if declaration.marked {
                 self.sink.push(SemanticDiagnostic::UnnecessaryOverride {
                     declaration: def,
-                    range,
                 });
             }
             return;
@@ -451,7 +440,6 @@ impl<'db> OverrideAnalyzer<'db> {
         {
             self.sink.push(SemanticDiagnostic::NotVirtual {
                 declaration: def,
-                range,
                 base: base.decl,
             });
         }
@@ -465,7 +453,6 @@ impl<'db> OverrideAnalyzer<'db> {
         if let Some((base, mismatch)) = incompatible {
             self.sink.push(SemanticDiagnostic::IncompatibleOverride {
                 declaration: def,
-                range,
                 base,
                 mismatch,
             });
@@ -480,7 +467,6 @@ impl<'db> OverrideAnalyzer<'db> {
         {
             self.sink.push(SemanticDiagnostic::UnimplementedOverride {
                 declaration: def,
-                range,
                 base: base.decl,
             });
         }
@@ -495,13 +481,11 @@ impl<'db> OverrideAnalyzer<'db> {
         if !declaration.marked && !single_interface {
             self.sink.push(SemanticDiagnostic::MissingOverride {
                 declaration: def,
-                range,
                 bases: candidates.iter().map(|candidate| candidate.decl).collect(),
             });
         }
 
         if let Some(OverrideList {
-            range: list_range,
             listed: Some(listed),
         }) = &declaration.list
         {
@@ -510,7 +494,6 @@ impl<'db> OverrideAnalyzer<'db> {
             if distinct.len() != listed.len() || distinct != owner_set {
                 self.sink.push(SemanticDiagnostic::OverrideListMismatch {
                     declaration: def,
-                    range: *list_range,
                     expected: owners,
                 });
             }

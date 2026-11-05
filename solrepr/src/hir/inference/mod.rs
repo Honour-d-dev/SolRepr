@@ -11,13 +11,12 @@ pub use tables::Inference;
 use const_eval::ConstErrorKind;
 use usage::UsageContext;
 
-use crate::ast::NodeRange;
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Name, UnaryOp};
 use crate::hir::item_data::VarData;
 use crate::hir::syntax_store::OwnerStore;
 use crate::hir::resolution::{Field as ResolvedField, Resolution};
 use crate::hir::resolver::Resolver;
-use crate::hir::semantic_errors::{DiagnosticSink, SemanticDiagnostic};
+use crate::hir::semantic_errors::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::types::Primitive::FixedBytes;
 use crate::hir::types::{
     Location, Mutability, Primitive, RefKind, Ty, TyKind, Type, VariableKind,
@@ -94,8 +93,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     fn infer_all(&mut self) {
         if let Some(locals) = self.input.locals {
-            for (local_id, local) in locals.iter() {
-                let ty = self.infer_local(local_id, local.range());
+            for (local_id, _) in locals.iter() {
+                let ty = self.infer_local(local_id);
                 self.tables.set_local(local_id, ty);
                 if let Some(init) = locals[local_id].init() {
                      self.expect_assignable(init, ty);
@@ -104,15 +103,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
 
         if let Some(fields) = self.input.fields {
-            for (field_id, field) in fields.iter() {
-                let ty = self.infer_field(field_id, field.range);
+            for (field_id, _) in fields.iter() {
+                let ty = self.infer_field(field_id);
                 self.tables.set_field(field_id, ty);
             }
         }
 
         if let Some(variants) = self.input.variants {
-            for (variant_id, variant) in variants.iter() {
-                let ty = self.infer_variant(variant.range);
+            for (variant_id, _) in variants.iter() {
+                let ty = self.infer_variant();
                 self.tables.set_variant(variant_id, ty);
             }
         }
@@ -145,10 +144,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
         recovery
     }
 
-    fn fail<R>(&mut self, range: NodeRange, message: impl Into<String>, recovery: R) -> R {
+    fn fail<R>(
+        &mut self,
+        anchor: DiagnosticAnchor,
+        message: impl Into<String>,
+        recovery: R,
+    ) -> R {
         self.report(
             SemanticDiagnostic::InferenceFailure {
-                range,
+                anchor,
                 message: message.into(),
             },
             recovery,
@@ -167,7 +171,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
             return self.report(
                 SemanticDiagnostic::TypeMismatch {
                     expr,
-                    range: self.input.store.expr_ranges[expr],
                     expected,
                     actual,
                 },
@@ -182,7 +185,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn infer_resolution(&mut self, expr: ExprId, resolution: Resolution) -> Ty {
         let range = self.input.store.expr_ranges[expr];
         self.tables.set_expr_resolution(expr, resolution.clone());
-        self.check_resolution_mutability(range, &resolution);
+        self.check_resolution_mutability(expr, &resolution);
         match resolution {
             Resolution::Local(local) => self
                 .tables
@@ -196,7 +199,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     self.db.var_data(id)
                 } else {
                     return self.fail(
-                        range,
+                        DiagnosticAnchor::Expr(expr),
                         "variable resolution points to a non-variable",
                         Ty::invalid(self.db),
                     );
@@ -206,10 +209,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     // variable's declaration checks; any other self-resolution
                     // (`uint a = a`) is an illegal self-read.
                     if range == data.range {
-                        self.check_var_declaration(&data)
+                        self.check_var_declaration(var_def, &data)
                     } else {
                         return self.fail(
-                            range,
+                            DiagnosticAnchor::Expr(expr),
                             "a variable's declaration cannot reference the variable itself",
                             Ty::invalid(self.db),
                         );
@@ -234,7 +237,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 DefId::Interface(id) => Ty::new(self.db, TyKind::Interface(id)),
                 DefId::Library(id) => Ty::new(self.db, TyKind::Library(id)),
                 _ => self.fail(
-                    range,
+                    DiagnosticAnchor::Expr(expr),
                     "`this` does not name a contract, interface, or library",
                     Ty::invalid(self.db),
                 ),
@@ -242,7 +245,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Resolution::Super(def) => match def {
                 DefId::Contract(id) => Ty::new(self.db, TyKind::Super(id)),
                 _ => self.fail(
-                    range,
+                    DiagnosticAnchor::Expr(expr),
                     "super resolution is not a contract",
                     Ty::invalid(self.db),
                 ),
@@ -266,7 +269,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     /// A variable's declaration checks: initializer assignability, `constant`
     /// folding, and the uninitialized-`constant` error. Returns the declared type.
-    fn check_var_declaration(&mut self, data: &VarData) -> Type {
+    fn check_var_declaration(&mut self, var_def: DefId, data: &VarData) -> Type {
         let declared = self.lower_type(data.ty_ref, false);
         match data.init {
             Some(init) => {
@@ -290,7 +293,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 }
             }
             None if data.kind == VariableKind::Const => {
-                self.fail(data.range, "Uninitialized \"constant\" variable.", ());
+                self.fail(
+                    DiagnosticAnchor::Decl(var_def),
+                    "Uninitialized \"constant\" variable.",
+                    (),
+                );
             }
             None => {}
         }
@@ -341,7 +348,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     && self.eval_const(right).is_ok_and(|value| value.is_zero())
                 {
                     self.fail(
-                        self.input.store.expr_ranges[expr],
+                        DiagnosticAnchor::Expr(expr),
                         if matches!(op, BinaryOp::Mod) {
                             "Modulo by zero."
                         } else {
@@ -377,7 +384,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     self.report(
                         SemanticDiagnostic::TypeMismatch {
                             expr: els,
-                            range: self.input.store.expr_ranges[els],
                             expected: then_ty,
                             actual: else_ty,
                         },
@@ -433,7 +439,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     kind => {
                         let Some(index) = index else {
                             return self.fail(
-                                self.input.store.expr_ranges[expr],
+                                DiagnosticAnchor::Expr(expr),
                                 "array access requires an index",
                                 Ty::invalid(self.db),
                             );
@@ -445,7 +451,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                         match kind {
                             TyKind::Array { elem, .. } => match base_type.loc(self.db) {
                                 Some(loc) => elem.upcast_from(self.db, loc).ty(),
-                                None => self.fail(self.input.store.expr_ranges[expr], "array has no data location", Ty::invalid(self.db)),
+                                None => self.fail(DiagnosticAnchor::Expr(expr), "array has no data location", Ty::invalid(self.db)),
                             },
                             TyKind::Mapping { value, .. } => value
                                 .upcast_from(self.db, Location::Storage(RefKind::Reference))
@@ -455,7 +461,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                                 Ty::primitive(self.db, FixedBytes(1))
                             }
                             ty => self.fail(
-                                self.input.store.expr_ranges[expr],
+                                DiagnosticAnchor::Expr(expr),
                                 format!("type `{}` cannot be indexed", ty.display(self.db)),
                                 Ty::invalid(self.db),
                             ),
@@ -464,7 +470,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 }
             }
             Expr::Slice { base, from, to } => {
-                let range = self.input.store.expr_ranges[expr];
                 let base_ty = return_invalid!(self.infer_expr(base), self.db);
                 // The bounds are checked as `uint256` values —
                 // `expect_assignable` already re-establishes rvalue context.
@@ -474,7 +479,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 }
                 // solc's TypeType check — a type name can't be sliced.
                 if matches!(base_ty.kind(self.db), TyKind::Type(_)) {
-                    return self.fail(range, "Types cannot be sliced.", Ty::invalid(self.db));
+                    return self.fail(DiagnosticAnchor::Expr(expr), "Types cannot be sliced.", Ty::invalid(self.db));
                 }
                 // A nested slice unwraps to the array it slices.
                 let array_ty = match base_ty.kind(self.db) {
@@ -487,7 +492,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     | TyKind::Primitive(Primitive::Bytes | Primitive::String) => {}
                     _ => {
                         return self.fail(
-                            range,
+                            DiagnosticAnchor::Expr(expr),
                             "Index range access is only possible for arrays and array slices.",
                             Ty::invalid(self.db),
                         )
@@ -495,7 +500,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 }
                 if array_ty.loc(self.db) != Some(Location::Calldata) || !kind.is_dynamically_sized() {
                     self.fail(
-                        range,
+                        DiagnosticAnchor::Expr(expr),
                         "Index range access is only supported for dynamic calldata arrays.",
                         (),
                     );
@@ -503,7 +508,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     && elem.is_dynamically_encoded(self.db)
                 {
                     self.fail(
-                        range,
+                        DiagnosticAnchor::Expr(expr),
                         "Index range access is not supported for arrays with dynamically encoded base types.",
                         (),
                     );
@@ -514,7 +519,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 Ty::new(self.db, TyKind::Slice(base))
             }
             Expr::InlineArray(elems) => {
-                let range = self.input.store.expr_ranges[expr];
                 // solc's rule: the first element's *mobile type* seeds the
                 // deduction, then each later element merges through `common_ty`.
                 let mut common: Option<Ty> = None;
@@ -526,7 +530,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                             Some(common) => Some(common),
                             None => {
                                 return self.fail(
-                                    range,
+                                    DiagnosticAnchor::Expr(expr),
                                     "Unable to deduce common type for array elements.",
                                     Ty::invalid(self.db),
                                 )
@@ -536,14 +540,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 }
                 let Some(common) = common else {
                     return self.fail(
-                        range,
+                        DiagnosticAnchor::Expr(expr),
                         "Unable to deduce common type for array elements.",
                         Ty::invalid(self.db),
                     );
                 };
                 let Some(elem) = common.narrow(self.db) else {
                     return self.fail(
-                        range,
+                        DiagnosticAnchor::Expr(expr),
                         "Unable to deduce nameable type for array elements. Try adding explicit type conversion for the first element.",
                         Ty::invalid(self.db),
                     );
@@ -558,17 +562,16 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Expr::Member { obj, prop } => {
                 let obj_ty = self.infer_expr(obj);
                 let obj_ty = return_invalid!(obj_ty, self.db);
-                let range = self.input.store.expr_ranges[expr];
-                let resolution = self.resolver.lookup_member_at(obj_ty, &prop, expr, range);
+                let resolution = self.resolver.lookup_member_at(obj_ty, &prop, expr);
                 let Some(resolution) = resolution else {
                     return Ty::invalid(self.db);
                 };
                 let ty = self.infer_resolution(expr, resolution);
-                self.check_msg_value(range, obj_ty, prop.as_str());
+                self.check_msg_value(expr, obj_ty, prop.as_str());
                 match self.tables.expr_resolution(expr) {
                     Some(Resolution::Field(ResolvedField::Struct(..))) => {
                         let Some(loc) = obj_ty.loc(self.db) else {
-                            return self.fail(range, "struct has no data location", Ty::invalid(self.db));
+                            return self.fail(DiagnosticAnchor::Expr(expr), "struct has no data location", Ty::invalid(self.db));
                         };
                         ty.upcast_from(self.db, loc)
                     }
@@ -581,7 +584,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 match inner_ty.kind(self.db) {
                     TyKind::Type(name) => self.infer_resolution(expr, Resolution::MetaType(name)),
                     _ => self.fail(
-                        self.input.store.expr_ranges[expr],
+                        DiagnosticAnchor::Expr(expr),
                         "metatype expression requires a type name",
                         Ty::invalid(self.db),
                     ),
@@ -602,7 +605,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 if let Some(value) = value {
                     self.check_return(value);
                 } else if self.owner_returns().is_some_and(|returns| !returns.is_empty()) {
-                    self.fail(self.input.store.expr_ranges[expr], "return arguments required", ());
+                    self.fail(DiagnosticAnchor::Expr(expr), "return arguments required", ());
                 }
                 Ty::void(self.db)
             }
@@ -619,7 +622,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                             TyKind::Invalid => return Ty::invalid(self.db),
                             TyKind::Void => {
                                 return self.fail(
-                                    self.input.store.expr_ranges[elem],
+                                    DiagnosticAnchor::Expr(elem),
                                     "tuple component cannot be empty",
                                     Ty::invalid(self.db),
                                 );
@@ -645,7 +648,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Expr::Path(path) => {
                 let Some(file) = self.db.resolve_to_file(self.owner.file(), &path) else {
                     return self.fail(
-                        self.input.store.expr_ranges[expr],
+                        DiagnosticAnchor::Expr(expr),
                         format!("unable to resolve path `{path}`"),
                         Ty::invalid(self.db),
                     );

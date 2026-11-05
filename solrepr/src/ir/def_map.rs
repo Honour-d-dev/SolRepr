@@ -11,7 +11,6 @@ use smol_str::SmolStr;
 
 use crate::ast::ImportId;
 use crate::ast::ImportItem;
-use crate::ast::NodeRange;
 use crate::ast::UdvtId;
 use crate::ast::UsingId;
 use crate::ast::{
@@ -21,7 +20,6 @@ use crate::ast::{
 use crate::hir::analysis::Analysis;
 use crate::hir::semantic_errors::{DiagnosticSink, SemanticDiagnostic};
 use crate::ir::item_tree::{ItemId, ItemTree};
-use crate::salsa::root_db::def_range;
 use crate::salsa::{FileId, RootDb, SourceRootId};
 
 type Name = SmolStr;
@@ -543,10 +541,8 @@ impl<'db> Collector<'db> {
     }
 
     fn report_redeclaration(&mut self, rejected: DefId, name: Name, previous: DefId) {
-        let range = def_range(self.db, rejected).unwrap_or(NodeRange { start: 0, end: 0 });
         self.sink.push(SemanticDiagnostic::Redeclaration {
             rejected,
-            range,
             name,
             previous,
         });
@@ -585,8 +581,6 @@ impl<'db> Collector<'db> {
             let Some(dep) = self.db.resolve_to_file(file_id, import.path.as_str()) else {
                 self.sink.push(SemanticDiagnostic::UnresolvedImport {
                     import: import_id,
-                    range: def_range(db, DefId::Import(import_id))
-                        .unwrap_or(NodeRange { start: 0, end: 0 }),
                     path: import.path.clone(),
                 });
                 continue;
@@ -748,8 +742,6 @@ impl<'db> Collector<'db> {
             ) {
                 self.sink.push(SemanticDiagnostic::ImportSymbolNotFound {
                     import: pending.import,
-                    range: def_range(db, DefId::Import(pending.import))
-                        .unwrap_or(NodeRange { start: 0, end: 0 }),
                     name: pending.symbol.name.clone(),
                     path: db.item_tree(pending.import.file)[pending.import.id]
                         .path

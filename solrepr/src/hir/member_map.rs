@@ -164,7 +164,6 @@ impl<'db> MemberBuilder<'db> {
         signatures.sort_by_key(|signature| signature.sort_key(self.db));
         let is_concrete =
             matches!(container, DefId::Contract(id) if !self.db.contract_data(id).is_abstract);
-        let range = def_range(self.db, container);
 
         for &signature in &signatures {
             let overrides = &facts.by_sig[signature];
@@ -211,13 +210,9 @@ impl<'db> MemberBuilder<'db> {
                 if conflicting.len() > 1
                     || (conflicting.is_empty() && unresolved.len() > 1)
                 {
-                    if self.complete
-                        && owners.len() > 1
-                        && let Some(range) = range
-                    {
+                    if self.complete && owners.len() > 1 {
                         self.sink.push(SemanticDiagnostic::OverrideConflict {
                             contract: container,
-                            range,
                             name: signature.name().clone(),
                             declarations: conflicting.iter().map(|entry| entry.decl).collect(),
                         });
@@ -242,13 +237,9 @@ impl<'db> MemberBuilder<'db> {
         }
 
         self.obligations.dedup();
-        if is_concrete
-            && !self.obligations.is_empty()
-            && let Some(range) = range
-        {
+        if is_concrete && !self.obligations.is_empty() {
             self.sink.push(SemanticDiagnostic::UnimplementedContract {
                 contract: container,
-                range,
             });
         }
     }
@@ -278,7 +269,6 @@ impl<'db> MemberBuilder<'db> {
     }
 
     fn add_non_override_members(&mut self) {
-        let range = def_range(self.db, self.container);
         let mut index_by_key: FxHashMap<SlotKey, (MemberNamespace, usize)> = FxHashMap::default();
 
         for &owner in self.mro.iter() {
@@ -332,16 +322,13 @@ impl<'db> MemberBuilder<'db> {
                             match (visible, slot.candidates.iter().any(is_visible)) {
                                 (true, true) => {
                                     slot.effective = None;
-                                    if let Some(range) = range {
-                                        self.sink.push(
-                                            SemanticDiagnostic::InheritedMemberConflict {
-                                                contract: self.container,
-                                                name,
-                                                declarations: defs.iter().filter(|d| is_visible(d)).copied().collect(),
-                                                range,
-                                            },
-                                        );
-                                    }
+                                    self.sink.push(
+                                        SemanticDiagnostic::InheritedMemberConflict {
+                                            contract: self.container,
+                                            name,
+                                            declarations: defs.iter().filter(|d| is_visible(d)).copied().collect(),
+                                        },
+                                    );
                                 }
                                 (true, false) => slot.effective = Some(def),
                                 (false, _) => {}

@@ -1,5 +1,6 @@
 use super::*;
 use crate::ast::NodeRange;
+use crate::hir::body_map::BodyOwnerId;
 use crate::salsa::HirDb;
 use num_bigint::BigInt;
 
@@ -131,9 +132,16 @@ fn invalid_data_location_reports_diagnostic() {
         .diagnostics
         .iter()
         .find(|diagnostic| matches!(diagnostic, SemanticDiagnostic::InvalidDataLocation { .. }));
-    let Some(SemanticDiagnostic::InvalidDataLocation { range, .. }) = diagnostic else {
+    let Some(SemanticDiagnostic::InvalidDataLocation { ty_ref_id, .. }) = diagnostic else {
         panic!("expected an invalid-data-location diagnostic");
     };
+    let DefId::Function(id) = find_function(&db, file, "f") else {
+        panic!("fixture function should exist");
+    };
+    let range = db
+        .body_map(BodyOwnerId::Function(id))
+        .syntax_store
+        .ty_ref_ranges[*ty_ref_id];
     let text = db.text(file);
     assert!(text[range.start as usize..range.end as usize].contains("mapping"));
 }
@@ -512,8 +520,8 @@ fn unresolved_type_segments_report_once_on_the_failing_segment() {
             .diagnostics
             .iter()
             .filter_map(|d| match d {
-                SemanticDiagnostic::UnresolvedType { name, range, .. } => {
-                    Some((name.as_str(), *range))
+                SemanticDiagnostic::UnresolvedType { name, ty_ref_id, .. } => {
+                    Some((name.as_str(), *ty_ref_id))
                 }
                 _ => None,
             })
@@ -523,8 +531,15 @@ fn unresolved_type_segments_report_once_on_the_failing_segment() {
             1,
             "{source}: expected exactly one unresolved-type diagnostic"
         );
-        let (found, range) = missing[0];
+        let (found, ty_ref_id) = missing[0];
         assert_eq!(found, name, "{source}");
+        let DefId::Function(id) = find_function(&db, file, "f") else {
+            panic!("{source}: fixture function should exist");
+        };
+        let range = db
+            .body_map(BodyOwnerId::Function(id))
+            .syntax_store
+            .ty_ref_ranges[ty_ref_id];
         let text = db.text(file);
         assert_eq!(
             &text[range.start as usize..range.end as usize],

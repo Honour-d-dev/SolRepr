@@ -114,6 +114,12 @@ pub fn def_range(db: &dyn RootDb, def: DefId) -> Option<NodeRange> {
     Some(NodeRange::from(&name.unwrap_or(node.node())))
 }
 
+/// The whole declaration node's range — the `Decl` diagnostic anchor.
+pub fn def_decl_range(db: &dyn RootDb, def: DefId) -> Option<NodeRange> {
+    let (_, node) = def_node(db, def)?;
+    Some(NodeRange::from(&node.node()))
+}
+
 #[salsa::db]
 impl RootDb for Db {
     fn text(&self, file: FileId) -> Arc<str> {

@@ -2,13 +2,13 @@
 //! checks), ambient context (`UsageContext`), lvalue legality, and body
 //! state-mutability effect tracking (`Pure < View < NonPayable`).
 
-use crate::ast::{ContractId, FunctionKind, NodeRange};
+use crate::ast::{ContractId, FunctionKind};
 use crate::hir::body_map::Local as BodyLocal;
 use crate::hir::types::{Location, VariableKind};
 use crate::hir::builtins;
 use crate::hir::exprs::{Expr, ExprId};
 use crate::hir::resolution::{CallableOrigin, Field as ResolvedField, Local, Resolution};
-use crate::hir::semantic_errors::SemanticDiagnostic;
+use crate::hir::semantic_errors::{DiagnosticAnchor, SemanticDiagnostic};
 use crate::hir::types::{Mutability, Ty, TyKind, Type};
 use crate::ir::def_map::DefId;
 
@@ -82,7 +82,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// overload set is not a value, and a tuple hole is not a component.
     pub(super) fn check_rvalue(&mut self, expr: ExprId) -> Ty {
         let ty = self.infer_in(expr, UsageContext::Empty);
-        let range = self.input.store.expr_ranges[expr];
         let is_call = matches!(self.input.store.exprs[expr], Expr::Call { .. });
         if !is_call
             && matches!(
@@ -90,9 +89,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 Some(Resolution::Callables(_))
             )
         {
-            self.fail(range, "no matching declaration found after variable lookup", ());
+            self.fail(
+                DiagnosticAnchor::Expr(expr),
+                "no matching declaration found after variable lookup",
+                (),
+            );
         }
-        self.check_tuple_holes(expr, range);
+        self.check_tuple_holes(expr);
         ty
     }
 
@@ -100,7 +103,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
     pub(super) fn check_lvalue(&mut self, expr: ExprId) -> Ty {
         let ty = self.infer_in(expr, UsageContext::Lvalue);
         if let Err(reason) = self.lvalue_verdict(expr) {
-            self.fail(self.input.store.expr_ranges[expr], reason, ());
+            self.fail(DiagnosticAnchor::Expr(expr), reason, ());
         }
         ty
     }
@@ -145,11 +148,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// Infers a returned value: a value first, then a value of the right type.
     pub(super) fn check_return(&mut self, expr: ExprId) -> Ty {
         let ty = self.check_rvalue(expr);
-        self.check_return_value(expr, self.input.store.expr_ranges[expr]);
+        self.check_return_value(expr);
         ty
     }
 
-    fn check_return_value(&mut self, expr: ExprId, range: NodeRange) {
+    fn check_return_value(&mut self, expr: ExprId) {
         // `None` means the return types themselves are unresolved; their own
         // diagnostics already fired, so the return statement adds nothing.
         let returns = match self.owner_returns() {
@@ -161,7 +164,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                         "different number of arguments in return statement than in returns declaration"
                     }
                 };
-                self.fail(range, message, ());
+                self.fail(DiagnosticAnchor::Expr(expr), message, ());
                 return;
             }
             Some(r) => r,
@@ -177,7 +180,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         };
         if components.len() != returns.len() {
             return self.fail(
-                range,
+                DiagnosticAnchor::Expr(expr),
                 "different number of arguments in return statement than in returns declaration",
                 (),
             );
@@ -193,7 +196,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 self.report(
                     SemanticDiagnostic::TypeMismatch {
                         expr,
-                        range: self.input.store.expr_ranges[expr],
                         expected,
                         actual: *component,
                     },
@@ -236,13 +238,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
         want: fn(&CallableOrigin) -> bool,
     ) -> Ty {
         let ty = self.infer_in(expr, context);
-        let range = self.input.store.expr_ranges[expr];
         match self.tables.expr_resolution(expr) {
             Some(Resolution::Callable(callable)) if want(callable.origin()) => {}
             Some(Resolution::Callable(_)) => {
-                self.fail(range, format!("this call is not {what}"), ())
+                self.fail(DiagnosticAnchor::Expr(expr), format!("this call is not {what}"), ())
             }
-            _ => self.fail(range, "expression is not callable", ()),
+            _ => self.fail(DiagnosticAnchor::Expr(expr), "expression is not callable", ()),
         }
         ty
     }
@@ -251,29 +252,31 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// header or a `constructor` — a base contract's constructor.
     pub(super) fn check_modifier(&mut self, expr: ExprId) -> Ty {
         let ty = self.infer_in(expr, UsageContext::Modifier);
-        let range = self.input.store.expr_ranges[expr];
         match self.tables.expr_resolution(expr) {
             Some(Resolution::Callable(callable)) => match callable.origin() {
                 CallableOrigin::Modifier(_) => {}
                 CallableOrigin::Constructor(base) if self.allows_base_constructor(*base) => {}
-                _ => self.fail(range, "this call is not a modifier", ()),
+                _ => self.fail(DiagnosticAnchor::Expr(expr), "this call is not a modifier", ()),
             },
             _ if self.tables.expr_ty(expr).is_invalid(self.db) => {}
-            _ => self.fail(range, "expression is not callable", ()),
+            _ => self.fail(DiagnosticAnchor::Expr(expr), "expression is not callable", ()),
         }
         ty
     }
 
-    fn check_tuple_holes(&mut self, expr: ExprId, range: NodeRange) {
+    fn check_tuple_holes(&mut self, expr: ExprId) {
         let Expr::Tuple(elems) = &self.input.store.exprs[expr] else {
             return;
         };
         if elems.iter().any(Option::is_none) {
-            return self.fail(range, "tuple component cannot be empty", ());
+            return self.fail(
+                DiagnosticAnchor::Expr(expr),
+                "tuple component cannot be empty",
+                (),
+            );
         }
         for elem in elems.iter().flatten() {
-            let elem_range = self.input.store.expr_ranges[*elem];
-            self.check_tuple_holes(*elem, elem_range);
+            self.check_tuple_holes(*elem);
         }
     }
 
@@ -282,12 +285,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     // ── State effects & payability ───────────────────────────────────────
 
-    /// Records that the site at `range` needs at least `effect`, and reports it
+    /// Records that the site `expr` needs at least `effect`, and reports it
     /// when the owner declared less. This is the one place a body's effect is
     /// widened and the one place it is compared against the declaration.
     pub(super) fn require_effect(
         &mut self,
-        range: NodeRange,
+        expr: ExprId,
         effect: Mutability,
         callee: Option<DefId>,
     ) {
@@ -299,7 +302,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         if !effect.implicitly_converts_to(declared.state_effect()) {
             self.report(
                 SemanticDiagnostic::StateMutability {//@TODO never emited with a callee
-                    range,
+                    expr,
                     declared,
                     required: effect,
                     callee,
@@ -312,13 +315,17 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// `msg.value` reads the call's attached value, which only a `payable`
     /// function may observe. Libraries are exempt — via delegatecall they see
     /// the *calling* function's value.
-    pub(super) fn check_msg_value(&mut self, range: NodeRange, obj_ty: Ty, prop: &str) {
+    pub(super) fn check_msg_value(&mut self, expr: ExprId, obj_ty: Ty, prop: &str) {
         if prop == "value"
             && matches!(obj_ty.kind(self.db), TyKind::Builtin(builtins::BuiltinTy::Msg))
             && !matches!(self.resolver.container(), DefId::Library(_))
             && self.declared_mutability.is_some_and(|mutability| mutability != Mutability::Payable)
         {
-            self.fail(range, "`msg.value` is only allowed in payable functions", ());
+            self.fail(
+                DiagnosticAnchor::Expr(expr),
+                "`msg.value` is only allowed in payable functions",
+                (),
+            );
         }
     }
 
@@ -383,15 +390,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// decides the side.
     pub(super) fn check_resolution_mutability(
         &mut self,
-        range: NodeRange,
+        expr: ExprId,
         resolution: &Resolution,
     ) {
         match self.in_lvalue() {
             true if self.writes_state(resolution) => {
-                self.require_effect(range, Mutability::NonPayable, None);
+                self.require_effect(expr, Mutability::NonPayable, None);
             }
             false if self.reads_state(resolution) => {
-                self.require_effect(range, Mutability::View, None);
+                self.require_effect(expr, Mutability::View, None);
             }
             _ => {}
         }

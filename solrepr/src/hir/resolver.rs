@@ -9,7 +9,7 @@ use crate::hir::builtins::BuiltinDb;
 use crate::hir::exprs::{ExprId, Name};
 use crate::hir::member_lookup::MemberLookupResult;
 use crate::hir::resolution::{Callable, Local, Resolution};
-use crate::hir::semantic_errors::{DiagnosticSink, SemanticDiagnostic};
+use crate::hir::semantic_errors::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::types::{Primitive, Ty, Type};
 use crate::ir::def_map::{DefId, DefMap, DefNamespace, ScopeData};
 use crate::salsa::{File, HirDb};
@@ -157,7 +157,6 @@ impl<'db> Resolver<'db> {
                 if !declarations.is_empty() {
                     self.record_lookup_failure(SemanticDiagnostic::AmbiguousMember {
                         expr,
-                        range,
                         name: name.clone(),
                         declarations,
                     });
@@ -167,7 +166,6 @@ impl<'db> Resolver<'db> {
             NameOutcome::Missed(denials) => {
                 self.record_lookup_failure(SemanticDiagnostic::UnresolvedName {
                     expr,
-                    range,
                     name: name.clone(),
                     denials,
                 });
@@ -441,14 +439,13 @@ impl<'db> Resolver<'db> {
         ty: Ty,
         name: &Name,
         expr: ExprId,
-        range: NodeRange,
     ) -> Option<Resolution> {
         let lookup = if self.declaration_only {
             self.declaration_member_named(ty, name)
         } else {
             self.member_named(ty, name)
         };
-        self.finish_member_lookup(lookup, ty, name, expr, range)
+        self.finish_member_lookup(lookup, ty, name, expr)
     }
 
     fn finish_member_lookup(
@@ -457,12 +454,10 @@ impl<'db> Resolver<'db> {
         ty: Ty,
         name: &Name,
         expr: ExprId,
-        range: NodeRange,
     ) -> Option<Resolution> {
         if !lookup.is_hit() {
             self.record_lookup_failure(SemanticDiagnostic::UnresolvedMember {
                 expr,
-                range,
                 receiver: ty,
                 member: name.clone(),
                 denials: lookup.denials,
@@ -471,7 +466,7 @@ impl<'db> Resolver<'db> {
         }
         if lookup.is_ambiguous_value() {
             self.record_lookup_failure(SemanticDiagnostic::InferenceFailure {
-                range,
+                anchor: DiagnosticAnchor::Expr(expr),
                 message: "member access is ambiguous".to_string(),
             });
             return None;
@@ -481,7 +476,6 @@ impl<'db> Resolver<'db> {
             if !declarations.is_empty() {
                 self.record_lookup_failure(SemanticDiagnostic::AmbiguousMember {
                     expr,
-                    range,
                     name: name.clone(),
                     declarations,
                 });

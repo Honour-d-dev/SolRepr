@@ -329,15 +329,7 @@ fn lookup_reported_member(
     offset: u32,
 ) -> Option<Resolution> {
     let name: Name = name.into();
-    resolver.lookup_member_at(
-        ty,
-        &name,
-        ExprId::from_raw(offset.into()),
-        crate::ast::NodeRange {
-            start: offset,
-            end: offset + 1,
-        },
-    )
+    resolver.lookup_member_at(ty, &name, ExprId::from_raw(offset.into()))
 }
 
 fn recorded_denials(resolver: &Resolver) -> Vec<crate::hir::access::AccessDenial> {
@@ -909,12 +901,8 @@ fn member_lookup_at_collects_only_the_requested_name() {
         probe,
     );
     let c = contract_type(&db, file, "C");
-    let resolution = resolver.lookup_member_at(
-        c,
-        &"value".into(),
-        ExprId::from_raw(0.into()),
-        crate::ast::NodeRange { start: 0, end: 1 },
-    );
+    let resolution =
+        resolver.lookup_member_at(c, &"value".into(), ExprId::from_raw(0.into()));
     assert!(resolution.is_some());
 }
 

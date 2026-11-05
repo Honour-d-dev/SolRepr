@@ -8,7 +8,7 @@ use super::interned_db::{
     BodyOwner, Contract, DefWithBases, DefWithBasesId, Enum, Error, Event, Function, Import,
     Interface, Library, Modifier, Struct, Udvt, Using, Var,
 };
-use super::root_db::{RootDb, def_range};
+use super::root_db::RootDb;
 use crate::ast::{self, FunctionKind, NodeRange, ToAstNode};
 use crate::hir::analysis::Analysis;
 use crate::hir::body_map::{BodyBuilder, BodyMap, BodyOwnerId, BodySourceMap, ByteOffset, LocalId};
@@ -522,9 +522,7 @@ fn bases_cycle_error<'db>(
     Analysis::new(
         vec![container],
         Arc::from(vec![SemanticDiagnostic::InheritanceFailure {
-            // Diagnostics require a range; a missing AST node falls back to
-            // the start of the file rather than dropping the diagnostic.
-            range: def_range(db, container).unwrap_or(NodeRange { start: 0, end: 0 }),
+            contract: container,
             problems: vec!["cyclic inheritance hierarchy".to_string()],
         }]),
     )

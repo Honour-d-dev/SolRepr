@@ -5,9 +5,11 @@ use crate::ast::NodeRange;
 use crate::hir::body_map::{BodyOwnerId, Local, ScopeId};
 use crate::hir::exprs::{Expr, ExprId};
 use crate::hir::item_data::{Field, SemanticId, Variant};
+use crate::hir::semantic_errors::DiagnosticAnchor;
 use crate::hir::types::{TyName, TyNameId};
 use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
+use crate::salsa::root_db::{def_decl_range, def_range};
 
 #[derive(PartialEq, Eq)]
 pub struct SyntaxStore {
@@ -75,6 +77,42 @@ pub fn callee_at(db: &dyn HirDb, owner: DefId, range: NodeRange) -> Option<ExprI
     })?
 }
 
+
+/// Resolve a diagnostic anchor to a source range in `owner`'s store.
+pub(crate) fn anchor_range(
+    db: &dyn HirDb,
+    owner: DefId,
+    anchor: DiagnosticAnchor,
+) -> Option<NodeRange> {
+    match anchor {
+        DiagnosticAnchor::Expr(expr) => {
+            with_store(db, owner, |store| store.expr_ranges.get(expr).copied())?
+        }
+        DiagnosticAnchor::TyRef(ty_ref) => {
+            with_store(db, owner, |store| store.ty_ref_ranges.get(ty_ref).copied())?
+        }
+        DiagnosticAnchor::Local(local) => {
+            let arena = match owner {
+                DefId::Function(id) => &db.body_map(BodyOwnerId::Function(id)).locals,
+                DefId::Modifier(id) => &db.body_map(BodyOwnerId::Modifier(id)).locals,
+                DefId::Event(id) => &db.event_data(id).parameters,
+                DefId::Error(id) => &db.error_data(id).parameters,
+                _ => return None,
+            };
+            arena
+                .iter()
+                .find(|(id, _)| *id == local)
+                .map(|(_, local)| local.range())
+        }
+        DiagnosticAnchor::Def(def) => def_range(db, def),
+        DiagnosticAnchor::Decl(def) => def_decl_range(db, def),
+        DiagnosticAnchor::Body(def) => match def {
+            DefId::Modifier(id) => db.modifier_data(id).body_range,
+            _ => None,
+        },
+        DiagnosticAnchor::Raw(range) => Some(range),
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct OwnerStore<'a> {
