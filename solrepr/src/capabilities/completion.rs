@@ -684,7 +684,7 @@ pub(crate) fn complete_expr(
         for (_, local) in body
             .locals
             .iter()
-            .filter(|(_, local)| local.offset() <= offset)
+            .filter(|(_, local)| local.range().start <= offset)
         {
             acc.push(completion_item_for_local(local, &body.syntax_store));
         }

@@ -110,11 +110,11 @@ fn local_targets(db: &Db, owner: DefId, local_id: LocalId) -> Vec<DefinitionTarg
     let (file, _) = owner.file_and_id();
     let range = match owner {
         DefId::Function(id) => {
-            let (body, _) = db.body_and_source_map(BodyOwnerId::Function(id));
+            let body = db.body_map(BodyOwnerId::Function(id));
             body.locals[local_id].range()
         }
         DefId::Modifier(id) => {
-            let (body, _) = db.body_and_source_map(BodyOwnerId::Modifier(id));
+            let body = db.body_map(BodyOwnerId::Modifier(id));
             body.locals[local_id].range()
         }
         DefId::Event(id) => db.event_data(id).parameters[local_id].range(),

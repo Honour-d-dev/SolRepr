@@ -1,7 +1,8 @@
+use la_arena::ArenaMap;
 use num_bigint::BigInt;
 
 use crate::ast::NodeRange;
-use crate::hir::body_map::BodySourceMap;
+use crate::hir::body_map::ScopeId;
 use crate::hir::types::VariableKind;
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Literal, Name, UnaryOp};
 use crate::hir::syntax_store::SyntaxStore;
@@ -144,7 +145,14 @@ pub(super) enum ConstErrorKind {
 
 impl<'db, 'store> Inferer<'db, 'store> {
     pub(super) fn eval_const(&self, expr: ExprId) -> Result<ConstValue, ConstError> {
-        ConstEval::new(self.db, self.input.store, &self.resolver, self.input.source_map).eval(expr)
+        ConstEval::new(
+            self.db,
+            self.input.store,
+            &self.resolver,
+            self.input.expr_scopes,
+            self.input.expr_orders,
+        )
+        .eval(expr)
     }
 
     /// `eval_const` for consumers needing the folded integer — array lengths.
@@ -205,7 +213,8 @@ pub(super) struct ConstEval<'a, 'db> {
     db: &'db dyn HirDb,
     store: &'a SyntaxStore,
     resolver: &'a Resolver<'db>,
-    source_map: Option<&'a BodySourceMap>,
+    expr_scopes: Option<&'a ArenaMap<ExprId, ScopeId>>,
+    expr_orders: Option<&'a ArenaMap<ExprId, u32>>,
     visiting: Vec<DefId>,
 }
 
@@ -214,13 +223,15 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         db: &'db dyn HirDb,
         store: &'a SyntaxStore,
         resolver: &'a Resolver<'db>,
-        source_map: Option<&'a BodySourceMap>,
+        expr_scopes: Option<&'a ArenaMap<ExprId, ScopeId>>,
+        expr_orders: Option<&'a ArenaMap<ExprId, u32>>,
     ) -> Self {
         Self {
             db,
             store,
             resolver,
-            source_map,
+            expr_scopes,
+            expr_orders,
             visiting: Vec::new(),
         }
     }
@@ -248,15 +259,14 @@ impl<'a, 'db> ConstEval<'a, 'db> {
     }
     fn resolve_ident(&self, expr: ExprId, name: &Name) -> Option<Resolution> {
         let scope = self
-            .source_map
-            .and_then(|map| map.expr_scopes.get(expr).copied());
-        let offset = self
-            .store
-            .expr_ranges
-            .get(expr)
-            .map(|range| range.start)
+            .expr_scopes
+            .and_then(|map| map.get(expr).copied());
+        let order = self
+            .expr_orders
+            .and_then(|map| map.get(expr).copied())
             .unwrap_or_default();
-        self.resolver.resolve_name(name, scope, offset)
+        let self_range = self.store.expr_ranges.get(expr).copied();
+        self.resolver.resolve_name_in(name, scope, order, self_range)
     }
 
     pub(super) fn eval(&mut self, expr: ExprId) -> Result<ConstValue, ConstError> {
@@ -736,7 +746,8 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             db: self.db,
             store: &data.syntax_store,
             resolver: &resolver,
-            source_map: None,
+            expr_scopes: None,
+            expr_orders: None,
             visiting,
         };
         let value = child.eval(init);

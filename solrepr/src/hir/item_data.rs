@@ -10,7 +10,7 @@ use crate::ast::{
     HasMembers, HasName, Import, ImportKind, Interface, Item, Library, Modifier, NodeRange, Struct,
     ToAstNode, Udvt, Using, Var,
 };
-use crate::hir::body_map::{ByteOffset, Local, LocalId};
+use crate::hir::body_map::{Local, LocalId};
 use crate::hir::exprs::{Expr, ExprBuilder, ExprId, Name};
 use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::types::{
@@ -681,12 +681,13 @@ impl ItemBuilder {
         };
         let parameter_range = NodeRange::from(&node);
         let local_range = name_range.unwrap_or(parameter_range);
+        let decl_order = parameters.len() as u32;
         let local_id = parameters.alloc(Local::new(
             name,
             VariableKind::Parameter,
             ty_ref,
             local_range,
-            node.start_byte() as ByteOffset,
+            decl_order,
             None,
         ));
         self.syntax_store

@@ -2,7 +2,7 @@ use la_arena::{Arena, ArenaMap};
 use rustc_hash::FxHashMap;
 
 use crate::ast::NodeRange;
-use crate::hir::body_map::{BodyOwnerId, BodySourceMap, Local};
+use crate::hir::body_map::{BodyOwnerId, Local, ScopeId};
 use crate::hir::exprs::{Expr, ExprId};
 use crate::hir::item_data::{Field, SemanticId, Variant};
 use crate::hir::types::{TyName, TyNameId};
@@ -82,7 +82,8 @@ pub struct OwnerStore<'a> {
     pub locals: Option<&'a Arena<Local>>,
     pub fields: Option<&'a Arena<Field>>,
     pub variants: Option<&'a Arena<Variant>>,
-    pub source_map: Option<&'a BodySourceMap>,
+    pub expr_scopes: Option<&'a ArenaMap<ExprId, ScopeId>>,
+    pub expr_orders: Option<&'a ArenaMap<ExprId, u32>>,
 }
 
 impl<'a> OwnerStore<'a> {
@@ -92,7 +93,8 @@ impl<'a> OwnerStore<'a> {
             locals: None,
             fields: None,
             variants: None,
-            source_map: None,
+            expr_scopes: None,
+            expr_orders: None,
         }
     }
 
@@ -111,8 +113,13 @@ impl<'a> OwnerStore<'a> {
         self
     }
 
-    pub fn with_source_map(mut self, source_map: &'a BodySourceMap) -> Self {
-        self.source_map = Some(source_map);
+    pub fn with_expr_scopes(mut self, expr_scopes: &'a ArenaMap<ExprId, ScopeId>) -> Self {
+        self.expr_scopes = Some(expr_scopes);
+        self
+    }
+
+    pub fn with_expr_orders(mut self, expr_orders: &'a ArenaMap<ExprId, u32>) -> Self {
+        self.expr_orders = Some(expr_orders);
         self
     }
 }
@@ -126,16 +133,18 @@ pub(crate) fn with_owner_store<R>(
 ) -> Option<R> {
     Some(match owner {
         DefId::Function(id) => {
-            let (body, source_map) = db.body_and_source_map(BodyOwnerId::Function(id));
+            let body = db.body_map(BodyOwnerId::Function(id));
             f(OwnerStore::new(&body.syntax_store)
                 .with_locals(&body.locals)
-                .with_source_map(&source_map))
+                .with_expr_scopes(&body.expr_scopes)
+                .with_expr_orders(&body.expr_orders))
         }
         DefId::Modifier(id) => {
-            let (body, source_map) = db.body_and_source_map(BodyOwnerId::Modifier(id));
+            let body = db.body_map(BodyOwnerId::Modifier(id));
             f(OwnerStore::new(&body.syntax_store)
                 .with_locals(&body.locals)
-                .with_source_map(&source_map))
+                .with_expr_scopes(&body.expr_scopes)
+                .with_expr_orders(&body.expr_orders))
         }
         DefId::Event(id) => {
             let data = db.event_data(id);

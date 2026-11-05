@@ -72,13 +72,13 @@ pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
     match container {
         DefId::Function(id) => {
             let fn_data = db.function_data(*id);
-            let (body, _) = db.body_and_source_map(BodyOwnerId::Function(*id));
+            let body = db.body_map(BodyOwnerId::Function(*id));
             process_store!(&fn_data.syntax_store);
             process_store!(&body.syntax_store);
         }
         DefId::Modifier(id) => {
             let mod_data = db.modifier_data(*id);
-            let (body, _) = db.body_and_source_map(BodyOwnerId::Modifier(*id));
+            let body = db.body_map(BodyOwnerId::Modifier(*id));
             process_store!(&mod_data.syntax_store);
             process_store!(&body.syntax_store);
         }

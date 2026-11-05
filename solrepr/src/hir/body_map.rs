@@ -47,7 +47,9 @@ pub struct Local {
     kind: VariableKind,
     ty_ref: TyNameId,
     range: NodeRange,
-    offset: ByteOffset, //from where this decl becomes visible
+    /// Allocation order in the body — replaces byte offsets for the
+    /// declaration-order visibility check.
+    decl_order: u32,
     init: Option<ExprId>,
 }
 
@@ -57,12 +59,15 @@ pub struct BodyMap {
     pub scopes: Arena<Scope>,
     pub locals: Arena<Local>,
     pub syntax_store: SyntaxStore,
+    /// The scope each expression belongs to — content, not a source map.
+    pub expr_scopes: ArenaMap<ExprId, ScopeId>,
+    /// Allocation order of each expression, for declaration-order visibility.
+    pub expr_orders: ArenaMap<ExprId, u32>,
 }
 
-#[derive(PartialEq, Eq)]
-pub struct BodySourceMap {
-    pub expr_scopes: ArenaMap<ExprId, ScopeId>,
-}
+/// The positional sibling of `BodyMap`; populated once ranges move here.
+#[derive(Default, PartialEq, Eq)]
+pub struct BodySourceMap;
 
 impl BodyMap {
     pub fn local(&self, decl: LocalId) -> &Local {
@@ -84,7 +89,7 @@ impl Local {
         kind: VariableKind,
         ty_ref: TyNameId,
         range: NodeRange,
-        offset: ByteOffset,
+        decl_order: u32,
         init: Option<ExprId>,
     ) -> Self {
         Self {
@@ -92,7 +97,7 @@ impl Local {
             kind,
             ty_ref,
             range,
-            offset,
+            decl_order,
             init,
         }
     }
@@ -121,8 +126,8 @@ impl Local {
         self.range
     }
 
-    pub fn offset(&self) -> ByteOffset {
-        self.offset
+    pub fn decl_order(&self) -> u32 {
+        self.decl_order
     }
 
     pub fn init(&self) -> Option<ExprId> {
@@ -138,6 +143,8 @@ pub struct BodyBuilder {
     locals: Arena<Local>,
     syntax_store: SyntaxStore,
     expr_scopes: ArenaMap<ExprId, ScopeId>,
+    expr_orders: ArenaMap<ExprId, u32>,
+    order: u32,
 }
 
 impl BodyBuilder {
@@ -160,6 +167,8 @@ impl BodyBuilder {
             locals: Arena::new(),
             syntax_store: SyntaxStore::default(),
             expr_scopes: ArenaMap::new(),
+            expr_orders: ArenaMap::new(),
+            order: 1,
         };
 
         builder.collect_parameters(owner.node());
@@ -170,6 +179,13 @@ impl BodyBuilder {
         }
 
         Some(builder.finish())
+    }
+
+    /// Monotonic source order shared by locals and expressions.
+    fn next_order(&mut self) -> u32 {
+        let order = self.order;
+        self.order += 1;
+        order
     }
 
     fn push_scope(&mut self, range: NodeRange) {
@@ -185,12 +201,9 @@ impl BodyBuilder {
             match child.kind_id().into() {
                 NodeKind::VAR_DECLARATION_STATEMENT => self.collect_declaration(child),
                 // `try` statements expose bare parameters as direct descendants.
-                NodeKind::PARAMETER => self.add_local(
-                    child,
-                    VariableKind::Parameter,
-                    child.start_byte() as u32,
-                    None,
-                ),
+                NodeKind::PARAMETER => {
+                    self.add_local(child, VariableKind::Parameter, None)
+                }
                 NodeKind::STATEMENT
                 | NodeKind::IF_STATEMENT
                 | NodeKind::WHILE_STATEMENT
@@ -224,23 +237,13 @@ impl BodyBuilder {
         for child in node.named_children(&mut node.walk()) {
             match child.kind_id().into() {
                 NodeKind::VAR_DECLARATION => {
-                    self.add_local(
-                        child,
-                        VariableKind::LocalVariable,
-                        child.range().end_byte as ByteOffset,
-                        init,
-                    );
+                    self.add_local(child, VariableKind::LocalVariable, init);
                 }
                 NodeKind::VAR_DECLARATION_TUPLE => {
                     // A tuple initializer destructures; without that support the
                     // components must not each be checked against the whole value.
                     for child in child.named_children(&mut child.walk()) {
-                        self.add_local(
-                            child,
-                            VariableKind::LocalVariable,
-                            child.range().end_byte as ByteOffset,
-                            None,
-                        );
+                        self.add_local(child, VariableKind::LocalVariable, None);
                     }
                 }
                 _ => {}
@@ -255,12 +258,7 @@ impl BodyBuilder {
                     self.lower_expr(child);
                 }
                 NodeKind::PARAMETER => {
-                    self.add_local(
-                        child,
-                        VariableKind::Parameter,
-                        child.range().start_byte as ByteOffset,
-                        None,
-                    );
+                    self.add_local(child, VariableKind::Parameter, None);
                 }
                 NodeKind::MODIFIER_INVOCATION => {
                     self.lower_expr(child);
@@ -271,13 +269,7 @@ impl BodyBuilder {
         }
     }
 
-    fn add_local(
-        &mut self,
-        node: Node,
-        kind: VariableKind,
-        offset: ByteOffset,
-        init: Option<ExprId>,
-    ) {
+    fn add_local(&mut self, node: Node, kind: VariableKind, init: Option<ExprId>) {
         let mut name: Name = "".into();
         let mut ty = None;
         let mut location = None;
@@ -312,12 +304,13 @@ impl BodyBuilder {
             None => ty_ref,
         };
 
+        let decl_order = self.next_order();
         let local_id = self.locals.alloc(Local {
             name: name.clone(),
             kind,
             ty_ref,
             range,
-            offset,
+            decl_order,
             init,
         });
 
@@ -344,6 +337,7 @@ impl BodyBuilder {
             locals: mut decls,
             mut syntax_store,
             mut expr_scopes,
+            mut expr_orders,
             ..
         } = self;
         scopes.shrink_to_fit();
@@ -352,14 +346,17 @@ impl BodyBuilder {
         syntax_store.types.shrink_to_fit();
         syntax_store.range_to_semantic.shrink_to_fit();
         expr_scopes.shrink_to_fit();
+        expr_orders.shrink_to_fit();
         (
             BodyMap {
                 root_scope,
                 scopes,
                 locals: decls,
                 syntax_store,
+                expr_scopes,
+                expr_orders,
             },
-            BodySourceMap { expr_scopes },
+            BodySourceMap,
         )
     }
 }
@@ -371,6 +368,8 @@ impl ExprBuilder for BodyBuilder {
 
     fn alloc_expr_range(&mut self, expr: Expr, range: NodeRange) -> ExprId {
         let expr_id = self.syntax_store.exprs.alloc(expr);
+        let order = self.next_order();
+        self.expr_orders.insert(expr_id, order);
         self.syntax_store.expr_ranges.insert(expr_id, range);
         self.syntax_store
             .range_to_semantic
@@ -399,6 +398,8 @@ impl ExprBuilder for BodyBuilder {
 
     fn alloc_wrapper_expr(&mut self, expr: Expr, node: Node) -> ExprId {
         let expr_id = self.syntax_store.exprs.alloc(expr);
+        let order = self.next_order();
+        self.expr_orders.insert(expr_id, order);
         self.syntax_store
             .expr_ranges
             .insert(expr_id, NodeRange::from(&node));

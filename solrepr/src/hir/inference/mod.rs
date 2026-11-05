@@ -62,7 +62,7 @@ pub struct Inferer<'db, 'store> {
 impl<'db, 'store> Inferer<'db, 'store> {
     pub fn run(db: &'db dyn HirDb, owner: DefId, input: OwnerStore<'store>) -> Inference {
         // No source map means a declaration-context query: declaring scopes only.
-        let resolver = if input.source_map.is_some() {
+        let resolver = if input.expr_scopes.is_some() {
             Resolver::build(db, owner)
         } else {
             Resolver::for_declaration(db, owner)
@@ -314,11 +314,16 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 let range = self.input.store.expr_ranges[expr];
                 let scope = self
                     .input
-                    .source_map
-                    .and_then(|map| map.expr_scopes.get(expr).copied());
+                    .expr_scopes
+                    .and_then(|map| map.get(expr).copied());
+                let order = self
+                    .input
+                    .expr_orders
+                    .and_then(|map| map.get(expr).copied())
+                    .unwrap_or_default();
                 let resolved = self
                     .resolver
-                    .resolve_name_at(&name, scope, range.start, expr, range);
+                    .resolve_name_at(&name, scope, order, expr, range);
                 let Some(resolution) = resolved else {
                     return Ty::invalid(self.db);
                 };

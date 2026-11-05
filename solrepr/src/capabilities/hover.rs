@@ -87,11 +87,11 @@ impl<'db> Hover<'db> {
     fn hover_local(&self, owner: DefId, local_id: LocalId) -> Option<String> {
         match owner {
             DefId::Function(id) => {
-                let (body, _) = self.db.body_and_source_map(BodyOwnerId::Function(id));
+                let body = self.db.body_map(BodyOwnerId::Function(id));
                 Some(self.format_local(&body.locals[local_id], &body.syntax_store))
             }
             DefId::Modifier(id) => {
-                let (body, _) = self.db.body_and_source_map(BodyOwnerId::Modifier(id));
+                let body = self.db.body_map(BodyOwnerId::Modifier(id));
                 Some(self.format_local(&body.locals[local_id], &body.syntax_store))
             }
             DefId::Event(id) => {

@@ -144,3 +144,49 @@ fn modifier_body_requires_the_placeholder() {
 }
 
 
+
+/// Locals become visible in declaration order, not by byte offset.
+#[test]
+fn locals_follow_declaration_order() {
+    let (db, file) = make_test_db(
+        r#"
+            contract C {
+                function after() external { uint x = 1; x; }
+                function before() external { uint x = x; }
+            }
+            "#,
+    );
+
+    assert!(
+        codes(&named_function_inference(&db, file, "after")).is_empty(),
+        "a local is visible after its declaration"
+    );
+    assert!(
+        codes(&named_function_inference(&db, file, "before"))
+            .contains(&DiagnosticCode::UnresolvedName),
+        "a local is not visible in its own initializer"
+    );
+}
+
+/// A declaration that is not yet visible is skipped, so the initializer sees
+/// the next binding outward — matching solc's shadowing rule.
+#[test]
+fn initializer_sees_an_outer_binding() {
+    let (db, file) = make_test_db(
+        r#"
+            contract C {
+                uint s;
+                function outer_local() external { uint x = 1; { uint x = x; } }
+                function state_var() external { uint s = s; }
+                function param(uint p) external { { uint p = p; } }
+            }
+            "#,
+    );
+
+    for name in ["outer_local", "state_var", "param"] {
+        assert!(
+            codes(&named_function_inference(&db, file, name)).is_empty(),
+            "{name} should resolve its initializer to the outer binding",
+        );
+    }
+}
