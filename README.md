@@ -30,7 +30,7 @@
 To run:
 
 ```bash
-cd lsp_server
+cd solrepr
 cargo build
 cd ../extension
 npm install

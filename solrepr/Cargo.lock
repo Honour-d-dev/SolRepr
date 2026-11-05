@@ -398,37 +398,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lsp_server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "camino",
- "crossbeam-channel",
- "dashmap",
- "glob",
- "ignore",
- "la-arena",
- "lsp-server",
- "lsp-types",
- "num-bigint",
- "parking_lot",
- "ropey",
- "rustc-hash",
- "salsa",
- "serde",
- "serde_json",
- "slotmap",
- "smallvec",
- "smol_str",
- "toml",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-solidity",
- "triomphe",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -795,6 +764,37 @@ checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
 dependencies = [
  "borsh",
  "serde_core",
+]
+
+[[package]]
+name = "solrepr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "crossbeam-channel",
+ "dashmap",
+ "glob",
+ "ignore",
+ "la-arena",
+ "lsp-server",
+ "lsp-types",
+ "num-bigint",
+ "parking_lot",
+ "ropey",
+ "rustc-hash",
+ "salsa",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "smallvec",
+ "smol_str",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-solidity",
+ "triomphe",
 ]
 
 [[package]]

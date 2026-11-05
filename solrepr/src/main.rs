@@ -15,7 +15,7 @@ use lsp_server::Connection;
 
 fn main() -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("lsp_server=debug"))
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("solrepr=debug"))
         .add_directive(
             "lsp_server::msg=off"
                 .parse()

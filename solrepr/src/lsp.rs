@@ -71,7 +71,7 @@ impl SolidityLspServer {
                 ..ServerCapabilities::default()
             },
             server_info: Some(lsp_types::ServerInfo {
-                name: "solidity-lsp".to_string(),
+                name: "solrepr".to_string(),
                 version: None,
             }),
         };

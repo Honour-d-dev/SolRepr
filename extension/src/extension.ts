@@ -13,7 +13,7 @@ let client: LanguageClient | undefined;
 ///@notice This function tries to get the path to the compiled lsp server
 function resolveServerPath(context: vscode.ExtensionContext): string {
   //First try to read it from the config file(package.json)
-  const config = vscode.workspace.getConfiguration("solidityLsp");
+  const config = vscode.workspace.getConfiguration("solrepr");
   const configuredPath = config.get<string>("serverPath");
   if (configuredPath && configuredPath.trim().length > 0) {
     return configuredPath;
@@ -22,37 +22,37 @@ function resolveServerPath(context: vscode.ExtensionContext): string {
   return path.resolve(//else default  to this
     context.extensionPath,
     "..",
-    "lsp_server",
+    "solrepr",
     "target",
     "debug",
-    "lsp_server"
+    "solrepr"
   );
 }
 
 export async function activate(context: vscode.ExtensionContext) {
   const serverPath = resolveServerPath(context);
-  const config = vscode.workspace.getConfiguration("solidityLsp");
+  const config = vscode.workspace.getConfiguration("solrepr");
   const traceSetting = config.get<"off" | "messages" | "verbose">(
     "trace.server",
     "verbose"
   );
-  const outputChannel = vscode.window.createOutputChannel("Solidity LSP");
-  const traceOutputChannel = vscode.window.createOutputChannel("Solidity LSP Trace");
+  const outputChannel = vscode.window.createOutputChannel("SolRepr");
+  const traceOutputChannel = vscode.window.createOutputChannel("SolRepr Trace");
   context.subscriptions.push(outputChannel, traceOutputChannel);
-  outputChannel.appendLine("Activating Solidity LSP extension...");
+  outputChannel.appendLine("Activating SolRepr extension...");
   outputChannel.appendLine(`Resolved server path: ${serverPath}`);
   outputChannel.appendLine(`Configured trace.server: ${traceSetting}`);
   outputChannel.show(true);
 
   if (!fs.existsSync(serverPath)) {
-    const msg = `Solidity LSP server not found at ${serverPath}. Build it first (cargo build).`;
+    const msg = `SolRepr server not found at ${serverPath}. Build it first (cargo build).`;
     outputChannel.appendLine(msg);
     vscode.window.showErrorMessage(msg);
     return;
   }
 
   const env = { ...process.env };
-  env.RUST_LOG = "lsp_server=debug";
+  env.RUST_LOG = "solrepr=debug";
 
   const serverOptions: ServerOptions = {
     command: serverPath,
@@ -70,8 +70,8 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   client = new LanguageClient(
-    "solidityLsp",
-    "Solidity LSP",
+    "solrepr",
+    "SolRepr",
     serverOptions,
     clientOptions
   );
@@ -85,10 +85,10 @@ export async function activate(context: vscode.ExtensionContext) {
         ? Trace.Messages
         : Trace.Off;
     await client.setTrace(traceLevel);
-    outputChannel.appendLine(`Solidity LSP started: ${serverPath}`);
+    outputChannel.appendLine(`SolRepr started: ${serverPath}`);
     outputChannel.appendLine(`Server env RUST_LOG=${env.RUST_LOG}`);
   } catch (error) {
-    const msg = `Failed to start Solidity LSP: ${String(error)}`;
+    const msg = `Failed to start SolRepr: ${String(error)}`;
     outputChannel.appendLine(msg);
     vscode.window.showErrorMessage(msg);
   }
@@ -166,7 +166,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // range and displays the lowered HIR expression tree in a virtual
   // read-only file.
   context.subscriptions.push(
-    vscode.commands.registerCommand("solidityLsp.viewHir", async () => {
+    vscode.commands.registerCommand("solrepr.viewHir", async () => {
       await sendViewRequest(client, "solidity/viewHir", "viewHir", "hir");
     })
   );
@@ -176,7 +176,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // range and displays the raw tree-sitter named AST tree in a virtual
   // read-only file.
   context.subscriptions.push(
-    vscode.commands.registerCommand("solidityLsp.viewAst", async () => {
+    vscode.commands.registerCommand("solrepr.viewAst", async () => {
       await sendViewRequest(client, "solidity/viewAst", "viewAst", "ast");
     })
   );
@@ -185,7 +185,7 @@ export async function activate(context: vscode.ExtensionContext) {
 /// URI scheme for virtual documents used by view commands.
 /// Documents using this scheme are in-memory only — no file on disk,
 /// no "save changes?" prompt on close.
-const VIRTUAL_SCHEME = "solidity-lsp";
+const VIRTUAL_SCHEME = "solrepr";
 
 const virtualDocChanges = new vscode.EventEmitter<vscode.Uri>();
 

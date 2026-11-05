@@ -1,8 +1,8 @@
 {
-  "name": "solidity-lsp",
-  "displayName": "Solidity LSP (Local)",
-  "description": "Minimal Solidity LSP client for local development",
-  "version": "0.0.1",
+  "name": "solrepr",
+  "displayName": "SolRepr",
+  "description": "Semantic analyzer and language server for Solidity",
+  "version": "0.1.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.80.0"
@@ -25,37 +25,37 @@
     ],
     "commands": [
       {
-        "command": "solidityLsp.viewHir",
-        "title": "Solidity: View HIR (Lowered)",
-        "category": "Solidity LSP"
+        "command": "solrepr.viewHir",
+        "title": "View HIR (Lowered)",
+        "category": "SolRepr"
       },
       {
-        "command": "solidityLsp.viewAst",
-        "title": "Solidity: View AST (Named Tree)",
-        "category": "Solidity LSP"
+        "command": "solrepr.viewAst",
+        "title": "View AST (Named Tree)",
+        "category": "SolRepr"
       }
     ],
     "menus": {
       "commandPalette": [
         {
-          "command": "solidityLsp.viewHir",
+          "command": "solrepr.viewHir",
           "when": "editorLangId == solidity"
         },
         {
-          "command": "solidityLsp.viewAst",
+          "command": "solrepr.viewAst",
           "when": "editorLangId == solidity"
         }
       ]
     },
     "configuration": {
-      "title": "Solidity LSP",
+      "title": "SolRepr",
       "properties": {
-        "solidityLsp.serverPath": {
+        "solrepr.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the Solidity LSP server binary. If empty, uses ../lsp_server/target/debug/lsp_server relative to the extension."
+          "description": "Path to the solrepr server binary. If empty, uses ../solrepr/target/debug/solrepr relative to the extension."
         },
-        "solidityLsp.trace.server": {
+        "solrepr.trace.server": {
           "type": "string",
           "default": "verbose",
           "description": "Trace level for the LSP server."

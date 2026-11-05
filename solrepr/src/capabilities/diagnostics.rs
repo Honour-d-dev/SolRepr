@@ -138,7 +138,7 @@ fn to_lsp_diagnostic(
             Severity::Hint => DiagnosticSeverity::HINT,
         }),
         code: Some(NumberOrString::String(format!("{:?}", diagnostic.code))),
-        source: Some("solidity-lsp".to_string()),
+        source: Some("solrepr".to_string()),
         message: diagnostic.message.clone(),
         related_information,
         tags: None,
