@@ -35,7 +35,7 @@ pub(crate) struct SolidityLspServer {
 }
 
 impl SolidityLspServer {
-    pub(crate) fn new(connection: &Connection) -> anyhow::Result<Self> {
+    pub(crate) fn new(connection: Connection) -> anyhow::Result<(Self, crossbeam_channel::Receiver<Message>)> {
         let (initialize_id, initialize_params) = connection.initialize_start().context("failed to start LSP initialize handshake")?;
 
         let params: InitializeParams = serde_json::from_value(initialize_params)
@@ -72,7 +72,7 @@ impl SolidityLspServer {
             },
             server_info: Some(lsp_types::ServerInfo {
                 name: "solrepr".to_string(),
-                version: None,
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
         };
 
@@ -84,14 +84,14 @@ impl SolidityLspServer {
         let diagnostics = DiagnosticsWorker::spawn();
         log_info("DB Initialized");
 
-        Ok(Self {
-            sender: connection.sender.clone(),
+        Ok((Self {
+            sender: connection.sender,
             db,
             diagnostics,
             live_docs: LiveDocs::new(),
             diagnostics_generation: 0,
             shutdown_requested: false,
-        })
+        }, connection.receiver))
     }
 
     pub(crate) fn run(
