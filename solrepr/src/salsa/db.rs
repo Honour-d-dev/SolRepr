@@ -2,6 +2,7 @@ use std::panic::AssertUnwindSafe;
 use triomphe::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use lsp_types::Diagnostic as LspDiagnostic;
 use lsp_types::TextDocumentContentChangeEvent;
 use ropey::Rope;
 use salsa::{self, Cancelled, Durability, Setter};
@@ -11,7 +12,7 @@ use super::files::Files;
 use super::root_db::RootDb;
 use crate::ast::kinds::NodeKind;
 use crate::ast::{self, AstNode, NodeRange};
-use crate::capabilities::diagnostics::{Diagnostic, diagnostics as collect_diagnostics};
+use crate::capabilities::diagnostics::lsp_diagnostics;
 use crate::hir::body_map::ByteOffset;
 use crate::ir::def_map::DefId;
 
@@ -38,7 +39,6 @@ macro_rules! map_def_id {
     };
 }
 
-pub type Cancellable<T> = Result<T, salsa::Cancelled>;
 
 pub type FileId = File;
 #[salsa::input]
@@ -82,6 +82,45 @@ pub struct Db {
 #[salsa::db]
 impl salsa::Database for Db {}
 
+/// Cache instrumentation is on for the dev binary (the extension's F5 path)
+/// and for any build that opts in with `SOLREPR_SALSA_EVENTS`.
+fn salsa_events_enabled() -> bool {
+    (cfg!(debug_assertions) && !cfg!(test)) || env_flag("SOLREPR_SALSA_EVENTS")
+}
+
+/// Cache hits are noisier than misses; opt in separately.
+fn salsa_hits_enabled() -> bool {
+    env_flag("SOLREPR_SALSA_HITS")
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| value != "0")
+}
+
+/// The one cache observer: `WillExecute` is a miss/recompute,
+/// `DidValidateMemoizedValue` is a hit.
+fn log_salsa_event(event: salsa::Event) {
+    use salsa::EventKind;
+    match event.kind {
+        EventKind::WillExecute { database_key } => {
+            tracing::debug!(query = ?database_key, "execute")
+        }
+        EventKind::DidValidateMemoizedValue { database_key } if salsa_hits_enabled() => {
+            tracing::debug!(query = ?database_key, "hit")
+        }
+        EventKind::WillBlockOn { database_key, .. } => {
+            tracing::debug!(query = ?database_key, "blocked")
+        }
+        EventKind::WillIterateCycle {
+            database_key,
+            iteration_count,
+        } => {
+            tracing::warn!(query = ?database_key, iteration_count = ?iteration_count, "cycle")
+        }
+        _ => {}
+    }
+}
+
 impl Clone for Db {
     fn clone(&self) -> Self {
         Self {
@@ -93,7 +132,19 @@ impl Clone for Db {
 
 impl Db {
     pub(crate) fn new(workspace: Workspace<LoadedFile>) -> Self {
-        let mut salsa = Db::default();
+        let storage = if salsa_events_enabled() {
+            salsa::Storage::new(Some(Box::new(log_salsa_event)))
+        } else {
+            salsa::Storage::default()
+        };
+        Self::with_storage(workspace, storage)
+    }
+
+    fn with_storage(workspace: Workspace<LoadedFile>, storage: salsa::Storage<Self>) -> Self {
+        let mut salsa = Self {
+            storage,
+            files: Arc::new(Files::default()),
+        };
         salsa.files = Arc::new(Files::new(
             &mut salsa,
             workspace.source_roots,
@@ -106,6 +157,15 @@ impl Db {
             .new(&salsa);
 
         salsa
+    }
+
+    /// A database whose salsa events are collected by `cb` — for cache tests.
+    #[cfg(test)]
+    pub(crate) fn with_events(
+        workspace: Workspace<LoadedFile>,
+        cb: impl Fn(salsa::Event) + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_storage(workspace, salsa::Storage::new(Some(Box::new(cb))))
     }
 
     pub fn snapshot(&self) -> DbSnapshot {
@@ -232,21 +292,16 @@ impl Db {
     }
 }
 
+pub type Cancellable<T> = Result<T, salsa::Cancelled>;
+
 pub struct DbSnapshot {
     db: Db,
 }
 
 impl DbSnapshot {
-    pub fn diagnostics(&self, file: File) -> Cancellable<Arc<[Diagnostic]>> {
-        self.call(|db| collect_diagnostics(db, file))
-    }
-
-    pub fn file_text(&self, file: File) -> Cancellable<Rope> {
-        self.call(|db| file.text(db))
-    }
-
-    pub fn file_path(&self, file: File) -> Cancellable<Utf8PathBuf> {
-        self.call(|db| file.path(db).to_path_buf())
+    
+    pub fn lsp_diagnostics(&self, file: File) -> Cancellable<Arc<[LspDiagnostic]>> {
+        self.call(|db| lsp_diagnostics(db, file))
     }
 
     fn call<F, T>(&self, f: F) -> Cancellable<T>

@@ -18,7 +18,7 @@ use crate::ast::{
     LibraryId, ModifierId, StructId, VarId,
 };
 use crate::hir::analysis::Analysis;
-use crate::hir::semantic_errors::{DiagnosticSink, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticSink, SemanticDiagnostic};
 use crate::ir::item_tree::{ItemId, ItemTree};
 use crate::salsa::{FileId, RootDb, SourceRootId};
 

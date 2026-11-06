@@ -26,7 +26,7 @@ use crate::hir::item_data::{
 use crate::hir::linearize::Linearizer;
 use crate::hir::overrides::{OverrideAnalyzer, OverrideFacts};
 use crate::hir::resolution::Resolution;
-use crate::hir::semantic_errors::SemanticDiagnostic;
+use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::hir::types::{Fn, Ty, Type};
 use crate::ir::def_map::{DefId, DefMap, DefNamespace, Scope};
 use crate::salsa::File;
@@ -38,7 +38,7 @@ use crate::salsa::interned_db::Id;
 pub trait HirDb: RootDb {
     fn body_map(&self, owner: BodyOwnerId) -> Arc<BodyMap>;
     fn body_source_map(&self, owner: BodyOwnerId) -> Arc<BodySourceMap>;
-    fn item_source_map(&self, def: DefId) -> Arc<SourceMap>;
+    fn source_map(&self, def: DefId) -> Arc<SourceMap>;
     fn inference(&self, owner: DefId) -> Arc<Inference>;
     fn function_data(&self, id: ast::FunctionId) -> Arc<FunctionData>;
     fn struct_data(&self, id: ast::StructId) -> Arc<StructData>;
@@ -75,11 +75,26 @@ impl HirDb for Db {
     }
 
     fn body_source_map(&self, owner: BodyOwnerId) -> Arc<BodySourceMap> {
-        body_source_map(self, BodyOwner::new(self, owner))
+        build_body(self, BodyOwner::new(self, owner)).1.clone()
     }
 
-    fn item_source_map(&self, def: DefId) -> Arc<SourceMap> {
-        item_source_map(self, Id::new(self, def))
+    fn source_map(&self, def: DefId) -> Arc<SourceMap> {
+        match def {
+            DefId::Function(id) => build_function(self, Function::new(self, id)).1.clone(),
+            DefId::Modifier(id) => build_modifier(self, Modifier::new(self, id)).1.clone(),
+            DefId::Contract(id) => build_contract(self, Contract::new(self, id)).1.clone(),
+            DefId::Interface(id) => build_interface(self, Interface::new(self, id)).1.clone(),
+            DefId::Library(id) => build_library(self, Library::new(self, id)).1.clone(),
+            DefId::Struct(id) => build_struct(self, Struct::new(self, id)).1.clone(),
+            DefId::Enum(id) => build_enum(self, Enum::new(self, id)).1.clone(),
+            DefId::Event(id) => build_event(self, Event::new(self, id)).1.clone(),
+            DefId::Error(id) => build_error(self, Error::new(self, id)).1.clone(),
+            DefId::Var(id) => build_var(self, Var::new(self, id)).1.clone(),
+            DefId::Udvt(id) => build_udvt(self, Udvt::new(self, id)).1.clone(),
+            DefId::Using(id) => build_using(self, Using::new(self, id)).1.clone(),
+            DefId::Import(id) => build_import(self, Import::new(self, id)).1.clone(),
+            DefId::File(_) => Arc::default(),
+        }
     }
 
     fn inference(&self, owner: DefId) -> Arc<Inference> {
@@ -252,9 +267,11 @@ pub fn def_name(db: &dyn HirDb, def: DefId) -> String {
     }
 }
 
-fn build_body<'db>(db: &dyn RootDb, owner: BodyOwner<'db>) -> (BodyMap, BodySourceMap) {
-    tracing::debug!(?owner, "body_map: cache miss");
-
+#[salsa::tracked]
+fn build_body<'db>(
+    db: &'db dyn RootDb,
+    owner: BodyOwner<'db>,
+) -> (Arc<BodyMap>, Arc<BodySourceMap>) {
     let (owner, ast_root) = match owner.id(db) {
         BodyOwnerId::Function(id) => {
             let ast_root = db.ast(id.file).root();
@@ -273,17 +290,13 @@ fn build_body<'db>(db: &dyn RootDb, owner: BodyOwner<'db>) -> (BodyMap, BodySour
             )
         }
     };
-    BodyBuilder::build(ast_root, owner).unwrap()
+    let (body, map) = BodyBuilder::build(ast_root, owner).unwrap();
+    (Arc::new(body), Arc::new(map))
 }
 
 #[salsa::tracked]
 pub fn body<'db>(db: &'db dyn RootDb, owner: BodyOwner<'db>) -> Arc<BodyMap> {
-    build_body(db, owner).0.into()
-}
-
-#[salsa::tracked]
-pub fn body_source_map<'db>(db: &'db dyn RootDb, owner: BodyOwner<'db>) -> Arc<BodySourceMap> {
-    build_body(db, owner).1.into()
+    build_body(db, owner).0.clone()
 }
 
 /// Signature params — every parameter carries its default or written data
@@ -306,7 +319,6 @@ fn lower_params(
 pub fn function_signature<'db>(db: &'db dyn HirDb, f: Function<'db>) -> Option<Fn<Type>> {
     let id = f.id(db);
     let data = function_data(db, f);
-    tracing::debug!(name = %data.name, ?id, "function_signature: cache miss");
     let fn_inference = Inferer::run(
         db,
         DefId::Function(id),
@@ -372,221 +384,212 @@ pub fn modifier_signature<'db>(db: &'db dyn HirDb, m: Modifier<'db>) -> Option<F
     })
 }
 
-fn build_function(db: &dyn RootDb, id: ast::FunctionId) -> (FunctionData, SourceMap) {
+#[salsa::tracked]
+fn build_function<'db>(db: &'db dyn RootDb, f: Function<'db>) -> (Arc<FunctionData>, Arc<SourceMap>) {
+    let id = f.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let func = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_fn(&func);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn function_data<'db>(db: &'db dyn RootDb, f: Function<'db>) -> Arc<FunctionData> {
-    tracing::debug!(?f, "function_data: cache miss");
-    Arc::new(build_function(db, f.id(db)).0)
+    build_function(db, f).0.clone()
 }
 
-fn build_struct(db: &dyn RootDb, id: ast::StructId) -> (StructData, SourceMap) {
+#[salsa::tracked]
+fn build_struct<'db>(db: &'db dyn RootDb, s: Struct<'db>) -> (Arc<StructData>, Arc<SourceMap>) {
+    let id = s.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let strukt = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_struct(&strukt);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn struct_data<'db>(db: &'db dyn RootDb, s: Struct<'db>) -> Arc<StructData> {
-    tracing::debug!(?s, "struct_data: cache miss");
-    Arc::new(build_struct(db, s.id(db)).0)
+    build_struct(db, s).0.clone()
 }
 
-fn build_var(db: &dyn RootDb, id: ast::VarId) -> (VarData, SourceMap) {
+#[salsa::tracked]
+fn build_var<'db>(db: &'db dyn RootDb, v: Var<'db>) -> (Arc<VarData>, Arc<SourceMap>) {
+    let id = v.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let var = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_var(&var);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn var_data<'db>(db: &'db dyn RootDb, v: Var<'db>) -> Arc<VarData> {
-    tracing::debug!(?v, "var_data: cache miss");
-    Arc::new(build_var(db, v.id(db)).0)
+    build_var(db, v).0.clone()
 }
 
-fn build_enum(db: &dyn RootDb, id: ast::EnumId) -> (EnumData, SourceMap) {
+#[salsa::tracked]
+fn build_enum<'db>(db: &'db dyn RootDb, e: Enum<'db>) -> (Arc<EnumData>, Arc<SourceMap>) {
+    let id = e.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let enom = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_enum(&enom);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn enum_data<'db>(db: &'db dyn RootDb, e: Enum<'db>) -> Arc<EnumData> {
-    tracing::debug!(?e, "enum_data: cache miss");
-    Arc::new(build_enum(db, e.id(db)).0)
+    build_enum(db, e).0.clone()
 }
 
-fn build_event(db: &dyn RootDb, id: ast::EventId) -> (EventData, SourceMap) {
+#[salsa::tracked]
+fn build_event<'db>(db: &'db dyn RootDb, e: Event<'db>) -> (Arc<EventData>, Arc<SourceMap>) {
+    let id = e.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let event = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_event(&event);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn event_data<'db>(db: &'db dyn RootDb, e: Event<'db>) -> Arc<EventData> {
-    tracing::debug!(?e, "event_data: cache miss");
-    Arc::new(build_event(db, e.id(db)).0)
+    build_event(db, e).0.clone()
 }
 
-fn build_error(db: &dyn RootDb, id: ast::ErrorId) -> (ErrorData, SourceMap) {
+#[salsa::tracked]
+fn build_error<'db>(db: &'db dyn RootDb, e: Error<'db>) -> (Arc<ErrorData>, Arc<SourceMap>) {
+    let id = e.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let error = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_error(&error);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn error_data<'db>(db: &'db dyn RootDb, e: Error<'db>) -> Arc<ErrorData> {
-    tracing::debug!(?e, "error_data: cache miss");
-    Arc::new(build_error(db, e.id(db)).0)
+    build_error(db, e).0.clone()
 }
 
-fn build_modifier(db: &dyn RootDb, id: ast::ModifierId) -> (ModifierData, SourceMap) {
+#[salsa::tracked]
+fn build_modifier<'db>(db: &'db dyn RootDb, m: Modifier<'db>) -> (Arc<ModifierData>, Arc<SourceMap>) {
+    let id = m.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let modifier = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_modifier(&modifier);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn modifier_data<'db>(db: &'db dyn RootDb, m: Modifier<'db>) -> Arc<ModifierData> {
-    tracing::debug!(?m, "modifier_data: cache miss");
-    Arc::new(build_modifier(db, m.id(db)).0)
+    build_modifier(db, m).0.clone()
 }
 
-fn build_contract(db: &dyn RootDb, id: ast::ContractId) -> (ContractData, SourceMap) {
+#[salsa::tracked]
+fn build_contract<'db>(db: &'db dyn RootDb, c: Contract<'db>) -> (Arc<ContractData>, Arc<SourceMap>) {
+    let id = c.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let contract = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_contract(&contract);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn contract_data<'db>(db: &'db dyn RootDb, c: Contract<'db>) -> Arc<ContractData> {
-    tracing::debug!(?c, "contract_data: cache miss");
-    Arc::new(build_contract(db, c.id(db)).0)
+    build_contract(db, c).0.clone()
 }
 
-fn build_interface(db: &dyn RootDb, id: ast::InterfaceId) -> (InterfaceData, SourceMap) {
+#[salsa::tracked]
+fn build_interface<'db>(db: &'db dyn RootDb, i: Interface<'db>) -> (Arc<InterfaceData>, Arc<SourceMap>) {
+    let id = i.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let interface = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_interface(&interface);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn interface_data<'db>(db: &'db dyn RootDb, i: Interface<'db>) -> Arc<InterfaceData> {
-    tracing::debug!(?i, "interface_data: cache miss");
-    Arc::new(build_interface(db, i.id(db)).0)
+    build_interface(db, i).0.clone()
 }
 
-fn build_library(db: &dyn RootDb, id: ast::LibraryId) -> (LibraryData, SourceMap) {
+#[salsa::tracked]
+fn build_library<'db>(db: &'db dyn RootDb, l: Library<'db>) -> (Arc<LibraryData>, Arc<SourceMap>) {
+    let id = l.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let library = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_library(&library);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn library_data<'db>(db: &'db dyn RootDb, l: Library<'db>) -> Arc<LibraryData> {
-    tracing::debug!(?l, "library_data: cache miss");
-    Arc::new(build_library(db, l.id(db)).0)
+    build_library(db, l).0.clone()
 }
 
-fn build_import(db: &dyn RootDb, id: ast::ImportId) -> (ImportData, SourceMap) {
+#[salsa::tracked]
+fn build_import<'db>(db: &'db dyn RootDb, i: Import<'db>) -> (Arc<ImportData>, Arc<SourceMap>) {
+    let id = i.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let import = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_import(&import);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn import_data<'db>(db: &'db dyn RootDb, i: Import<'db>) -> Arc<ImportData> {
-    tracing::debug!(?i, "import_data: cache miss");
-    Arc::new(build_import(db, i.id(db)).0)
+    build_import(db, i).0.clone()
 }
 
-fn build_udvt(db: &dyn RootDb, id: ast::UdvtId) -> (UdvtData, SourceMap) {
+#[salsa::tracked]
+fn build_udvt<'db>(db: &'db dyn RootDb, u: Udvt<'db>) -> (Arc<UdvtData>, Arc<SourceMap>) {
+    let id = u.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let udvt = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_udvt(&udvt);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn udvt_data<'db>(db: &'db dyn RootDb, u: Udvt<'db>) -> Arc<UdvtData> {
-    tracing::debug!(?u, "udvt_data: cache miss");
-    Arc::new(build_udvt(db, u.id(db)).0)
+    build_udvt(db, u).0.clone()
 }
 
-fn build_using(db: &dyn RootDb, id: ast::UsingId) -> (UsingData, SourceMap) {
+#[salsa::tracked]
+fn build_using<'db>(db: &'db dyn RootDb, u: Using<'db>) -> (Arc<UsingData>, Arc<SourceMap>) {
+    let id = u.id(db);
     let ast_id_map = db.ast_id_map(id.file);
     let root = db.root(id.file);
     let using = ast_id_map.get(&root, id.id).unwrap();
     let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
     let data = builder.build_using(&using);
-    (data, builder.take_source_map())
+    (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
 #[salsa::tracked]
 pub fn using_data<'db>(db: &'db dyn RootDb, u: Using<'db>) -> Arc<UsingData> {
-    tracing::debug!(?u, "using_data: cache miss");
-    Arc::new(build_using(db, u.id(db)).0)
-}
-
-#[salsa::tracked]
-pub fn item_source_map<'db>(db: &'db dyn RootDb, def: Id<'db>) -> Arc<SourceMap> {
-    let def = def.id(db);
-    let map = match def {
-        DefId::Function(id) => build_function(db, id).1,
-        DefId::Modifier(id) => build_modifier(db, id).1,
-        DefId::Contract(id) => build_contract(db, id).1,
-        DefId::Interface(id) => build_interface(db, id).1,
-        DefId::Library(id) => build_library(db, id).1,
-        DefId::Struct(id) => build_struct(db, id).1,
-        DefId::Enum(id) => build_enum(db, id).1,
-        DefId::Event(id) => build_event(db, id).1,
-        DefId::Error(id) => build_error(db, id).1,
-        DefId::Var(id) => build_var(db, id).1,
-        DefId::Udvt(id) => build_udvt(db, id).1,
-        DefId::Using(id) => build_using(db, id).1,
-        DefId::Import(id) => build_import(db, id).1,
-        DefId::File(_) => SourceMap::default(),
-    };
-    Arc::new(map)
+    build_using(db, u).0.clone()
 }
 
 /// Salsa-tracked C3 linearization for a contract or interface.
@@ -596,7 +599,6 @@ pub fn item_source_map<'db>(db: &'db dyn RootDb, def: Id<'db>) -> Arc<SourceMap>
 /// inconsistent hierarchies).
 #[salsa::tracked(cycle_result = bases_cycle_error)]
 pub fn bases<'db>(db: &'db dyn HirDb, def: DefWithBases<'db>) -> Analysis<[DefId]> {
-    tracing::debug!(?def, "bases: cache miss");
     let id = def.id(db);
     let container = match id {
         DefWithBasesId::Contract(c) => DefId::Contract(c),
@@ -684,8 +686,6 @@ fn member_map_cycle_result<'db>(
 #[salsa::tracked(cycle_result = inference_cycle_result)]
 pub fn inference<'db>(db: &'db dyn HirDb, owner: Id<'db>) -> Arc<Inference> {
     let owner = owner.id(db);
-    let name = def_name(db, owner);
-    tracing::debug!(%name, ?owner, "inference: cache miss");
 
     match with_owner_store(db, owner, |input| Inferer::run(db, owner, input)) {
         Some(inference) => inference.into(),
@@ -746,7 +746,6 @@ pub fn owner<'db>(db: &'db dyn HirDb, id: Id<'db>) -> Option<DefId> {
 
 #[salsa::tracked]
 pub fn resolve_using<'db>(db: &'db dyn HirDb, using: Using<'db>) -> UsingIndex {
-    tracing::debug!(?using, "resolve_using: cache miss");
     let mut using_index = UsingIndex::default();
     let using_data = using_data(db, using);
     let id = using.id(db);

@@ -3,7 +3,7 @@ use camino::Utf8PathBuf;
 use crate::hir::member_map::*;
 use crate::hir::builtins::MemberNamespace;
 use crate::ir::def_map::DefNamespace;
-use crate::hir::semantic_errors::{DiagnosticCode, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticCode, SemanticDiagnostic};
 use crate::hir::tests::helper::{find_contract, find_function, make_test_db};
 use crate::salsa::HirDb;
 

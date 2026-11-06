@@ -1,6 +1,9 @@
 use crate::capabilities::diagnostics::*;
 use crate::ast::NodeRange;
-use crate::hir::semantic_errors::DiagnosticCode;
+use crate::hir::diagnostics::{
+    Diagnostic, RelatedDiagnostic, Severity, normalize_diagnostics,
+};
+use crate::hir::diagnostics::DiagnosticCode;
 use crate::hir::tests::helper::make_test_db;
 use tree_sitter::Parser;
 

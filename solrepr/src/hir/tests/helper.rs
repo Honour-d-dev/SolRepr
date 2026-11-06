@@ -20,8 +20,18 @@ use crate::salsa::{File, HirDb, RootDb, Db};
 use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, SourceRoot, Workspace};
 
 pub fn make_test_db(source: &str) -> (Db, File) {
+    let workspace = test_workspace(source);
+    let path = workspace.source_roots[0].files[0].path.clone();
+    let db = Db::new(workspace);
+    let file = db.file(&path).unwrap();
+    (db, file)
+}
+
+/// The single-file workspace behind `make_test_db`, for tests that build their
+/// own database (the salsa cache tests install an event recorder).
+pub fn test_workspace(source: &str) -> Workspace<LoadedFile> {
     let root = camino::Utf8PathBuf::from("/tmp/next_tests");
-    let workspace = Workspace {
+    Workspace {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
             root: root.clone(),
@@ -36,10 +46,7 @@ pub fn make_test_db(source: &str) -> (Db, File) {
                 text: Rope::from_str(source),
             }],
         }],
-    };
-    let db = Db::new(workspace);
-    let file = db.file(&root.join("src/Test.sol")).unwrap();
-    (db, file)
+    }
 }
 
 pub fn find_first_kind<'a>(node: Node<'a>, kind: NodeKind) -> Option<Node<'a>> {

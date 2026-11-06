@@ -7,7 +7,7 @@ use crate::hir::exprs::{BinaryOp, Expr, ExprId, Literal, Name, UnaryOp};
 use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{CallableOrigin, Resolution};
 use crate::hir::resolver::Resolver;
-use crate::hir::semantic_errors::DiagnosticAnchor;
+use crate::hir::diagnostics::DiagnosticAnchor;
 use crate::hir::types::{Primitive, TyKind, Type};
 use crate::ir::def_map::{DefId, DefNamespace, ScopeData};
 use crate::salsa::hir_db::def_name;

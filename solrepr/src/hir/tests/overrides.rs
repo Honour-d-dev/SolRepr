@@ -1,4 +1,4 @@
-use crate::hir::semantic_errors::{DiagnosticCode, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticCode, SemanticDiagnostic};
 use crate::hir::tests::helper::{find_contract, make_test_db};
 use crate::salsa::HirDb;
 

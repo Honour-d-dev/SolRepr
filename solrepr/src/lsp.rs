@@ -24,6 +24,7 @@ use lsp_types::{
     InitializeResult, OneOf, PublishDiagnosticsParams, ServerCapabilities,
     TextDocumentSyncCapability, TextDocumentSyncKind,
 };
+use triomphe::Arc;
 
 pub(crate) struct SolidityLspServer {
     sender: crossbeam_channel::Sender<Message>,
@@ -188,7 +189,7 @@ impl SolidityLspServer {
             // Clear the diagnostics for a document we no longer own,
             // otherwise the client keeps showing the last set. Publish
             // before forgetting it so the clear carries its version.
-            self.publish_diagnostics(file, Vec::new());
+            self.publish_diagnostics(file, Arc::from(Vec::new()));
             self.live_docs.close(&file);
         }
     }
@@ -241,12 +242,12 @@ impl SolidityLspServer {
         self.publish_diagnostics(result.file, result.diagnostics);
     }
 
-    fn publish_diagnostics(&self, file: File, diagnostics: Vec<LspDiagnostic>) {
+    fn publish_diagnostics(&self, file: File, diagnostics: Arc<[LspDiagnostic]>) {
         self.send(Message::Notification(Notification::new(
             PublishDiagnostics::METHOD.to_string(),
             PublishDiagnosticsParams {
                 uri: to_url(file.path(&self.db)),
-                diagnostics,
+                diagnostics: diagnostics.to_vec(),
                 version: self.live_docs.version(&file),
             },
         )));

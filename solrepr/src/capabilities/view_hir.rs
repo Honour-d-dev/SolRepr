@@ -75,7 +75,7 @@ pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
             let body = db.body_map(BodyOwnerId::Function(*id));
             process_store!(
                 &fn_data.syntax_store,
-                db.item_source_map(DefId::Function(*id))
+                db.source_map(DefId::Function(*id))
             );
             process_store!(
                 &body.syntax_store,
@@ -87,7 +87,7 @@ pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
             let body = db.body_map(BodyOwnerId::Modifier(*id));
             process_store!(
                 &mod_data.syntax_store,
-                db.item_source_map(DefId::Modifier(*id))
+                db.source_map(DefId::Modifier(*id))
             );
             process_store!(
                 &body.syntax_store,
@@ -96,47 +96,47 @@ pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
         }
         DefId::Var(id) => {
             let data = db.var_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Var(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Var(*id)));
         }
         DefId::Struct(id) => {
             let data = db.struct_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Struct(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Struct(*id)));
         }
         DefId::Enum(id) => {
             let data = db.enum_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Enum(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Enum(*id)));
         }
         DefId::Event(id) => {
             let data = db.event_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Event(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Event(*id)));
         }
         DefId::Error(id) => {
             let data = db.error_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Error(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Error(*id)));
         }
         DefId::Contract(id) => {
             let data = db.contract_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Contract(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Contract(*id)));
         }
         DefId::Interface(id) => {
             let data = db.interface_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Interface(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Interface(*id)));
         }
         DefId::Library(id) => {
             let data = db.library_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Library(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Library(*id)));
         }
         DefId::Udvt(id) => {
             let data = db.udvt_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Udvt(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Udvt(*id)));
         }
         DefId::Using(id) => {
             let data = db.using_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Using(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Using(*id)));
         }
         DefId::Import(id) => {
             let data = db.import_data(*id);
-            process_store!(&data.syntax_store, db.item_source_map(DefId::Import(*id)));
+            process_store!(&data.syntax_store, db.source_map(DefId::Import(*id)));
         }
         DefId::File(_) => {}
     }

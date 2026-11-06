@@ -6,7 +6,7 @@ use crate::hir::builtins::{BuiltinFn, ParamSchema};
 use crate::hir::exprs::{Expr, ExprId, Name, NamedValues};
 use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, CallableOrigin, Resolution};
-use crate::hir::semantic_errors::{DiagnosticAnchor, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticAnchor, SemanticDiagnostic};
 use crate::hir::types::{
     CallKind, Callee, Fn, Location, Mutability, Primitive, Ty, TyKind,
     Type, ViaTypeKind, Visibility, option_type,

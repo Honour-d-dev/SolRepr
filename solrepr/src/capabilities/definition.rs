@@ -120,7 +120,7 @@ fn local_targets(db: &Db, owner: DefId, local_id: LocalId) -> Vec<DefinitionTarg
             .get(local_id)
             .copied(),
         DefId::Event(_) | DefId::Error(_) => db
-            .item_source_map(owner)
+            .source_map(owner)
             .local_ranges
             .get(local_id)
             .copied(),
@@ -137,7 +137,7 @@ fn field_targets(db: &Db, owner: DefId, field_id: FieldId) -> Vec<DefinitionTarg
         return Vec::new();
     };
     let _ = db.struct_data(struct_id);
-    let Some(range) = db.item_source_map(owner).field_ranges.get(field_id).copied() else {
+    let Some(range) = db.source_map(owner).field_ranges.get(field_id).copied() else {
         return Vec::new();
     };
     vec![DefinitionTarget::Range(owner.file_and_id().0, range)]
@@ -149,7 +149,7 @@ fn variant_targets(db: &Db, owner: DefId, variant_id: VariantId) -> Vec<Definiti
     };
     let _ = db.enum_data(enum_id);
     let Some(range) = db
-        .item_source_map(owner)
+        .source_map(owner)
         .variant_ranges
         .get(variant_id)
         .copied()

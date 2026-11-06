@@ -38,7 +38,6 @@ pub fn package_config(db: &dyn salsa::Database, root: SourceRootId) -> Package {
 
 #[salsa::tracked]
 pub fn parse(db: &dyn RootDb, file: File) -> Arc<Ast> {
-    tracing::debug!(?file, "parse: cache miss");
     let source = text(db, file);
     let tree = PARSER
         .with(|parser| parser.borrow_mut().parse(source.as_ref(), None))
@@ -48,20 +47,17 @@ pub fn parse(db: &dyn RootDb, file: File) -> Arc<Ast> {
 
 #[salsa::tracked]
 pub fn ast_id_map(db: &dyn RootDb, file: File) -> Arc<AstIdMap> {
-    tracing::debug!(?file, "ast_id_map: cache miss");
     let ast = parse(db, file);
     Arc::new(AstIdMap::new(&ast.root()))
 }
 
 #[salsa::tracked(returns(ref))]
 pub fn item_tree(db: &dyn RootDb, file: File) -> ItemTree {
-    tracing::debug!(?file, "item_tree: cache miss");
     Lowerer::lower(db, file)
 }
 
 #[salsa::tracked]
 pub fn root_def_map_analysis(db: &dyn RootDb, root: SourceRootId) -> Analysis<DefMap> {
-    tracing::debug!(?root, "root_def_map: cache miss");
     Collector::collect_defmap(db, root)
 }
 

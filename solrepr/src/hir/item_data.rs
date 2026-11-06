@@ -331,7 +331,6 @@ impl ItemBuilder {
                         self.syntax_store.own_name_expr = Some(expr_id);
                     }
                     name = self.root.text_by_range(child.byte_range()).trim().into();
-                    self.source_map.decl_range = Some(NodeRange::from(&child));
                 }
                 NodeKind::EXPRESSION => {
                     init = self.lower_expr(child);

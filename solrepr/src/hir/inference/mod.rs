@@ -16,7 +16,7 @@ use crate::hir::item_data::VarData;
 use crate::hir::syntax_store::OwnerStore;
 use crate::hir::resolution::{Field as ResolvedField, Resolution};
 use crate::hir::resolver::Resolver;
-use crate::hir::semantic_errors::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::types::Primitive::FixedBytes;
 use crate::hir::types::{
     Location, Mutability, Primitive, RefKind, Ty, TyKind, Type, VariableKind,
@@ -39,8 +39,9 @@ pub(crate) use return_invalid;
 
 
 /// The single inference context: the owner, its name-resolution context, and
-/// the accumulated tables. Implementation is split across the sibling
-/// namespaces by responsibility, all `impl Inferer`.
+/// the accumulated tables. It reads content only — never a source map — so a
+/// reflow cannot invalidate inference. Implementation is split across the
+/// sibling namespaces by responsibility, all `impl Inferer`.
 pub struct Inferer<'db, 'store> {
     db: &'db dyn HirDb,
     owner: DefId,
@@ -294,7 +295,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             }
             None if data.kind == VariableKind::Const => {
                 self.fail(
-                    DiagnosticAnchor::Decl(var_def),
+                    DiagnosticAnchor::Def(var_def),
                     "Uninitialized \"constant\" variable.",
                     (),
                 );

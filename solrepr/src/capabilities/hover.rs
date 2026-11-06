@@ -114,7 +114,7 @@ impl<'db> Hover<'db> {
         let (file, _) = owner.file_and_id();
         let range = self
             .db
-            .item_source_map(owner)
+            .source_map(owner)
             .field_ranges
             .get(field_id)
             .copied()
@@ -135,7 +135,7 @@ impl<'db> Hover<'db> {
         let (file, _) = owner.file_and_id();
         let range = self
             .db
-            .item_source_map(owner)
+            .source_map(owner)
             .variant_ranges
             .get(variant_id)
             .copied()
@@ -289,7 +289,7 @@ impl<'db> Hover<'db> {
         };
         let Some(range) =
             self.db
-                .item_source_map(DefId::Var(var_id))
+                .source_map(DefId::Var(var_id))
                 .range_to_semantic
                 .iter()
                 .find_map(|(range, semantic)| {

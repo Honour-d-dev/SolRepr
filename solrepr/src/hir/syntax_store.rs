@@ -5,7 +5,7 @@ use crate::ast::NodeRange;
 use crate::hir::body_map::{BodyOwnerId, Local, LocalId, ScopeId};
 use crate::hir::exprs::{Expr, ExprId};
 use crate::hir::item_data::{Field, FieldId, SemanticId, Variant, VariantId};
-use crate::hir::semantic_errors::DiagnosticAnchor;
+use crate::hir::diagnostics::DiagnosticAnchor;
 use crate::hir::types::{TyName, TyNameId};
 use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
@@ -40,7 +40,6 @@ pub struct SourceMap {
     pub field_ranges: ArenaMap<FieldId, NodeRange>,
     pub variant_ranges: ArenaMap<VariantId, NodeRange>,
     pub vis_range: Option<NodeRange>,
-    pub decl_range: Option<NodeRange>,
     pub body_range: Option<NodeRange>,
     pub override_ranges: Box<[NodeRange]>,
     pub range_to_semantic: FxHashMap<NodeRange, SemanticId>,
@@ -65,47 +64,47 @@ fn with_owner<R>(
         }
         DefId::Contract(id) => {
             let data = db.contract_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Interface(id) => {
             let data = db.interface_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Library(id) => {
             let data = db.library_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Struct(id) => {
             let data = db.struct_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Enum(id) => {
             let data = db.enum_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Event(id) => {
             let data = db.event_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Error(id) => {
             let data = db.error_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Var(id) => {
             let data = db.var_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Udvt(id) => {
             let data = db.udvt_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Using(id) => {
             let data = db.using_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::Import(id) => {
             let data = db.import_data(id);
-            f(&data.syntax_store, &db.item_source_map(owner))
+            f(&data.syntax_store, &db.source_map(owner))
         }
         DefId::File(_) => return None,
     })
@@ -149,12 +148,10 @@ pub(crate) fn anchor_range(
             with_owner(db, owner, |_, map| map.local_ranges.get(local).copied())?
         }
         DiagnosticAnchor::Def(def) => def_range(db, def),
-        DiagnosticAnchor::Decl(def) => db.item_source_map(def).decl_range,
         DiagnosticAnchor::Body(def) => match def {
-            DefId::Modifier(_) => db.item_source_map(def).body_range,
+            DefId::Modifier(_) => db.source_map(def).body_range,
             _ => None,
         },
-        DiagnosticAnchor::Raw(range) => Some(range),
     }
 }
 

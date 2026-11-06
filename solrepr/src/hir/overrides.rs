@@ -13,7 +13,7 @@ use crate::hir::exprs::Name;
 use crate::hir::item_data::OverrideSpecifier;
 use crate::hir::resolution::Resolution;
 use crate::hir::resolver::Resolver;
-use crate::hir::semantic_errors::{DiagnosticSink, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticSink, SemanticDiagnostic};
 use crate::hir::signatures::OverrideSignature;
 use crate::hir::types::{TyName, TyNameId, Visibility};
 use crate::ir::def_map::DefId;

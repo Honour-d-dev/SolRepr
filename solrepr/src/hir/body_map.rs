@@ -44,7 +44,7 @@ pub struct Local {
     ty_ref: TyNameId,
     /// Allocation order in the body — replaces byte offsets for the
     /// declaration-order visibility check.
-    decl_order: u32,
+    order: u32,
     init: Option<ExprId>,
 }
 
@@ -82,14 +82,14 @@ impl Local {
         name: Name,
         kind: VariableKind,
         ty_ref: TyNameId,
-        decl_order: u32,
+        order: u32,
         init: Option<ExprId>,
     ) -> Self {
         Self {
             name,
             kind,
             ty_ref,
-            decl_order,
+            order,
             init,
         }
     }
@@ -114,8 +114,8 @@ impl Local {
         }
     }
 
-    pub fn decl_order(&self) -> u32 {
-        self.decl_order
+    pub fn order(&self) -> u32 {
+        self.order
     }
 
     pub fn init(&self) -> Option<ExprId> {
@@ -299,7 +299,7 @@ impl BodyBuilder {
             name: name.clone(),
             kind,
             ty_ref,
-            decl_order,
+            order: decl_order,
             init,
         });
 

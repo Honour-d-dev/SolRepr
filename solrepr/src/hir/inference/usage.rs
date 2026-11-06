@@ -8,7 +8,7 @@ use crate::hir::types::{Location, VariableKind};
 use crate::hir::builtins;
 use crate::hir::exprs::{Expr, ExprId};
 use crate::hir::resolution::{CallableOrigin, Field as ResolvedField, Local, Resolution};
-use crate::hir::semantic_errors::{DiagnosticAnchor, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticAnchor, SemanticDiagnostic};
 use crate::hir::types::{Mutability, Ty, TyKind, Type};
 use crate::ir::def_map::DefId;
 

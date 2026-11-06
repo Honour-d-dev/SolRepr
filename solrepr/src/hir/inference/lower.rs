@@ -1,7 +1,7 @@
 use crate::hir::body_map::LocalId;
 use crate::hir::item_data::FieldId;
 use crate::hir::resolution::Resolution;
-use crate::hir::semantic_errors::{DiagnosticAnchor, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticAnchor, SemanticDiagnostic};
 use crate::hir::types::{Fn, TyKind, TyName, TyNameId, Type};
 use crate::ir::def_map::DefId;
 

@@ -6,7 +6,7 @@ use crate::hir::exprs::ExprId;
 use crate::hir::item_data::{Field, FieldId, SemanticId, Variant, VariantId};
 use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::Resolution;
-use crate::hir::semantic_errors::SemanticDiagnostic;
+use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::hir::types::{Mutability, Ty, TyNameId, Type};
 use crate::salsa::HirDb;
 

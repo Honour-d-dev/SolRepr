@@ -8,7 +8,7 @@ use crate::hir::analysis::Analysis;
 use crate::hir::builtins::MemberNamespace;
 use crate::hir::exprs::Name;
 use crate::hir::overrides::OverrideFacts;
-use crate::hir::semantic_errors::{DiagnosticSink, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticSink, SemanticDiagnostic};
 use crate::hir::signatures::OverrideSignature;
 use crate::hir::types::{Mutability, Type, Visibility};
 use crate::ir::def_map::{DefId, DefNamespace};

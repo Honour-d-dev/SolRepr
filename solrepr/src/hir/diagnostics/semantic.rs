@@ -1,7 +1,10 @@
+//! The unrendered form a check emits: a code plus an id anchor, so no position
+//! enters a Salsa output. `render` turns these into reportable diagnostics.
+
 use rustc_hash::FxHashSet;
 use triomphe::Arc;
 
-use crate::ast::{ImportId, NodeRange};
+use crate::ast::ImportId;
 use crate::hir::access::AccessDenial;
 use crate::hir::body_map::LocalId;
 use crate::hir::exprs::{ExprId, Name};
@@ -20,16 +23,13 @@ pub enum DiagnosticAnchor {
     Local(LocalId),
     /// The def's written name — `def_range`.
     Def(DefId),
-    /// The whole declaration node.
-    Decl(DefId),
     /// The body block of a modifier.
     Body(DefId),
-    /// A position with no id — parser diagnostics only.
-    Raw(NodeRange),
 }
 
 macro_rules! define_diagnostics {
     (
+        codes { $( $code:ident ),* $(,)? }
         $(
             $variant:ident {
                 $( $field:ident : $ty:ty ),* $(,)?
@@ -39,6 +39,7 @@ macro_rules! define_diagnostics {
         #[repr(u8)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum DiagnosticCode {
+            $( $code, )*
             $( $variant ),*
         }
 
@@ -83,9 +84,7 @@ macro_rules! define_diagnostics {
 pub struct DiagnosticKey(DiagnosticCode, DiagnosticAnchor);
 
 define_diagnostics! {
-    SyntaxError {
-        range: NodeRange
-    } => DiagnosticAnchor::Raw(*range),
+    codes { SyntaxError }
     UnresolvedName {
         expr: ExprId,
         name: Name,

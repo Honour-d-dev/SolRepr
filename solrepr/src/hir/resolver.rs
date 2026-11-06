@@ -8,7 +8,7 @@ use crate::hir::builtins::BuiltinDb;
 use crate::hir::exprs::{ExprId, Name};
 use crate::hir::member_lookup::MemberLookupResult;
 use crate::hir::resolution::{Callable, Local, Resolution};
-use crate::hir::semantic_errors::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::types::{Primitive, Ty, Type};
 use crate::ir::def_map::{DefId, DefMap, DefNamespace, ScopeData, ScopeId as DefScopeId};
 use crate::salsa::{File, HirDb};
@@ -217,7 +217,7 @@ impl<'db> Resolver<'db> {
             let scope = &body.scopes[scope_id];
             if let Some(local_id) = scope.get(name) {
                 let local = &body.locals[*local_id];
-                if local.decl_order() <= order {
+                if local.order() <= order {
                     return Some(Resolution::Local(Local::new(self.this, *local_id)));
                 }
             }

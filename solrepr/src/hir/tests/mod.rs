@@ -3,7 +3,7 @@ use crate::hir::exprs::*;
 use crate::hir::inference::*;
 use crate::hir::item_data::*;
 use crate::hir::resolution::*;
-use crate::hir::semantic_errors::*;
+use crate::hir::diagnostics::*;
 use crate::hir::types::*;
 use crate::ir::def_map::*;
 use crate::hir::syntax_store::semantic_at;

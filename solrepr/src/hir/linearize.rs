@@ -1,5 +1,5 @@
 
-use crate::{ast::HasBases, hir::{analysis::Analysis, exprs::Name, resolution::Resolution, resolver::Resolver, semantic_errors::{DiagnosticSink, SemanticDiagnostic}}, ir::def_map::DefId, salsa::HirDb};
+use crate::{ast::HasBases, hir::{analysis::Analysis, exprs::Name, resolution::Resolution, resolver::Resolver, diagnostics::{DiagnosticSink, SemanticDiagnostic}}, ir::def_map::DefId, salsa::HirDb};
 
 pub struct Linearizer<'db> {
     this: DefId,

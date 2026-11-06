@@ -1,5 +1,5 @@
 use crate::hir::analysis::Analysis;
-use crate::hir::semantic_errors::SemanticDiagnostic;
+use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::ir::def_map::*;
 use crate::salsa::Db;
 use crate::salsa::root_db::RootDb;

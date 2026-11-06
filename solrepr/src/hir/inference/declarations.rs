@@ -2,7 +2,7 @@
 //! library/free functions must have an implementation.
 
 use crate::ast::{FunctionId, FunctionKind, ModifierId};
-use crate::hir::semantic_errors::{DiagnosticAnchor, SemanticDiagnostic};
+use crate::hir::diagnostics::{DiagnosticAnchor, SemanticDiagnostic};
 use crate::ir::def_map::DefId;
 
 use super::Inferer;
@@ -58,9 +58,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     fn check_modifier_definition(&mut self, id: ModifierId) {
         let data = self.db.modifier_data(id);
-        // solc reports the missing placeholder at the body block, before the
-        // placement rules (which point at the declaration).
-        if self.db.item_source_map(self.owner).body_range.is_some() && !data.has_placeholder {
+        if data.has_body && !data.has_placeholder {
             self.fail(
                 DiagnosticAnchor::Body(self.owner),
                 "modifier body does not contain `_`",

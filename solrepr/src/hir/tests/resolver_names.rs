@@ -1,5 +1,5 @@
 use super::{helper::*, resolver_helpers::*};
-use crate::hir::semantic_errors::SemanticDiagnostic;
+use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
 use crate::hir::resolver::*;

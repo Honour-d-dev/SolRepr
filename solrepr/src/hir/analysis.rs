@@ -1,6 +1,6 @@
 use triomphe::Arc;
 
-use crate::hir::semantic_errors::SemanticDiagnostic;
+use crate::hir::diagnostics::SemanticDiagnostic;
 
 /// A query-level result that may contain usable partial data and diagnostics.
 #[derive(PartialEq, Eq)]

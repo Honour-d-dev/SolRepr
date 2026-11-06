@@ -22,7 +22,7 @@ fn function_header_facts_preserve_authored_specifiers() {
     assert_eq!(listed.kind, FunctionKind::Regular);
     assert!(listed.vis == Visibility::Public);
     let vis_range = db
-        .item_source_map(DefId::Function(listed_id))
+        .source_map(DefId::Function(listed_id))
         .vis_range
         .expect("written visibility keeps its range");
     assert_eq!(
@@ -36,7 +36,7 @@ fn function_header_facts_preserve_authored_specifiers() {
         panic!("expected an override list");
     };
     assert_eq!(paths.len(), 2);
-    let override_ranges = db.item_source_map(DefId::Function(listed_id)).override_ranges.clone();
+    let override_ranges = db.source_map(DefId::Function(listed_id)).override_ranges.clone();
     assert_eq!(
         &source[override_ranges[0].start as usize..override_ranges[0].end as usize],
         "override(A.B, D)"
@@ -67,14 +67,14 @@ fn function_header_facts_preserve_authored_specifiers() {
     let implemented = db.function_data(implemented_id);
     assert!(implemented.has_body);
     assert!(!implemented.is_virtual);
-    assert!(db.item_source_map(DefId::Function(implemented_id)).vis_range.is_some());
+    assert!(db.source_map(DefId::Function(implemented_id)).vis_range.is_some());
 
     let DefId::Function(implicit_id) = find_function(&db, file, "implicit") else {
         unreachable!()
     };
     let implicit = db.function_data(implicit_id);
     assert!(implicit.vis == Visibility::Internal);
-    assert!(db.item_source_map(DefId::Function(implicit_id)).vis_range.is_none());
+    assert!(db.source_map(DefId::Function(implicit_id)).vis_range.is_none());
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn state_variable_and_contract_headers_are_retained() {
     let var_id = VarId { file, id };
     let value = db.var_data(var_id);
     assert!(value.vis == Visibility::Public);
-    assert!(db.item_source_map(DefId::Var(var_id)).vis_range.is_some());
+    assert!(db.source_map(DefId::Var(var_id)).vis_range.is_some());
     let Some(OverrideSpecifier::List { paths, .. }) = &value.override_specifier else {
         panic!("expected a state-variable override list");
     };
@@ -158,6 +158,6 @@ fn constructor_header_reads_anonymous_visibility_and_mutability_tokens() {
     assert_eq!(data.kind, FunctionKind::Constructor);
     assert!(data.vis == Visibility::Public);
     assert!(data.mutability == Mutability::Payable);
-    assert!(db.item_source_map(DefId::Function(FunctionId { file, id })).vis_range.is_some());
+    assert!(db.source_map(DefId::Function(FunctionId { file, id })).vis_range.is_some());
     assert!(data.has_body);
 }

@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::ast::kinds::NodeKind;
+use crate::ast::{Enum, EnumId, Event, EventId, Struct, StructId};
 use crate::capabilities::diagnostics::diagnostics;
 use crate::hir::body_map::BodyOwnerId;
 
@@ -251,6 +253,10 @@ fn source_maps_cover_every_allocated_id() {
     let (db, file) = make_test_db(
         r#"
             contract C {
+                struct S { uint a; uint b; }
+                enum E { A, B }
+                event Ev(uint x);
+                modifier m() { _; }
                 function f(uint a) external { uint x = a + 1; }
                 uint public s;
             }
@@ -273,7 +279,7 @@ fn source_maps_cover_every_allocated_id() {
     }
 
     let data = db.function_data(id);
-    let item_map = db.item_source_map(DefId::Function(id));
+    let item_map = db.source_map(DefId::Function(id));
     for (expr, _) in data.syntax_store.exprs.iter() {
         assert!(item_map.expr_ranges.get(expr).is_some(), "item expr {expr:?}");
     }
@@ -283,4 +289,70 @@ fn source_maps_cover_every_allocated_id() {
     for (local, _) in data.parameters.iter() {
         assert!(item_map.local_ranges.get(local).is_some(), "item local {local:?}");
     }
+
+    let root = db.ast(file).root();
+    let ast_id_map = db.ast_id_map(file);
+
+    let struct_node = find_first_kind(root.node(), NodeKind::STRUCT_DEFINITION)
+        .expect("fixture should declare a struct");
+    let struct_id = StructId {
+        file,
+        id: ast_id_map
+            .id_of_node::<Struct>(struct_node)
+            .expect("struct should have an AstId"),
+    };
+    let struct_data = db.struct_data(struct_id);
+    let struct_map = db.source_map(DefId::Struct(struct_id));
+    for (field, _) in struct_data.fields.iter() {
+        assert!(
+            struct_map.field_ranges.get(field).is_some(),
+            "field {field:?}"
+        );
+    }
+
+    let enum_node = find_first_kind(root.node(), NodeKind::ENUM_DEFINITION)
+        .expect("fixture should declare an enum");
+    let enum_id = EnumId {
+        file,
+        id: ast_id_map
+            .id_of_node::<Enum>(enum_node)
+            .expect("enum should have an AstId"),
+    };
+    let enum_data = db.enum_data(enum_id);
+    let enum_map = db.source_map(DefId::Enum(enum_id));
+    for (variant, _) in enum_data.variants.iter() {
+        assert!(
+            enum_map.variant_ranges.get(variant).is_some(),
+            "variant {variant:?}"
+        );
+    }
+
+    let event_node = find_first_kind(root.node(), NodeKind::EVENT_DEFINITION)
+        .expect("fixture should declare an event");
+    let event_id = EventId {
+        file,
+        id: ast_id_map
+            .id_of_node::<Event>(event_node)
+            .expect("event should have an AstId"),
+    };
+    let event_data = db.event_data(event_id);
+    let event_map = db.source_map(DefId::Event(event_id));
+    for (local, _) in event_data.parameters.iter() {
+        assert!(
+            event_map.local_ranges.get(local).is_some(),
+            "event param {local:?}"
+        );
+    }
+
+    let DefId::Modifier(modifier_id) = find_modifier(&db, file, "m") else {
+        panic!("fixture should declare a modifier");
+    };
+    let modifier = db.modifier_data(modifier_id);
+    assert_eq!(
+        modifier.has_body,
+        db.source_map(DefId::Modifier(modifier_id))
+            .body_range
+            .is_some(),
+        "`has_body` and `body_range` come from the same node"
+    );
 }
