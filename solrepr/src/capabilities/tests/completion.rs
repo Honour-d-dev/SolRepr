@@ -550,3 +550,39 @@ fn incomplete_call_option_does_not_discard_completed_options() {
     assert_eq!(options.len(), 1);
     assert_eq!(options[0].0.as_str(), "value");
 }
+
+// MARK: Label rendering
+
+/// The client concatenates `label` and `label_details.detail` with nothing
+/// between them, so a detail that does not start with a separator glues the
+/// type onto the name (`amountuint256`).
+#[test]
+fn local_completion_separates_its_type_hint() {
+    let (db, file) = make_test_db(
+        r#"
+        contract C {
+            function f() public {
+                uint256 amount = 1;
+                /*here*/;
+            }
+        }
+        "#,
+    );
+    let text = db.text(file);
+    let marker = "/*here*/";
+    let offset = (text.find(marker).expect("marker") + marker.len()) as u32;
+    let owner = owner_at(&db, file, offset).expect("owner");
+    let resolver = Resolver::build(&db, owner);
+    let item = complete_expr(&db, &resolver, owner, offset)
+        .into_iter()
+        .find(|item| item.label == "amount")
+        .expect("the local should be offered");
+
+    let details = item.label_details.expect("label details");
+    assert_eq!(
+        format!("{}{}", item.label, details.detail.expect("a type hint")),
+        "amount uint256",
+        "the type hint must not be glued to the label"
+    );
+}
+

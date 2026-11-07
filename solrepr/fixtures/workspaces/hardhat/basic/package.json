@@ -1,0 +1,7 @@
+{
+  "name": "hardhat-workspace-fixture",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "6.0.0",
+    "hardhat": "2.28.3"
+  }
+}

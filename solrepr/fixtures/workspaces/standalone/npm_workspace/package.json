@@ -1,0 +1,4 @@
+{
+    "name": "mono",
+    "workspaces": ["packages/*", "tools/{a,b}", "solitary", "deep/**"]
+}

@@ -1,0 +1,2 @@
+dup/=dependencies/dep-a/lib/duplicate/src/
+fs/=dependencies/fs/src/

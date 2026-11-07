@@ -1057,7 +1057,9 @@ fn completion_item_for_local(local: &Local, store: &SyntaxStore) -> LspCompletio
         label: local.name().to_string(),
         kind: Some(CompletionItemKind::VARIABLE),
         label_details: Some(CompletionItemLabelDetails {
-            detail: Some(ty),
+            // `detail` is appended straight after the label, so it carries its
+            // own separator — otherwise `amount` + `uint256` reads `amountuint256`.
+            detail: Some(format!(" {ty}")),
             description: Some(local.kind().to_string()),
         }),
         ..Default::default()
@@ -1120,7 +1122,8 @@ fn completion_builtins(db: &Db, resolver: &Resolver) -> Vec<LspCompletionItem> {
                 label: format!("{}()", function.name()),
                 kind: Some(CompletionItemKind::FUNCTION),
                 label_details: Some(CompletionItemLabelDetails {
-                    detail: Some(
+                    detail: Some(format!(
+                        " ({})",
                         function
                             .call_sig(db)
                             .params
@@ -1128,7 +1131,7 @@ fn completion_builtins(db: &Db, resolver: &Resolver) -> Vec<LspCompletionItem> {
                             .map(|ty| ty.display(db))
                             .collect::<Vec<_>>()
                             .join(", "),
-                    ),
+                    )),
                     description: Some(function.doc(db).to_string()),
                 }),
                 ..Default::default()
