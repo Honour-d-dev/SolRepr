@@ -294,7 +294,7 @@ fn npm_workspace_globs_discover_all_members() {
     let members: Vec<_> = discovered
         .packages
         .iter()
-        .map(|package| package.root.as_str())
+        .map(|package| package.root.clone())
         .collect();
     for member in [
         "packages/core",
@@ -310,7 +310,11 @@ fn npm_workspace_globs_discover_all_members() {
         );
     }
     // Packages under node_modules are npm deps, never workspace members.
-    assert!(!members.iter().any(|root| root.contains("node_modules")));
+    assert!(
+        !members
+            .iter()
+            .any(|root| root.components().any(|c| c.as_str() == "node_modules"))
+    );
 }
 
 /// A file selected as the workspace root discovers its parent directory
@@ -449,7 +453,7 @@ fn remapping_into_an_ignored_library_copy_stays_ignored() {
             .any(|package| package.root.ends_with("dep-a/lib/duplicate"))
     );
     assert!(!discovered.source_roots.iter().any(|source| {
-        source.root.as_str().contains("dep-a/lib/duplicate")
+        source.root.ends_with("dep-a/lib/duplicate")
     }));
 }
 
