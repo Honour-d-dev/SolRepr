@@ -16,11 +16,22 @@ export function registerIgnoredRoots(
         (uri) => vscode.Uri.parse(uri).fsPath,
     );
 
-    const isIgnored = (fsPath: string | undefined): boolean =>
-        fsPath !== undefined &&
-        ignoredRoots.some(
-            (root) => fsPath === root || fsPath.startsWith(root + path.sep),
-        );
+    const normalize = (value: string): string =>
+        process.platform === "win32" ? value.toLowerCase() : value;
+
+    const isIgnored = (fsPath: string | undefined): boolean => {
+        if (fsPath === undefined) {
+            return false;
+        }
+        const candidate = normalize(fsPath);
+        return ignoredRoots.some((root) => {
+            const normalized = normalize(root).replace(/[\\/]+$/, "");
+            return (
+                candidate === normalized ||
+                candidate.startsWith(normalized + path.sep)
+            );
+        });
+    };
 
     context.subscriptions.push(
         vscode.window.registerFileDecorationProvider({

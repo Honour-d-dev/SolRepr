@@ -74,7 +74,7 @@
         "solrepr.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the solrepr server binary. If empty, uses ../solrepr/target/debug/solrepr relative to the extension."
+          "description": "Path to the solrepr server binary. If empty, the bundled binary, PATH, or a development build is used."
         },
         "solrepr.trace.server": {
           "type": "string",

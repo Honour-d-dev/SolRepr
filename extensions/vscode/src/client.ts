@@ -45,13 +45,14 @@ function platformKey(): string | undefined {
 }
 
 function findOnPath(name: string): string | undefined {
+    const mode = process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK;
     for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
         if (!dir) {
             continue;
         }
         const candidate = path.join(dir, name);
         try {
-            fs.accessSync(candidate, fs.constants.X_OK);
+            fs.accessSync(candidate, mode);
             return candidate;
         } catch {
             // Not executable or not present; keep looking.
@@ -87,9 +88,10 @@ export function resolveServerPath(context: vscode.ExtensionContext): ResolvedSer
 
     if (context.extensionMode === vscode.ExtensionMode.Development) {
         const devCandidates = [
-            path.resolve(context.extensionPath, "..", "target", "debug", executableName()),
+            path.resolve(context.extensionPath, "..", "..", "target", "debug", executableName()),
             path.resolve(
                 context.extensionPath,
+                "..",
                 "..",
                 "solrepr",
                 "target",
