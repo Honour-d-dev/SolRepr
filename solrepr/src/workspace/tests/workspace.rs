@@ -1,3 +1,4 @@
+use crate::utilities::fixture_path;
 use crate::workspace::{PackageId, discover_workspace, workspace_root};
 use camino::Utf8PathBuf;
 use lsp_types::InitializeParams;
@@ -9,26 +10,35 @@ fn params(value: serde_json::Value) -> InitializeParams {
 /// `rootUri` wins when the client sends it.
 #[test]
 fn workspace_root_prefers_root_uri() {
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
+    let folder = fixture_path("fixtures/workspaces/foundry/container");
     let params = params(serde_json::json!({
         "processId": null,
-        "rootUri": "file:///tmp/root",
+        "rootUri": lsp_types::Url::from_file_path(&root).unwrap().to_string(),
         "capabilities": {},
-        "workspaceFolders": [{ "uri": "file:///tmp/folder", "name": "folder" }],
+        "workspaceFolders": [{
+            "uri": lsp_types::Url::from_file_path(&folder).unwrap().to_string(),
+            "name": "folder",
+        }],
     }));
-    assert_eq!(workspace_root(&params).unwrap(), "/tmp/root");
+    assert_eq!(workspace_root(&params).unwrap(), root);
 }
 
 /// `rootUri` is deprecated and may be null, so the first workspace folder
 /// is the next candidate.
 #[test]
 fn workspace_root_falls_back_to_a_workspace_folder() {
+    let folder = fixture_path("fixtures/workspaces/foundry/container");
     let params = params(serde_json::json!({
         "processId": null,
         "rootUri": null,
         "capabilities": {},
-        "workspaceFolders": [{ "uri": "file:///tmp/folder", "name": "folder" }],
+        "workspaceFolders": [{
+            "uri": lsp_types::Url::from_file_path(&folder).unwrap().to_string(),
+            "name": "folder",
+        }],
     }));
-    assert_eq!(workspace_root(&params).unwrap(), "/tmp/folder");
+    assert_eq!(workspace_root(&params).unwrap(), folder);
 }
 
 /// With neither, the process working directory is used rather than
@@ -47,8 +57,7 @@ fn workspace_root_falls_back_to_the_working_directory() {
 
 #[test]
 fn nested_duplicate_library_is_skipped_but_unique_transitive_dependency_is_kept() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested");
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
     let discovered = discover_workspace(&root);
     let package_roots: Vec<_> = discovered
         .packages
@@ -99,8 +108,7 @@ fn nested_duplicate_library_is_skipped_but_unique_transitive_dependency_is_kept(
 
 #[test]
 fn discovers_hardhat_fixture_sources() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/hardhat/basic");
+    let root = fixture_path("fixtures/workspaces/hardhat/basic");
     let discovered = discover_workspace(&root);
 
     assert_eq!(discovered.packages.len(), 1);
@@ -111,8 +119,7 @@ fn discovers_hardhat_fixture_sources() {
 
 #[test]
 fn discovers_hardhat_and_foundry_sources_in_hybrid_fixture() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/hybrid");
+    let root = fixture_path("fixtures/workspaces/hybrid");
     let discovered = discover_workspace(&root);
     let roots: Vec<_> = discovered
         .source_roots
@@ -127,8 +134,7 @@ fn discovers_hardhat_and_foundry_sources_in_hybrid_fixture() {
 
 #[test]
 fn standalone_fixture_gets_a_frameworkless_package_and_source_root() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/standalone/basic");
+    let root = fixture_path("fixtures/workspaces/standalone/basic");
     let discovered = discover_workspace(&root);
 
     assert_eq!(discovered.packages.len(), 1);
@@ -146,8 +152,7 @@ fn standalone_fixture_gets_a_frameworkless_package_and_source_root() {
 
 #[test]
 fn container_root_indexes_loose_files_without_swallowing_nested_packages() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/container");
+    let root = fixture_path("fixtures/workspaces/foundry/container");
     let discovered = discover_workspace(&root);
 
     // The manifestless root and the nested foundry package coexist.
@@ -175,8 +180,7 @@ fn container_root_indexes_loose_files_without_swallowing_nested_packages() {
 
 #[test]
 fn remappings_only_root_keeps_remappings_and_indexes_vendored_files() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/remappings/vendor");
+    let root = fixture_path("fixtures/workspaces/foundry/remappings/vendor");
     let discovered = discover_workspace(&root);
 
     let package = discovered
@@ -214,8 +218,7 @@ fn remappings_only_root_keeps_remappings_and_indexes_vendored_files() {
 
 #[test]
 fn external_remapping_target_becomes_a_dependency_source_root() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/remappings/external/proj");
+    let root = fixture_path("fixtures/workspaces/foundry/remappings/external/proj");
     let discovered = discover_workspace(&root);
 
     let dependency = discovered
@@ -235,7 +238,7 @@ fn external_remapping_target_becomes_a_dependency_source_root() {
 #[test]
 fn empty_workspace_root_keeps_a_fallback_source_root() {
     let root =
-        Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/workspaces/standalone/empty");
+        fixture_path("fixtures/workspaces/standalone/empty");
     let discovered = discover_workspace(&root);
 
     assert_eq!(discovered.packages.len(), 1);
@@ -246,8 +249,7 @@ fn empty_workspace_root_keeps_a_fallback_source_root() {
 
 #[test]
 fn hardhat_imports_dir_discovers_vendored_dependency_and_synthesizes_remapping() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/hardhat/imports");
+    let root = fixture_path("fixtures/workspaces/hardhat/imports");
     let discovered = discover_workspace(&root);
 
     // root + vendor/vendored-dep
@@ -284,8 +286,7 @@ fn hardhat_imports_dir_discovers_vendored_dependency_and_synthesizes_remapping()
 
 #[test]
 fn npm_workspace_globs_discover_all_members() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/standalone/npm_workspace");
+    let root = fixture_path("fixtures/workspaces/standalone/npm_workspace");
     let discovered = discover_workspace(&root);
 
     // root + 6 members via *, {a,b}, literal, and ** patterns.
@@ -316,8 +317,7 @@ fn npm_workspace_globs_discover_all_members() {
 /// as the package — manifest, remappings, and nested packages included.
 #[test]
 fn file_root_discovers_the_parent_package() {
-    let file = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/remappings/external/proj/Main.sol");
+    let file = fixture_path("fixtures/workspaces/foundry/remappings/external/proj/Main.sol");
     let discovered = discover_workspace(&file);
 
     let proj = discovered
@@ -347,8 +347,7 @@ fn file_root_discovers_the_parent_package() {
 /// remapping target — so a manifestless child is a package of its own.
 #[test]
 fn manifestless_library_child_is_a_named_dependency() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested");
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
     let discovered = discover_workspace(&root);
 
     let dependency = discovered
@@ -370,8 +369,7 @@ fn manifestless_library_child_is_a_named_dependency() {
 /// an owner through the frameworkless supplement.
 #[test]
 fn nested_manifest_keeps_container_dirs_transparent() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/container");
+    let root = fixture_path("fixtures/workspaces/foundry/container");
     let discovered = discover_workspace(&root);
 
     // The nested package and the frameworkless root — the intermediate
@@ -396,8 +394,7 @@ fn nested_manifest_keeps_container_dirs_transparent() {
 /// root the library scan produced, so the graph deduplicates it.
 #[test]
 fn remapping_into_a_source_dir_resolves_to_the_package_root() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested");
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
     let discovered = discover_workspace(&root);
 
     assert_eq!(
@@ -421,8 +418,7 @@ fn remapping_into_a_source_dir_resolves_to_the_package_root() {
 /// remappings.txt carries the graph to `ext_b`.
 #[test]
 fn remapping_dependencies_are_traversed_transitively() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/remappings/external/proj");
+    let root = fixture_path("fixtures/workspaces/foundry/remappings/external/proj");
     let discovered = discover_workspace(&root);
 
     assert!(discovered.source_roots.iter().any(|source| {
@@ -437,8 +433,7 @@ fn remapping_dependencies_are_traversed_transitively() {
 /// copy — the dependency stays out of the compilation unit.
 #[test]
 fn remapping_into_an_ignored_library_copy_stays_ignored() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested");
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
     let discovered = discover_workspace(&root);
 
     assert!(
@@ -463,8 +458,7 @@ fn remapping_into_an_ignored_library_copy_stays_ignored() {
 /// source dirs and indexes from its package root.
 #[test]
 fn dependency_dev_dirs_are_ignored_and_not_indexed() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/dev_dirs");
+    let root = fixture_path("fixtures/workspaces/foundry/dev_dirs");
     let discovered = discover_workspace(&root);
 
     assert!(

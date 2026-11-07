@@ -8,8 +8,15 @@ use tree_sitter::Point;
 use crate::workspace::Remapping;
 
 pub(crate) fn canonicalize_path(path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
-    path.canonicalize_utf8()
-        .context("failed to canonicalize path")
+    let path = dunce::canonicalize(path).context("failed to canonicalize path")?;
+    Utf8PathBuf::from_path_buf(path)
+        .map_err(|path| anyhow::anyhow!("path is not valid UTF-8: {path:?}"))
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_path(path: &str) -> Utf8PathBuf {
+    let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
+    canonicalize_path(&path).expect("fixture exists")
 }
 
 pub(crate) fn normalize_path(path: &Utf8Path) -> Utf8PathBuf {

@@ -1,10 +1,10 @@
 use crate::salsa::Db;
+use crate::utilities::fixture_path;
 use crate::workspace::loader::load_root;
 use camino::Utf8PathBuf;
 
 fn standalone_db() -> Db {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/standalone/basic");
+    let root = fixture_path("fixtures/workspaces/standalone/basic");
     Db::new(load_root(root))
 }
 
@@ -12,8 +12,7 @@ fn standalone_db() -> Db {
 /// here the frameworkless container root covers the whole tree.
 #[test]
 fn stray_file_under_a_source_root_attaches_to_that_root() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/container");
+    let root = fixture_path("fixtures/workspaces/foundry/container");
     let mut db = Db::new(load_root(root.clone()));
     let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/workspaces/foundry/container/a/b/inner/stray.sol");
@@ -30,8 +29,7 @@ fn stray_file_under_a_source_root_attaches_to_that_root() {
 /// unit, same as solc.
 #[test]
 fn stray_file_outside_source_dirs_is_not_indexed() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested");
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
     let mut db = Db::new(load_root(root));
     let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/workspaces/foundry/nested/stray.sol");
@@ -62,8 +60,7 @@ fn file_outside_every_source_root_is_not_indexed() {
 /// vendored directory scanned under its root source root.
 #[test]
 fn remappings_only_workspace_resolves_vendored_imports() {
-    let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/remappings/vendor");
+    let fixture = fixture_path("fixtures/workspaces/foundry/remappings/vendor");
     let db = Db::new(load_root(fixture.clone()));
     let main = db
         .file(&fixture.join("Main.sol"))
@@ -78,8 +75,7 @@ fn remappings_only_workspace_resolves_vendored_imports() {
 /// synthesized dependency source root and resolves normally.
 #[test]
 fn external_remapping_target_resolves_into_a_synthesized_dependency() {
-    let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/remappings/external/proj");
+    let fixture = fixture_path("fixtures/workspaces/foundry/remappings/external/proj");
     let db = Db::new(load_root(fixture.clone()));
     let main = db
         .file(&fixture.join("Main.sol"))
@@ -95,8 +91,7 @@ fn external_remapping_target_resolves_into_a_synthesized_dependency() {
 /// resolves imports into it.
 #[test]
 fn manifestless_library_resolves_through_the_synthesized_remapping() {
-    let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested");
+    let fixture = fixture_path("fixtures/workspaces/foundry/nested");
     let db = Db::new(load_root(fixture.clone()));
     let main = db
         .file(&fixture.join("src/Root.sol"))
@@ -111,8 +106,7 @@ fn manifestless_library_resolves_through_the_synthesized_remapping() {
 /// normalized to its package root.
 #[test]
 fn remapping_into_src_dir_resolves_imports() {
-    let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested");
+    let fixture = fixture_path("fixtures/workspaces/foundry/nested");
     let db = Db::new(load_root(fixture.clone()));
     let main = db
         .file(&fixture.join("src/Root.sol"))
@@ -127,8 +121,7 @@ fn remapping_into_src_dir_resolves_imports() {
 /// `ext_a` imports through `b/` into `ext_b`.
 #[test]
 fn transitive_remapping_dependencies_resolve_imports() {
-    let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/remappings/external");
+    let fixture = fixture_path("fixtures/workspaces/foundry/remappings/external");
     let db = Db::new(load_root(fixture.clone()));
     let main = db
         .file(&fixture.join("proj/Main.sol"))
@@ -148,11 +141,9 @@ fn transitive_remapping_dependencies_resolve_imports() {
 /// `File` and no source root, so it cannot sync text or be analyzed.
 #[test]
 fn deduplicated_library_files_are_never_indexed() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested");
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
     let mut db = Db::new(load_root(root));
-    let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested/dependencies/dep-a/lib/duplicate/src/Duplicate.sol");
+    let path = fixture_path("fixtures/workspaces/foundry/nested/dependencies/dep-a/lib/duplicate/src/Duplicate.sol");
 
     assert!(db.is_ignored_path(&path));
     assert!(
@@ -168,8 +159,7 @@ fn deduplicated_library_files_are_never_indexed() {
 /// root covers the whole tree.
 #[test]
 fn dependency_dev_files_are_never_indexed() {
-    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/dev_dirs");
+    let root = fixture_path("fixtures/workspaces/foundry/dev_dirs");
     let path = root.join("lib/dep/test/Dep.t.sol");
     let mut db = Db::new(load_root(root));
 
