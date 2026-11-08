@@ -568,7 +568,6 @@ impl<'db> Collector<'db> {
     }
 
     fn resolve(&mut self, file_id: FileId, chain: &mut FxHashSet<FileId>) -> ImportResolver {
-        let db = self.db;
         let mut unresolved = match self.unresolved_imports.get_mut(&file_id) {
             Some(u) => mem::take(u),
             None => UnresolvedImports::default(),
@@ -577,7 +576,7 @@ impl<'db> Collector<'db> {
         let mut resolver = ImportResolver::Finished;
 
         for &import_id in unresolved.imports.iter() {
-            let import = &db.item_tree(import_id.file)[import_id.id];
+            let import = &self.db.item_tree(import_id.file)[import_id.id];
             let Some(dep) = self.db.resolve_to_file(file_id, import.path.as_str()) else {
                 self.sink.push(SemanticDiagnostic::UnresolvedImport {
                     import: import_id,
@@ -635,11 +634,10 @@ impl<'db> Collector<'db> {
         dep_root: SourceRootId,
         import_kind: &ImportKind,
     ) {
-        let file = import.file;
         match import_kind {
             ImportKind::Full => {
                 let dep_data = self.file_data(dep_root, dep);
-                let file_data = self.files.get_mut(&file).unwrap();
+                let file_data = self.files.get_mut(&import.file).unwrap();
                 push_unique_scope(
                     &mut file_data.imported_scopes,
                     ScopeEntry {
@@ -665,7 +663,7 @@ impl<'db> Collector<'db> {
             }
             ImportKind::Namespace { alias } => {
                 let dep_def_id = self.file_data(dep_root, dep).id;
-                let file_scope = self.files.get(&file).unwrap().scope;
+                let file_scope = self.files.get(&import.file).unwrap().scope;
                 let mut previous = None;
                 match self
                     .scopes
@@ -688,7 +686,7 @@ impl<'db> Collector<'db> {
                 }
             }
         }
-        self.extend_global_usings(file, dep, dep_root);
+        self.extend_global_usings(import.file, dep, dep_root);
     }
 
     /// Binds one named-import symbol into its importing file's scope. `false` means the symbol

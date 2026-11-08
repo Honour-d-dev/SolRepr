@@ -26,7 +26,7 @@ use lsp_types::{
 };
 use triomphe::Arc;
 
-pub(crate) struct SolidityLspServer {
+pub struct LspServer {
     sender: crossbeam_channel::Sender<Message>,
     db: Db,
     live_docs: LiveDocs,
@@ -35,8 +35,8 @@ pub(crate) struct SolidityLspServer {
     shutdown_requested: bool,
 }
 
-impl SolidityLspServer {
-    pub(crate) fn new(connection: Connection) -> anyhow::Result<(Self, crossbeam_channel::Receiver<Message>)> {
+impl LspServer {
+    pub fn new(connection: Connection) -> anyhow::Result<(Self, crossbeam_channel::Receiver<Message>)> {
         let (initialize_id, initialize_params) = connection.initialize_start().context("failed to start LSP initialize handshake")?;
 
         let params: InitializeParams = serde_json::from_value(initialize_params)
@@ -95,7 +95,7 @@ impl SolidityLspServer {
         }, connection.receiver))
     }
 
-    pub(crate) fn run(
+    pub fn run(
         mut self,
         receiver: crossbeam_channel::Receiver<Message>,
     ) -> anyhow::Result<()> {

@@ -1,17 +1,6 @@
-mod ast;
-mod capabilities;
-mod hir;
-mod ir;
-mod live_docs;
-mod lsp;
-mod salsa;
-mod utilities;
-mod workspace;
-
-use lsp::SolidityLspServer;
-
-use anyhow::Context;
+use solrepr::lsp::LspServer;
 use lsp_server::Connection;
+use anyhow::Context;
 
 const USAGE: &str = concat!(
     env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"), "\n",
@@ -57,7 +46,7 @@ fn main() -> anyhow::Result<()> {
 
             let (connection, io_threads) = Connection::stdio();
 
-            SolidityLspServer::new(connection).and_then(|(server, rx)| server.run(rx))?;
+            LspServer::new(connection).and_then(|(server, rx)| server.run(rx))?;
 
             io_threads.join().context("failed to join LSP IO threads")?;
         }

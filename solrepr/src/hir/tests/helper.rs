@@ -5,6 +5,7 @@
 //! `AstIdMap`, and the `*_inference` helpers run the ID-keyed inference query
 //! for the first / last / named function in the fixture.
 
+use camino::Utf8PathBuf;
 use ropey::Rope;
 use tree_sitter::Node;
 use triomphe::Arc;
@@ -30,7 +31,7 @@ pub fn make_test_db(source: &str) -> (Db, File) {
 /// The single-file workspace behind `make_test_db`, for tests that build their
 /// own database (the salsa cache tests install an event recorder).
 pub fn test_workspace(source: &str) -> Workspace<LoadedFile> {
-    let root = camino::Utf8PathBuf::from("/tmp/next_tests");
+    let root = Utf8PathBuf::from_path_buf(std::env::temp_dir().join("next_tests")).expect("temp dir is UTF-8");
     Workspace {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
