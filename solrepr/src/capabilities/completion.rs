@@ -10,7 +10,7 @@ use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, Resolution};
 use crate::hir::resolver::Resolver;
 use crate::hir::types::{Primitive, Ty, TyKind, EXTERNAL_CALL_OPTIONS, option_type};
-use crate::ir::def_map::{DefId, DefNamespace};
+use crate::ir::def_map::{DefId, DefNamespace, TypeDefId};
 use crate::hir::syntax_store::{callee_at, semantic_at};
 use crate::salsa::hir_db::owner_at;
 use crate::salsa::{HirDb, Db};
@@ -468,8 +468,8 @@ fn infer_callee(db: &Db, owner: DefId, callee_node: &AstNode) -> Option<CalleeKi
                 return Some(CalleeKind::Callables(callables.to_vec()));
             }
             Resolution::Type(ty) => match ty.peel_loc(db).kind(db) {
-                TyKind::Struct(id) => return Some(CalleeKind::Struct(id)),
-                TyKind::Contract(id)
+                TyKind::TypeDef(TypeDefId::Struct(id)) => return Some(CalleeKind::Struct(id)),
+                TyKind::TypeDef(TypeDefId::Contract(id))
                     if matches!(
                         callee_node.node().kind_id().into(),
                         NodeKind::MODIFIER_INVOCATION | NodeKind::INHERITANCE_SPECIFIER

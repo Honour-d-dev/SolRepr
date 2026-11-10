@@ -8,7 +8,7 @@ use crate::{
         exprs::Name,
         types::{BaseKind, CallKind, Callee, Fn, Location, Mutability, Primitive, Ty, TyKind, Type, Visibility},
     },
-    ir::def_map::DefNamespace,
+    ir::def_map::{DefNamespace, TypeDefId},
     salsa::HirDb,
 };
 use Primitive::*;
@@ -266,11 +266,15 @@ impl BuiltinField {
                 format!("Topic-0 hash of `{}`", db.event_data(id).name).into()
             }
             Self::MetaMin(ty) => match ty.kind(db) {
-                TyKind::Enum(_) => format!("The smallest variant of `{}`", ty.display(db)).into(),
+                TyKind::TypeDef(TypeDefId::Enum(_)) => {
+                    format!("The smallest variant of `{}`", ty.display(db)).into()
+                }
                 _ => format!("The minimum value representable by `{}`", ty.display(db)).into(),
             },
             Self::MetaMax(ty) => match ty.kind(db) {
-                TyKind::Enum(_) => format!("The largest variant of `{}`", ty.display(db)).into(),
+                TyKind::TypeDef(TypeDefId::Enum(_)) => {
+                    format!("The largest variant of `{}`", ty.display(db)).into()
+                }
                 _ => format!("The maximum value representable by `{}`", ty.display(db)).into(),
             },
             Self::MetaName(ty) => {
@@ -295,9 +299,9 @@ impl BuiltinField {
     /// The noun `type(T)` docs use for `T` — "contract `C`", "interface `I`".
     fn meta_noun(db: &dyn HirDb, ty: Type) -> &'static str {
         match ty.kind(db) {
-            TyKind::Contract(_) => "contract",
-            TyKind::Interface(_) => "interface",
-            TyKind::Library(_) => "library",
+            TyKind::TypeDef(TypeDefId::Contract(_)) => "contract",
+            TyKind::TypeDef(TypeDefId::Interface(_)) => "interface",
+            TyKind::TypeDef(TypeDefId::Library(_)) => "library",
             _ => "type",
         }
     }
@@ -447,7 +451,7 @@ impl BuiltinFn {
         let udvt = |id: UdvtId| {
             (
                 Type::primitive(db, db.udvt_data(id).underlying),
-                Type::new(db, TyKind::Udvt(id)).expect("UDVT is nameable"),
+                Type::new(db, TyKind::TypeDef(id.into())).expect("UDVT is nameable"),
             )
         };
         match self {
@@ -696,7 +700,7 @@ impl<'db> BuiltinDb<'db> {
             TyKind::Builtin(id) => Cow::Borrowed(id.members()),
             TyKind::Primitive(Primitive::Bytes) => Cow::Borrowed(&BYTES_TYPE_MEMBERS),
             TyKind::Primitive(Primitive::String) => Cow::Borrowed(&STRING_TYPE_MEMBERS),
-            TyKind::Udvt(id) => {
+            TyKind::TypeDef(TypeDefId::Udvt(id)) => {
                 Cow::Owned(vec![Fn(BuiltinFn::Wrap(id)), Fn(BuiltinFn::Unwrap(id))])
             }
             _ => Cow::Borrowed(&[]),
@@ -737,17 +741,20 @@ impl<'db> BuiltinDb<'db> {
         use BuiltinField::*;
         match ty.peel_loc(self.db).kind(self.db) {
             // `type(T).min`/`max` for value types
-            TyKind::Primitive(Primitive::Uint(_) | Primitive::Int(_)) | TyKind::Enum(_) => {
+            TyKind::Primitive(Primitive::Uint(_) | Primitive::Int(_))
+            | TyKind::TypeDef(TypeDefId::Enum(_)) => {
                 Cow::Owned(vec![Field(MetaMin(ty)), Field(MetaMax(ty))])
             }
             // `type(C).name`/`creationCode`/`runtimeCode`
-            TyKind::Contract(_) | TyKind::Library(_) => Cow::Owned(vec![
-                Field(MetaName(ty)),
-                Field(CreationCode(ty)),
-                Field(RuntimeCode(ty)),
-            ]),
+            TyKind::TypeDef(TypeDefId::Contract(_)) | TyKind::TypeDef(TypeDefId::Library(_)) => {
+                Cow::Owned(vec![
+                    Field(MetaName(ty)),
+                    Field(CreationCode(ty)),
+                    Field(RuntimeCode(ty)),
+                ])
+            }
             // `type(I).name`/`interfaceId`
-            TyKind::Interface(_) => {
+            TyKind::TypeDef(TypeDefId::Interface(_)) => {
                 Cow::Owned(vec![Field(MetaName(ty)), Field(InterfaceId(ty))])
             }
             _ => Cow::Borrowed(&[]),

@@ -9,7 +9,7 @@ use crate::hir::resolution::{CallableOrigin, Resolution};
 use crate::hir::resolver::Resolver;
 use crate::hir::diagnostics::DiagnosticAnchor;
 use crate::hir::types::{Primitive, TyKind, Type};
-use crate::ir::def_map::{DefId, DefNamespace, ScopeData};
+use crate::ir::def_map::{DefId, DefNamespace, ScopeData, TypeDefId};
 use crate::salsa::hir_db::def_name;
 use crate::salsa::{FileId, HirDb};
 
@@ -580,8 +580,8 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             (TyKind::Primitive(Primitive::Int(n)), "max") => {
                 Ok(ConstValue::int(bits(n - 1) - BigInt::from(1u8)))
             }
-            (TyKind::Enum(_), "min") => Ok(ConstValue::int(0u8)),
-            (TyKind::Enum(id), "max") => {
+            (TyKind::TypeDef(TypeDefId::Enum(_)), "min") => Ok(ConstValue::int(0u8)),
+            (TyKind::TypeDef(TypeDefId::Enum(id)), "max") => {
                 let variants = self.db.enum_data(id).variants.len();
                 if variants == 0 {
                     return Err(self.not_constant(expr));
@@ -594,8 +594,10 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 }
                 _ => Err(self.not_constant(expr)),
             },
-            (TyKind::Interface(_), "interfaceId") => Ok(ConstValue::Opaque),
-            (TyKind::Contract(_), "creationCode" | "runtimeCode") => Ok(ConstValue::Opaque),
+            (TyKind::TypeDef(TypeDefId::Interface(_)), "interfaceId") => Ok(ConstValue::Opaque),
+            (TyKind::TypeDef(TypeDefId::Contract(_)), "creationCode" | "runtimeCode") => {
+                Ok(ConstValue::Opaque)
+            }
             _ => Err(self.not_constant(expr)),
         }
     }
@@ -610,7 +612,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         prop: &Name,
     ) -> Result<ConstValue, ConstError> {
         match ty.kind(self.db) {
-            TyKind::Enum(id) => {
+            TyKind::TypeDef(TypeDefId::Enum(id)) => {
                 let data = self.db.enum_data(id);
                 data.variants
                     .iter()
@@ -766,7 +768,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         }
         match ty.peel_loc(self.db).kind(self.db) {
             TyKind::Primitive(primitive) => self.convert_primitive(expr, primitive, value),
-            TyKind::Enum(id) => {
+            TyKind::TypeDef(TypeDefId::Enum(id)) => {
                 let Some(value) = value.as_int() else {
                     return Err(self.not_constant(expr));
                 };
@@ -777,7 +779,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     Ok(ConstValue::int(value))
                 }
             }
-            TyKind::Udvt(id) => {
+            TyKind::TypeDef(TypeDefId::Udvt(id)) => {
                 self.convert_primitive(expr, self.db.udvt_data(id).underlying, value)
             }
             _ => Err(self.not_constant(expr)),

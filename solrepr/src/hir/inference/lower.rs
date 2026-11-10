@@ -41,7 +41,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 Type::invalid(self.db),
             );
         };
-        Type::new(self.db, TyKind::Enum(enum_id)).expect("an enum is nameable")
+        Type::new(self.db, TyKind::TypeDef(enum_id.into())).expect("an enum is nameable")
     }
 
     // ── Type name lowering ───────────────────────────────────────────────

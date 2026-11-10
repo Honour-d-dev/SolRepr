@@ -1,6 +1,6 @@
 use la_arena::Arena;
 
-use crate::ast::{ContractId, EnumId, ErrorId, EventId, FunctionId, ModifierId, VarId};
+use crate::ast::{ContractId, EnumId, FunctionId, VarId};
 use crate::hir::body_map::{self, LocalId};
 use crate::hir::builtins::{
     Builtin, BuiltinField, BuiltinFn, BuiltinTy, ParamSchema,
@@ -11,34 +11,35 @@ use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::types::{
     CallKind, EXTERNAL_CALL_OPTIONS, Fn, Type, ViaTypeKind, Visibility, def_to_type,
 };
-use crate::ir::def_map::DefId;
+use crate::ir::def_map::{CallableDefId, DefId};
 use crate::salsa::{FileId, HirDb};
 
 // ── Callable ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CallableOrigin {
-    Function(FunctionId),
-    Getter(VarId),
-    Constructor(ContractId),
-    Error(ErrorId),
-    Event(EventId),
-    Modifier(ModifierId),
+    Def(CallableDefId),
     Allocation(Type),
     Builtin(BuiltinFn),
 }
 
 impl CallableOrigin {
-    fn from_def(def: DefId) -> Self {
-        match def {
-            DefId::Function(id) => Self::Function(id),
-            DefId::Error(id) => Self::Error(id),
-            DefId::Event(id) => Self::Event(id),
-            DefId::Modifier(id) => Self::Modifier(id),
-            DefId::Var(id) => Self::Getter(id),
-            DefId::Contract(id) => Self::Constructor(id),
-            other => unreachable!("{other:?} does not name a callable declaration"),
-        }
+    /// The origin of a call reached through `def`, if `def` names something
+    /// callable at all.
+    fn from_def(def: DefId) -> Option<Self> {
+        CallableDefId::try_from(def).ok().map(Self::Def)
+    }
+
+    pub fn is_constructor(self) -> bool {
+        matches!(self, Self::Def(CallableDefId::Constructor(_)))
+    }
+
+    pub fn is_error(self) -> bool {
+        matches!(self, Self::Def(CallableDefId::Error(_)))
+    }
+
+    pub fn is_event(self) -> bool {
+        matches!(self, Self::Def(CallableDefId::Event(_)))
     }
 }
 
@@ -51,7 +52,8 @@ pub struct Callable {
 impl Callable {
     pub fn new_direct(def: DefId) -> Self {
         Self {
-            origin: CallableOrigin::from_def(def),
+            origin: CallableOrigin::from_def(def)
+                .expect("the resolver only builds callables from callable defs"),
             kind: CallKind::Direct,
         }
     }
@@ -67,7 +69,7 @@ impl Callable {
     /// An externally-accessed function value — `this.f`, `c.f`.
     pub fn new_external(id: FunctionId) -> Self {
         Self {
-            origin: CallableOrigin::Function(id),
+            origin: CallableOrigin::Def(CallableDefId::Function(id)),
             kind: CallKind::External,
         }
     }
@@ -75,14 +77,14 @@ impl Callable {
     /// A public state-variable getter (`c.x()`).
     pub fn new_getter(id: VarId) -> Self {
         Self {
-            origin: CallableOrigin::Getter(id),
+            origin: CallableOrigin::Def(CallableDefId::Getter(id)),
             kind: CallKind::External,
         }
     }
 
     pub fn new_constructor(id: ContractId) -> Self {
         Self {
-            origin: CallableOrigin::Constructor(id),
+            origin: CallableOrigin::Def(CallableDefId::Constructor(id)),
             kind: CallKind::Direct,
         }
     }
@@ -96,7 +98,8 @@ impl Callable {
 
     pub fn new_bound(def: DefId) -> Self {
         Self {
-            origin: CallableOrigin::from_def(def),
+            origin: CallableOrigin::from_def(def)
+                .expect("a `using` entry only binds callable defs"),
             kind: CallKind::Bound,
         }
     }
@@ -120,7 +123,7 @@ impl Callable {
 
     pub fn options(&self) -> Option<&'static [&'static str]> {
         match &self.origin {
-            CallableOrigin::Constructor(_) => Some(&["value", "salt"]),
+            CallableOrigin::Def(CallableDefId::Constructor(_)) => Some(&["value", "salt"]),
             _ if self.is_external() => Some(match &self.origin {
                 CallableOrigin::Builtin(b) => b.options(),
                 _ => EXTERNAL_CALL_OPTIONS,
@@ -142,13 +145,13 @@ impl Callable {
     pub fn is_invocable(&self, db: &dyn HirDb) -> bool {
         match self.kind {
             CallKind::ViaType(ViaTypeKind::NonLibrary) => {
-                !matches!(self.origin, CallableOrigin::Function(_))
+                !matches!(self.origin, CallableOrigin::Def(CallableDefId::Function(_)))
             }
             CallKind::ViaType(ViaTypeKind::Library) => {
-                !matches!(self.origin, CallableOrigin::Modifier(_))
+                !matches!(self.origin, CallableOrigin::Def(CallableDefId::Modifier(_)))
             }
             CallKind::Base(_) => match self.origin {
-                CallableOrigin::Function(id) => {
+                CallableOrigin::Def(CallableDefId::Function(id)) => {
                     let data = db.function_data(id);
                     matches!(data.vis, Visibility::Internal | Visibility::Public) && data.has_body
                 }
@@ -159,22 +162,17 @@ impl Callable {
     }
 
     pub fn is_getter(&self) -> bool {
-        matches!(self.origin, CallableOrigin::Getter(_))
+        matches!(self.origin, CallableOrigin::Def(CallableDefId::Getter(_)))
     }
 
     /// The declaration this callable names.
     pub fn def(&self) -> Option<DefId> {
-        Some(match &self.origin {
-            CallableOrigin::Function(id) => DefId::Function(*id),
-            CallableOrigin::Getter(id) => DefId::Var(*id),
-            CallableOrigin::Constructor(id) => DefId::Contract(*id),
-            // An allocation names no declaration.
-            CallableOrigin::Allocation(_) => return None,
-            CallableOrigin::Error(id) => DefId::Error(*id),
-            CallableOrigin::Event(id) => DefId::Event(*id),
-            CallableOrigin::Modifier(id) => DefId::Modifier(*id),
-            CallableOrigin::Builtin(_) => return None,
-        })
+        match self.origin {
+            CallableOrigin::Def(id) => Some(id.into()),
+            // An allocation names no declaration, and a builtin has none to
+            // navigate to.
+            CallableOrigin::Allocation(_) | CallableOrigin::Builtin(_) => None,
+        }
     }
 
     pub fn builtin(&self) -> Option<BuiltinFn> {
@@ -222,7 +220,7 @@ impl Callable {
                 .collect()
         }
         let pairs = match &self.origin {
-            CallableOrigin::Function(id) => {
+            CallableOrigin::Def(CallableDefId::Function(id)) => {
                 let data = db.function_data(*id);
                 pairs(
                     &data.syntax_store,
@@ -230,7 +228,7 @@ impl Callable {
                     data.args.iter().copied().skip(skip),
                 )
             }
-            CallableOrigin::Constructor(id) => match db.contract_data(*id).constructor {
+            CallableOrigin::Def(CallableDefId::Constructor(id)) => match db.contract_data(*id).constructor {
                 Some(ctor) => {
                     let data = db.function_data(ctor);
                     pairs(
@@ -242,7 +240,7 @@ impl Callable {
                 // The implicit default constructor takes no arguments.
                 None => Vec::new(),
             },
-            CallableOrigin::Event(id) => {
+            CallableOrigin::Def(CallableDefId::Event(id)) => {
                 let data = db.event_data(*id);
                 pairs(
                     &data.syntax_store,
@@ -250,7 +248,7 @@ impl Callable {
                     data.parameters.iter().map(|(id, _)| id),
                 )
             }
-            CallableOrigin::Error(id) => {
+            CallableOrigin::Def(CallableDefId::Error(id)) => {
                 let data = db.error_data(*id);
                 pairs(
                     &data.syntax_store,
@@ -258,7 +256,7 @@ impl Callable {
                     data.parameters.iter().map(|(id, _)| id),
                 )
             }
-            CallableOrigin::Modifier(id) => {
+            CallableOrigin::Def(CallableDefId::Modifier(id)) => {
                 let data = db.modifier_data(*id);
                 pairs(
                     &data.syntax_store,
@@ -266,7 +264,7 @@ impl Callable {
                     data.parameters.iter().map(|(id, _)| id),
                 )
             }
-            CallableOrigin::Getter(_)
+            CallableOrigin::Def(CallableDefId::Getter(_))
             | CallableOrigin::Builtin(_)
             | CallableOrigin::Allocation(_) => return None,
         };

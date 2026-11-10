@@ -11,7 +11,7 @@ use crate::hir::types::{
     CallKind, Callee, Fn, Location, Mutability, Primitive, Ty, TyKind,
     Type, ViaTypeKind, Visibility, option_type,
 };
-use crate::ir::def_map::DefId;
+use crate::ir::def_map::{CallableDefId, DefId, TypeDefId};
 use crate::salsa::HirDb;
 
 use super::Inferer;
@@ -267,7 +267,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         };
         let name = name.peel_loc(self.db);
         let callable = match name.kind(self.db) {
-            TyKind::Contract(id) => {
+            TyKind::TypeDef(TypeDefId::Contract(id)) => {
                 let members = self.db.member_map(DefId::Contract(id));
                 if self.db.contract_data(id).is_abstract
                     || members.data.has_unimplemented_members()
@@ -349,7 +349,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         let host = match &resolution {
             Some(Resolution::Callable(c)) => match c.builtin() {
                 Some(b) => b.name(),
-                None if matches!(c.origin(), CallableOrigin::Constructor(_)) => "new",
+                None if c.origin().is_constructor() => "new",
                 None => "function",
             },
             _ => "function",
@@ -446,7 +446,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 // `constructor() Base(args)`), a contract type name denotes
                 // that contract's constructor rather than an explicit cast.
                 if self.in_modifier()
-                    && let TyKind::Contract(id) = target.kind(self.db)
+                    && let TyKind::TypeDef(TypeDefId::Contract(id)) = target.kind(self.db)
                 {
                     let callable = Callable::new_constructor(id);
                     return self.resolve_callable(expr, callable, args, arg_types);
@@ -454,13 +454,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 self.tables.set_expr_resolution(expr, Resolution::Type(ty));
                 match target.kind(self.db) {
                     TyKind::Invalid => Ty::invalid(self.db),
-                    TyKind::Struct(id) => {
+                    TyKind::TypeDef(TypeDefId::Struct(id)) => {
                         self.check_struct_construction(expr, id, args, arg_types, None)
                     }
                     _ if args.len() == 1 => {
                         let from = arg_types[0];
                         let literal_out_of_range = match target.kind(self.db) {
-                            TyKind::Enum(id) => {
+                            TyKind::TypeDef(TypeDefId::Enum(id)) => {
                                 !enum_literal_is_in_range(self.db, self.input.store, args[0], id)
                             }
                             _ => false,
@@ -542,11 +542,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 TyKind::Invalid => {
                     self.unknown_named_argument(call, named.first().map(|(name, _)| name))
                 }
-                TyKind::Contract(id) if self.in_modifier() => {
+                TyKind::TypeDef(TypeDefId::Contract(id)) if self.in_modifier() => {
                     let callable = Callable::new_constructor(id);
                     self.resolve_named_call(call, &callable, named, arg_types)
                 }
-                TyKind::Struct(id) => self.check_struct_construction(
+                TyKind::TypeDef(TypeDefId::Struct(id)) => self.check_struct_construction(
                     call,
                     id,
                     &values,
@@ -735,7 +735,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             }
         }
 
-        Type::new(self.db, TyKind::Struct(id))
+        Type::new(self.db, TyKind::TypeDef(id.into()))
             .expect("a struct is nameable")
             .ty()
     }
@@ -746,16 +746,20 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// constrains nothing (events, errors).
     fn callable_mutability(&self, callable: &Callable) -> Option<Mutability> {
         match callable.origin() {
-            CallableOrigin::Function(id) => Some(self.db.function_data(*id).mutability),
-            CallableOrigin::Getter(id) => self.db.getter_signature(*id).map(|sig| sig.mutability),
+            CallableOrigin::Def(CallableDefId::Function(id)) => {
+                Some(self.db.function_data(*id).mutability)
+            }
+            CallableOrigin::Def(CallableDefId::Getter(id)) => {
+                self.db.getter_signature(*id).map(|sig| sig.mutability)
+            }
             // A creation is a state-modifying operation; an allocation is not.
-            CallableOrigin::Constructor(_) => Some(Mutability::NonPayable),
+            CallableOrigin::Def(CallableDefId::Constructor(_)) => Some(Mutability::NonPayable),
             CallableOrigin::Allocation(_) => Some(Mutability::Pure),
             CallableOrigin::Builtin(id) => Some(id.mutability()),
-            CallableOrigin::Event(_) | CallableOrigin::Error(_) => None,
+            CallableOrigin::Def(CallableDefId::Event(_) | CallableDefId::Error(_)) => None,
             // A modifier declares no mutability of its own, so the effect its
             // body needs is what the function it wraps has to allow.
-            CallableOrigin::Modifier(id) => {
+            CallableOrigin::Def(CallableDefId::Modifier(id)) => {
                 let def = DefId::Modifier(*id);
                 (!self.is_owner(def)).then(|| self.db.inference(def).effect)
             }
@@ -778,11 +782,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// owns their diagnostics.
     fn accepts_value(&self, callable: &Callable) -> Option<bool> {
         let mutability = match callable.origin() {
-            CallableOrigin::Function(id) => Some(self.db.function_data(*id).mutability),
-            CallableOrigin::Getter(id) => {
+            CallableOrigin::Def(CallableDefId::Function(id)) => {
+                Some(self.db.function_data(*id).mutability)
+            }
+            CallableOrigin::Def(CallableDefId::Getter(id)) => {
                 self.db.getter_signature(*id).map(|sig| sig.mutability)
             }
-            CallableOrigin::Constructor(id) => Some(
+            CallableOrigin::Def(CallableDefId::Constructor(id)) => Some(
                 self.db
                     .contract_data(*id)
                     .constructor
@@ -791,9 +797,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
             ),
             CallableOrigin::Builtin(builtin) => Some(builtin.mutability()),
             CallableOrigin::Allocation(_)
-            | CallableOrigin::Error(_)
-            | CallableOrigin::Event(_)
-            | CallableOrigin::Modifier(_) => None,
+            | CallableOrigin::Def(
+                CallableDefId::Error(_) | CallableDefId::Event(_) | CallableDefId::Modifier(_),
+            ) => None,
         };
         mutability.map(|mutability| mutability == Mutability::Payable)
     }
@@ -801,7 +807,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn finish_call(&mut self, call: ExprId, callable: &Callable) -> Ty {
         self.tables
             .set_expr_resolution(call, Resolution::Callable(Callable::clone(callable)));
-        if matches!(callable.origin(), CallableOrigin::Error(_)) && !self.in_revert() {
+        if callable.origin().is_error() && !self.in_revert() {
             return self.fail(
                 DiagnosticAnchor::Expr(call),
                 "errors can only be used with revert statements or require functions",
@@ -816,7 +822,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         // and `value` attaches only to a payable target.
         if let Some((options_expr, options)) = self.call_options(call) {
             let external = callable.is_external()
-                || matches!(callable.origin(), CallableOrigin::Constructor(_));
+                || callable.origin().is_constructor();
             if matches!(
                 self.tables.expr_resolution(options_expr),
                 Some(Resolution::Callables(_))
@@ -1247,11 +1253,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     fn try_callable_sig(&self, callable: &Callable) -> Result<Fn<Type>, &'static str> {
         match callable.origin() {
-            CallableOrigin::Function(id) => self
+            CallableOrigin::Def(CallableDefId::Function(id)) => self
                 .db
                 .function_signature(*id)
                 .ok_or("function signature is unavailable"),
-            CallableOrigin::Constructor(id) => {
+            CallableOrigin::Def(CallableDefId::Constructor(id)) => {
                 let mut sig = match self.db.contract_data(*id).constructor {
                     Some(ctor) => self
                         .db
@@ -1260,7 +1266,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     None => Fn::default(),
                 };
                 sig.returns = Box::from([
-                    Type::new(self.db, TyKind::Contract(*id)).expect("a contract is nameable")
+                    Type::new(self.db, TyKind::TypeDef((*id).into()))
+                        .expect("a contract is nameable")
                 ]);
                 Ok(sig)
             }
@@ -1270,20 +1277,20 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 params: Box::from([Type::primitive(self.db, Primitive::Uint(256))]),
                 returns: Box::from([ty.at_loc(self.db, Location::Memory)]),
             }),
-            CallableOrigin::Event(id) => self
+            CallableOrigin::Def(CallableDefId::Event(id)) => self
                 .db
                 .event_signature(*id)
                 .ok_or("event signature is unavailable"),
-            CallableOrigin::Error(id) => self
+            CallableOrigin::Def(CallableDefId::Error(id)) => self
                 .db
                 .error_signature(*id)
                 .ok_or("error signature is unavailable"),
-            CallableOrigin::Modifier(id) => self
+            CallableOrigin::Def(CallableDefId::Modifier(id)) => self
                 .db
                 .modifier_signature(*id)
                 .ok_or("modifier signature is unavailable"),
             CallableOrigin::Builtin(builtin) => Ok(builtin.call_sig(self.db)),
-            CallableOrigin::Getter(id) => self
+            CallableOrigin::Def(CallableDefId::Getter(id)) => self
                 .db
                 .getter_signature(*id)
                 .ok_or("getter variable type is unavailable"),
@@ -1307,21 +1314,21 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     kind: callable.kind(),
                 },
             ),
-            CallableOrigin::Function(id) => Ty::new(
+            CallableOrigin::Def(CallableDefId::Function(id)) => Ty::new(
                 self.db,
                 TyKind::Function {
                     callee: Callee::Fn(*id),
                     kind: callable.kind(),
                 },
             ),
-            CallableOrigin::Getter(id) => Ty::new(
+            CallableOrigin::Def(CallableDefId::Getter(id)) => Ty::new(
                 self.db,
                 TyKind::Function {
                     callee: Callee::Getter(*id),
                     kind: callable.kind(),
                 },
             ),
-            CallableOrigin::Constructor(id) => Ty::new(
+            CallableOrigin::Def(CallableDefId::Constructor(id)) => Ty::new(
                 self.db,
                 TyKind::Function {
                     callee: Callee::Constructor(*id),
@@ -1337,9 +1344,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
             ),
             // The rest drop their kinds. On Resolution-level kind decodes callability
             // On Type-level Kind decodes call-semantics which isn't apllicabe to them
-            CallableOrigin::Error(id) => Ty::new(self.db, TyKind::Error(*id)),
-            CallableOrigin::Event(id) => Ty::new(self.db, TyKind::Event(*id)),
-            CallableOrigin::Modifier(id) => Ty::new(self.db, TyKind::Modifier(*id)),
+            CallableOrigin::Def(CallableDefId::Error(id)) => Ty::new(self.db, TyKind::Error(*id)),
+            CallableOrigin::Def(CallableDefId::Event(id)) => Ty::new(self.db, TyKind::Event(*id)),
+            CallableOrigin::Def(CallableDefId::Modifier(id)) => {
+                Ty::new(self.db, TyKind::Modifier(*id))
+            }
         }
     }
 }
@@ -1394,8 +1403,8 @@ fn order_named(
 
 fn uninstantiable(kind: TyKind) -> &'static str {
     match kind {
-        TyKind::Interface(_) => "Cannot instantiate an interface.",
-        TyKind::Library(_) => "Invalid use of a library name.",
+        TyKind::TypeDef(TypeDefId::Interface(_)) => "Cannot instantiate an interface.",
+        TyKind::TypeDef(TypeDefId::Library(_)) => "Invalid use of a library name.",
         // A primitive is not a declaration at all; solc names what it wanted.
         TyKind::Primitive(_) => "Contract or array type expected.",
         _ => "Identifier is not a contract.",

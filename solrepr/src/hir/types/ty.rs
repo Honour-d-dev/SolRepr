@@ -5,7 +5,7 @@ use crate::hir::types::kind::{Tuple, TyKind};
 use crate::hir::types::literal::LiteralKind;
 use crate::hir::types::primitive::Primitive;
 use crate::hir::types::syntax::{Location, RefKind, VariableKind};
-use crate::ir::def_map::DefId;
+use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::HirDb;
 
 // ── Semantic types ──────────────────────────────────────────────────────────
@@ -215,7 +215,7 @@ impl Ty {
                 .iter()
                 .flatten()
                 .any(|elem| elem.is_dynamically_encoded(db)),
-            TyKind::Struct(id) => db
+            TyKind::TypeDef(TypeDefId::Struct(id)) => db
                 .inference(DefId::Struct(id))
                 .fields
                 .iter()

@@ -1,6 +1,6 @@
 use super::{helper::*, resolver_helpers::*};
 use crate::hir::diagnostics::SemanticDiagnostic;
-use crate::ir::def_map::DefId;
+use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::HirDb;
 use crate::hir::resolver::*;
 use crate::hir::resolution::*;
@@ -37,7 +37,7 @@ fn type_name_resolution_splits_types_from_modules() {
     let Resolution::Type(ty) = Resolution::from_type(&db, find_contract(&db, file, "C")) else {
         panic!("a contract def should resolve to a type name");
     };
-    assert!(matches!(ty.kind(&db), TyKind::Contract(_)));
+    assert!(matches!(ty.kind(&db), TyKind::TypeDef(TypeDefId::Contract(_))));
 }
 
 /// A file module is a *namespace*, not a type or a receiver. A free function

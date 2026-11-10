@@ -237,3 +237,58 @@ fn one_of_each_special_function_is_fine() {
     let analysis = analysis_of(&db);
     assert!(analysis.diagnostics.is_empty());
 }
+
+#[test]
+fn narrow_sums_admit_exactly_their_def_kinds() {
+    let db = db_with(&[(
+        "src/Test.sol",
+        "type U is uint256;
+         struct S { uint256 a; }
+         enum E { A }
+         error Er();
+         event Ev();
+         contract C { uint256 v; function f() public {} modifier m() { _; } }",
+    )]);
+    let analysis = analysis_of(&db);
+
+    for &def in analysis.data.defs.keys() {
+        assert_eq!(
+            TypeDefId::try_from(def).is_ok(),
+            matches!(
+                def,
+                DefId::Contract(_)
+                    | DefId::Interface(_)
+                    | DefId::Library(_)
+                    | DefId::Struct(_)
+                    | DefId::Enum(_)
+                    | DefId::Udvt(_)
+            ),
+            "TypeDefId membership is wrong for {def:?}"
+        );
+        assert_eq!(
+            CallableDefId::try_from(def).is_ok(),
+            matches!(
+                def,
+                DefId::Function(_)
+                    | DefId::Var(_)
+                    | DefId::Contract(_)
+                    | DefId::Error(_)
+                    | DefId::Event(_)
+                    | DefId::Modifier(_)
+            ),
+            "CallableDefId membership is wrong for {def:?}"
+        );
+
+        // Widening a narrowed id gives back the def it came from.
+        if let Ok(id) = TypeDefId::try_from(def) {
+            assert_eq!(DefId::from(id), def);
+        }
+        if let Ok(id) = CallableDefId::try_from(def) {
+            assert_eq!(DefId::from(id), def);
+        }
+        // A typed id lifts to the same def the def map stores.
+        if let DefId::Function(f) = def {
+            assert_eq!(DefId::from(f), def);
+        }
+    }
+}

@@ -153,7 +153,7 @@ fn meta_enum_min_max_are_the_enum_type() {
     assert!(
         expr_results(&inference).any(|(_, ty, resolution)| {
             matches!(resolution, Some(Resolution::Field(_)))
-                && matches!(ty.kind(&db), TyKind::Enum(_))
+                && matches!(ty.kind(&db), TyKind::TypeDef(TypeDefId::Enum(_)))
         }),
         "expected `type(E).min` to type as the enum"
     );

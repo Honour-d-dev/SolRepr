@@ -1,6 +1,7 @@
 use crate::hir::types::kind::TyKind;
 use crate::hir::types::primitive::Primitive;
 use crate::hir::types::syntax::Location;
+use crate::ir::def_map::TypeDefId;
 use crate::salsa::HirDb;
 
 #[derive(PartialEq, Eq, Clone, Copy, Hash)]
@@ -90,7 +91,7 @@ impl LiteralKind {
             }
             TyKind::Primitive(Primitive::FixedBytes(_)) if zero => Some(1),
             
-            TyKind::Enum(id) if !neg => {
+            TyKind::TypeDef(TypeDefId::Enum(id)) if !neg => {
                 let members = db.enum_data(*id).variants.len() as u128;
                 let lower = if zero {
                     0

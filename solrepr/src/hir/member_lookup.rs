@@ -7,7 +7,7 @@ use crate::hir::member_map::{MemberMap, MemberSlot};
 use crate::hir::resolution::{Callable, Field, Resolution, Variant};
 use crate::hir::resolver::Resolver;
 use crate::hir::types::{BaseKind, CallKind, Ty, TyKind, ViaTypeKind};
-use crate::ir::def_map::{DefId, ScopeData};
+use crate::ir::def_map::{DefId, ScopeData, TypeDefId};
 use crate::salsa::File;
 
 /// The projected outcome of looking up one member name on a receiver.
@@ -211,12 +211,10 @@ impl<'db> Resolver<'db> {
                         names.extend(defmap.scopes[scope].by_name.keys().cloned());
                     }
                 }
-                TyKind::Contract(_) | TyKind::Interface(_) | TyKind::Library(_) => {
-                    if let Some(owner) = inner.def_id(self.db) {
-                        self.scope_names(owner, names);
-                    }
+                TyKind::TypeDef(id) if id.is_contract_like() => {
+                    self.scope_names(id.into(), names);
                 }
-                TyKind::Enum(enum_id) => {
+                TyKind::TypeDef(TypeDefId::Enum(enum_id)) => {
                     for (_, variant) in self.db.enum_data(enum_id).variants.iter() {
                         names.insert(variant.name.clone());
                     }
@@ -241,15 +239,15 @@ impl<'db> Resolver<'db> {
             _ => {
                 let base = receiver.peel_loc(self.db);
                 match base.kind(self.db) {
-                    TyKind::Struct(id) => {
+                    TyKind::TypeDef(TypeDefId::Struct(id)) => {
                         for (_, data) in self.db.struct_data(id).fields.iter() {
                             names.insert(data.name.clone());
                         }
                     }
-                    TyKind::Contract(_) | TyKind::Interface(_) => {
-                        if let Some(owner) = base.def_id(self.db) {
-                            self.scope_names(owner, names);
-                        }
+                    TyKind::TypeDef(id)
+                        if matches!(id, TypeDefId::Contract(_) | TypeDefId::Interface(_)) =>
+                    {
+                        self.scope_names(id.into(), names);
                     }
                     _ => {}
                 }
@@ -268,10 +266,8 @@ impl<'db> Resolver<'db> {
     fn types_member_named(&self, ty: Ty, name: &Name, result: &mut MemberLookupResult) {
         match ty.peel_loc(self.db).kind(self.db) {
             TyKind::Module(file) => self.file_member_named(file, name, result),
-            TyKind::Contract(_) | TyKind::Interface(_) | TyKind::Library(_) => {
-                let Some(owner) = ty.def_id(self.db) else {
-                    return;
-                };
+            TyKind::TypeDef(id) if id.is_contract_like() => {
+                let owner = id.into();
                 let path = self.access.type_access_kind(owner);
                 // Members declared in the type itself — functions, modifiers,
                 // events, errors, constants and nested types. Member access on
@@ -284,7 +280,7 @@ impl<'db> Resolver<'db> {
                     self.own_scope_member(result, owner, name, path);
                 }
             }
-            TyKind::Enum(enum_id) => {
+            TyKind::TypeDef(TypeDefId::Enum(enum_id)) => {
                 let data = self.db.enum_data(enum_id);
                 for (id, variant) in data.variants.iter() {
                     if variant.name == *name {
@@ -305,7 +301,7 @@ impl<'db> Resolver<'db> {
     fn values_member_named(&self, ty: Ty, name: &Name, result: &mut MemberLookupResult) {
         let base = ty.peel_loc(self.db);
         match base.kind(self.db) {
-            TyKind::Struct(id) => {
+            TyKind::TypeDef(TypeDefId::Struct(id)) => {
                 let owner = DefId::Struct(id);
                 for (field, data) in self.db.struct_data(id).fields.iter() {
                     if data.name == *name {
@@ -313,17 +309,18 @@ impl<'db> Resolver<'db> {
                     }
                 }
             }
-            TyKind::Contract(_) | TyKind::Interface(_) => {
-                if let Some(owner) = base.def_id(self.db) {
-                    self.contract_member_named(
-                        owner,
-                        CallKind::External,
-                        false,
-                        false,
-                        name,
-                        result,
-                    );
-                }
+            TyKind::TypeDef(id)
+                if matches!(id, TypeDefId::Contract(_) | TypeDefId::Interface(_)) =>
+            {
+                let owner = id.into();
+                self.contract_member_named(
+                    owner,
+                    CallKind::External,
+                    false,
+                    false,
+                    name,
+                    result,
+                );
             }
             _ => {}
         }

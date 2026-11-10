@@ -2,28 +2,11 @@ use crate::ast;
 use crate::hir::body_map::BodyOwnerId;
 use crate::ir::def_map::DefId;
 
+// Interned variants of the ast ids. At the salsa boundaries since non-interned values are not allowed
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Import<'db> {
     pub id: ast::ImportId,
-}
-
-#[derive(PartialEq, Eq, Clone, Hash, Debug)]
-pub enum DefWithBasesId {
-    Contract(ast::ContractId),
-    Interface(ast::InterfaceId),
-}
-
-#[salsa::interned]
-#[derive(Debug)]
-pub struct DefWithBases<'db> {
-    pub id: DefWithBasesId,
-}
-
-#[salsa::interned]
-#[derive(Debug)]
-pub struct BodyOwner<'db> {
-    pub id: BodyOwnerId,
 }
 
 #[salsa::interned]
@@ -98,17 +81,29 @@ pub struct Using<'db> {
     pub id: ast::UsingId,
 }
 
+#[derive(PartialEq, Eq, Clone, Hash, Debug)]
+pub enum DefWithBasesId {
+    Contract(ast::ContractId),
+    Interface(ast::InterfaceId),
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub struct DefWithBases<'db> {
+    pub id: DefWithBasesId,
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub struct BodyOwner<'db> {
+    pub id: BodyOwnerId,
+}
+
+
+/// Interned Variant of the DefId.
 #[salsa::interned]
 #[derive(Debug)]
 pub struct Id {
     pub id: DefId,
 }
 
-// pub enum DefId {
-//     Var(Var),
-//     Error(Error),
-//     Enum(Enum),
-//     Event(Event),
-//     Struct(Struct),
-//     Modifier(Modifier)
-// }

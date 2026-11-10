@@ -11,11 +11,26 @@ use std::{
 use tree_sitter::{Node, Range};
 
 /// file-local node index wrapper
+///
+/// Two layers only, so both halves are bounded by a file's declaration count
+/// rather than by anything global: a top-level node carries its BFS index in
+/// `id` and [`Self::NO_PARENT`] in `parent`; a container member carries its
+/// container's top-level index in `parent` and its position within that
+/// container in `id`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ErasedAstId {
-    id: u32,
-    parent: Option<u32>,
+    id: u16,
+    parent: u16,
 }
+
+impl ErasedAstId {
+    const NO_PARENT: u16 = 0;
+    const MAX_NODES: usize = u16::MAX as usize;//65535 is generous enough
+}
+
+// Both halves are `u16`, so the whole id must stay at 4 bytes — it is copied into
+// every `ast::*Id`, every `DefId`, and every item-tree key.
+const _: () = assert!(std::mem::size_of::<ErasedAstId>() == 4);
 
 /// file-local index with type data
 #[derive(Debug, PartialEq, Eq)]
@@ -54,6 +69,8 @@ impl<N> AstId<N> {
     }
 }
 
+/// Nodes the id map walks through. Only the ones that are not
+/// [`is_transparent`] receive an id.
 pub fn is_supported_node(node: &Node<'_>) -> bool {
     matches!(
         NodeKind::from(node.kind_id()),
@@ -77,6 +94,17 @@ pub fn is_supported_node(node: &Node<'_>) -> bool {
     )
 }
 
+/// Nodes that are walked through but take no id of their own. The source file is
+/// not a parent to top-level items, and a contract body is a positional wrapper
+/// around its  members, so neither is a level of its own: their
+/// children attach to the nearest enclosing node that has an id.
+fn is_transparent(node: &Node<'_>) -> bool {
+    matches!(
+        NodeKind::from(node.kind_id()),
+        NodeKind::SOURCE_FILE | NodeKind::CONTRACT_BODY
+    )
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct AstIdMap {
     ptr_to_id: FxHashMap<NodePtr, ErasedAstId>,
@@ -90,9 +118,9 @@ impl AstIdMap {
         // Very shallow/simplified id allocation algo for now: does BFS
         // This id system only works for 2 layers, thankfully we don't need more than 2 layers
         // Global layer: consts, free fns, contracts/interface/library etc.
-        // 2nd layer: contract/interface/library members
+        // 2nd layer: members - Contract/Library/Interface's
         // everything below function level is ignored
-        let mut ptr_id = 0;
+        let mut ptr_id = 1;
         let mut ptr_to_id = FxHashMap::default();
         let mut id_to_ptr = FxHashMap::default();
         let mut queue = VecDeque::new();
@@ -101,21 +129,26 @@ impl AstIdMap {
         queue.push_back((root.node(), None));
 
         while let Some((node, parent)) = queue.pop_front() {
-            let node_ptr = NodePtr::from_node(node);
-            let id = Self::generate_id(parent, ptr_id, &mut parent_map);
-            ptr_id += 1;
-            ptr_to_id.insert(node_ptr, id);
-            id_to_ptr.insert(id, node_ptr);
+            
+            let parent = if is_transparent(&node) {
+                parent
+            } else {
+                assert!(
+                    ptr_id <= ErasedAstId::MAX_NODES,
+                    "file declares more than {} indexable nodes, which the ast id layout cannot represent",
+                    ErasedAstId::MAX_NODES
+                );
+                let id = Self::generate_id(parent, ptr_id, &mut parent_map);
+                ptr_id += 1;
+                let node_ptr = NodePtr::from_node(node);
+                ptr_to_id.insert(node_ptr, id);
+                id_to_ptr.insert(id, node_ptr);
+                Some(id)
+            };
 
             for child in node.named_children(&mut node.walk())
                 .filter(is_supported_node)
             {
-                //source file should not be a parent to top level items
-                let parent = if node.kind_id() == NodeKind::SOURCE_FILE {
-                    None
-                } else {
-                    Some(id)
-                };
                 queue.push_back((child, parent));
             }
         }
@@ -138,19 +171,18 @@ impl AstIdMap {
         index: usize,
         parent_map: &mut FxHashMap<usize, usize>,
     ) -> ErasedAstId {
-        if let Some(parent) = parent {
-            let idx = parent_map.entry(parent.id as usize).or_default();
-            let id = *idx;
-            *idx += 1;
-            ErasedAstId {
-                id: id as u32,
-                parent: Some(parent.id),
-            }
-        } else {
-            ErasedAstId {
-                id: index as u32,
-                parent: None,
-            }
+        let Some(parent) = parent else {
+            return ErasedAstId {
+                id: index as u16,
+                parent: ErasedAstId::NO_PARENT,
+            };
+        };
+        let idx = parent_map.entry(parent.id as usize).or_insert(1);
+        let id = *idx;
+        *idx += 1;
+        ErasedAstId {
+            id: id as u16,
+            parent: parent.id,
         }
     }
 

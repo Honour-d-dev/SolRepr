@@ -190,7 +190,7 @@ fn non_assignable_types_are_never_conversion_targets() {
     let DefId::Contract(contract) = find_contract(&db, file, "C") else {
         unreachable!("fixture declares contract C")
     };
-    let contract_ty = Ty::new(&db, TyKind::Contract(contract));
+    let contract_ty = Ty::new(&db, TyKind::TypeDef(contract.into()));
     let super_ty = Ty::new(&db, TyKind::Super(contract));
     let module = Ty::new(&db, TyKind::Module(file));
 

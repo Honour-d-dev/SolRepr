@@ -10,7 +10,7 @@ use crate::hir::exprs::{Expr, ExprId};
 use crate::hir::resolution::{CallableOrigin, Field as ResolvedField, Local, Resolution};
 use crate::hir::diagnostics::{DiagnosticAnchor, SemanticDiagnostic};
 use crate::hir::types::{Mutability, Ty, TyKind, Type};
-use crate::ir::def_map::DefId;
+use crate::ir::def_map::{CallableDefId, DefId};
 
 use super::Inferer;
 
@@ -217,14 +217,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// Infers the callee of an `emit` and checks it denotes an event.
     pub(super) fn check_emit(&mut self, expr: ExprId) -> Ty {
         self.check_invocation(expr, UsageContext::Empty, "an event", |origin| {
-            matches!(origin, CallableOrigin::Event(_))
+            origin.is_event()
         })
     }
 
     /// Infers the callee of a `revert` and checks it denotes an error.
     pub(super) fn check_revert(&mut self, expr: ExprId) -> Ty {
         self.check_invocation(expr, UsageContext::Revert, "an error", |origin| {
-            matches!(origin, CallableOrigin::Error(_))
+            origin.is_error()
         })
     }
 
@@ -254,8 +254,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
         let ty = self.infer_in(expr, UsageContext::Modifier);
         match self.tables.expr_resolution(expr) {
             Some(Resolution::Callable(callable)) => match callable.origin() {
-                CallableOrigin::Modifier(_) => {}
-                CallableOrigin::Constructor(base) if self.allows_base_constructor(*base) => {}
+                CallableOrigin::Def(CallableDefId::Modifier(_)) => {}
+                CallableOrigin::Def(CallableDefId::Constructor(base))
+                    if self.allows_base_constructor(*base) => {}
                 _ => self.fail(DiagnosticAnchor::Expr(expr), "this call is not a modifier", ()),
             },
             _ if self.tables.expr_ty(expr).is_invalid(self.db) => {}

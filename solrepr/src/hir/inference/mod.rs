@@ -21,7 +21,7 @@ use crate::hir::types::Primitive::FixedBytes;
 use crate::hir::types::{
     Location, Mutability, Primitive, RefKind, Ty, TyKind, Type, VariableKind,
 };
-use crate::ir::def_map::DefId;
+use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::HirDb;
 
 
@@ -233,10 +233,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Resolution::Module(file) => Ty::new(self.db, TyKind::Module(file)),
             Resolution::MetaType(ty) => Ty::new(self.db, TyKind::Meta(ty)),
             Resolution::Builtin(object) => Ty::new(self.db, TyKind::Builtin(object)),
-            Resolution::This(def) => match def {
-                DefId::Contract(id) => Ty::new(self.db, TyKind::Contract(id)),
-                DefId::Interface(id) => Ty::new(self.db, TyKind::Interface(id)),
-                DefId::Library(id) => Ty::new(self.db, TyKind::Library(id)),
+            Resolution::This(def) => match TypeDefId::try_from(def) {
+                Ok(id) if id.is_contract_like() => Ty::new(self.db, TyKind::TypeDef(id)),
                 _ => self.fail(
                     DiagnosticAnchor::Expr(expr),
                     "`this` does not name a contract, interface, or library",
@@ -252,7 +250,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 ),
             },
             Resolution::Literal(literal) => literal.ty(self.db),
-            Resolution::Variant(variant) => Ty::new(self.db, TyKind::Enum(variant.enum_id)),
+            Resolution::Variant(variant) => Ty::new(self.db, TyKind::TypeDef(variant.enum_id.into())),
             Resolution::Field(field) => match field {
                 ResolvedField::Builtin(builtin) => builtin.ty(self.db).ty(),
                 ResolvedField::Struct(owner, field_id) => {

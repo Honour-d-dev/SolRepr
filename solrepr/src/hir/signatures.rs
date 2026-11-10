@@ -2,7 +2,7 @@ use crate::ast::FunctionKind;
 use crate::hir::exprs::Name;
 use crate::hir::types::{
     Fn, Location, Mutability, Primitive, TyKind, Type, VariableKind, Visibility};
-use crate::ir::def_map::DefId;
+use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::HirDb;
 
 
@@ -247,7 +247,7 @@ pub(crate) fn getter_signature(db: &dyn HirDb, ty: Type) -> Fn<Type> {
     }
 
     let returns: Vec<Type> = match ty.kind(db) {
-        TyKind::Struct(id) => {
+        TyKind::TypeDef(TypeDefId::Struct(id)) => {
             let data = db.struct_data(id);
             let strukt = db.inference(DefId::Struct(id));
             data.fields

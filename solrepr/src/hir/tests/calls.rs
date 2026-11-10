@@ -1530,11 +1530,10 @@ fn construction_yields_the_contract_and_checks_the_constructor() {
     assert!(inference.diagnostics.is_empty(), "{:?}", codes(&inference));
     assert!(
         expr_results(&inference).any(|(_, ty, resolution)| {
-            matches!(ty.kind(&db), TyKind::Contract(_))
+            matches!(ty.kind(&db), TyKind::TypeDef(TypeDefId::Contract(_)))
                 && matches!(
                     resolution,
-                    Some(Resolution::Callable(callable))
-                        if matches!(callable.origin(), CallableOrigin::Constructor(_))
+                    Some(Resolution::Callable(callable)) if callable.origin().is_constructor()
                 )
         }),
         "the call should yield the contract and record its constructor",
@@ -1913,7 +1912,7 @@ fn base_constructor_initializations_are_checked_in_both_positions() {
     assert!(expr_results(&ok_header).any(|(_, _, res)| {
         matches!(
             res,
-            Some(Resolution::Callable(c)) if matches!(c.origin(), CallableOrigin::Constructor(_))
+            Some(Resolution::Callable(c)) if c.origin().is_constructor()
         )
     }));
 
@@ -1927,7 +1926,7 @@ fn base_constructor_initializations_are_checked_in_both_positions() {
     assert!(expr_results(&ok_ctor).any(|(_, _, res)| {
         matches!(
             res,
-            Some(Resolution::Callable(c)) if matches!(c.origin(), CallableOrigin::Constructor(_))
+            Some(Resolution::Callable(c)) if c.origin().is_constructor()
         )
     }));
 

@@ -226,3 +226,16 @@ pub enum Callee {
     Builtin(BuiltinFn),
 }
 
+impl Callee {
+    /// The declaration this callee denotes, if any. A builtin has none to
+    /// navigate to, and an allocation denotes no declaration at all.
+    pub fn def_id(self) -> Option<DefId> {
+        match self {
+            Callee::Fn(id) => Some(DefId::Function(id)),
+            Callee::Getter(id) => Some(DefId::Var(id)),
+            Callee::Constructor(id) => Some(DefId::Contract(id)),
+            Callee::Allocation(_) | Callee::Builtin(_) => None,
+        }
+    }
+}
+

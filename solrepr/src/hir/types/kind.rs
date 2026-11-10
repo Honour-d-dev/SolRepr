@@ -1,7 +1,7 @@
 use la_arena::Arena;
 use num_bigint::BigInt;
 
-use crate::ast::{ContractId, EnumId, ErrorId, EventId, InterfaceId, LibraryId, ModifierId, StructId, UdvtId};
+use crate::ast::{ContractId, ErrorId, EventId, ModifierId};
 use crate::hir::body_map::Local;
 use crate::hir::builtins::{BuiltinTy, MemberNamespace};
 use crate::hir::types::func::{Callee, CallKind, Fn};
@@ -9,21 +9,18 @@ use crate::hir::types::literal::LiteralKind;
 use crate::hir::types::primitive::Primitive;
 use crate::hir::types::syntax::{Location, RefKind, TyName};
 use crate::hir::types::ty::{Ty, Type};
-use crate::ir::def_map::DefId;
+use crate::ir::def_map::{DefId, TypeDefId};
+use crate::salsa::hir_db::def_name;
 use crate::salsa::{FileId, HirDb};
 
+/// TyKind follows Solar's TyKind design for modelling solidity types, with a few difffernces for our specific usecase
 /// N = nameable/declarable subset that makeup [`Type`]. Concrete Ty's that can be written/assigned programatically
 /// E = non-nameable subset everything else in [`Ty`]. intermediate/hidden/infered Ty's everything else that an expr can be typed as
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum TyKind {
     // ── N ────────────
     Primitive(Primitive),
-    Contract(ContractId),
-    Interface(InterfaceId),
-    Library(LibraryId),
-    Struct(StructId),
-    Enum(EnumId),
-    Udvt(UdvtId),
+    TypeDef(TypeDefId),
     FnPtr(Fn<Type>),
     Ref(Type, Location),
     Array {
@@ -74,12 +71,7 @@ impl TyKind {
         matches!(
             self,
             TyKind::Primitive(_)
-                | TyKind::Contract(_)
-                | TyKind::Interface(_)
-                | TyKind::Library(_)
-                | TyKind::Struct(_)
-                | TyKind::Enum(_)
-                | TyKind::Udvt(_)
+                | TyKind::TypeDef(_)
                 | TyKind::FnPtr(_)
                 | TyKind::Ref(..)
                 | TyKind::Array { .. }
@@ -101,7 +93,7 @@ impl TyKind {
         matches!(
             self,
             TyKind::Primitive(Primitive::Bytes | Primitive::String)
-                | TyKind::Struct(_)
+                | TyKind::TypeDef(TypeDefId::Struct(_))
                 | TyKind::Array { .. }
                 | TyKind::Mapping { .. }
         )
@@ -110,7 +102,7 @@ impl TyKind {
     pub fn default_loc(&self) -> Option<Location> {
         match self {
             TyKind::Primitive(Primitive::Bytes | Primitive::String)
-            | TyKind::Struct(_)
+            | TyKind::TypeDef(TypeDefId::Struct(_))
             | TyKind::Array { .. } => Some(Location::Memory),
             TyKind::Mapping { .. } => Some(Location::Storage(RefKind::Reference)),
             _ => None,
@@ -119,23 +111,11 @@ impl TyKind {
 
     pub fn def_id(&self) -> Option<DefId> {
         match self {
-            TyKind::Contract(id) => Some(DefId::Contract(*id)),
-            TyKind::Interface(id) => Some(DefId::Interface(*id)),
-            TyKind::Library(id) => Some(DefId::Library(*id)),
-            TyKind::Struct(id) => Some(DefId::Struct(*id)),
-            TyKind::Enum(id) => Some(DefId::Enum(*id)),
-            TyKind::Udvt(id) => Some(DefId::Udvt(*id)),
+            TyKind::TypeDef(id) => Some((*id).into()),
             TyKind::Error(id) => Some(DefId::Error(*id)),
             TyKind::Event(id) => Some(DefId::Event(*id)),
             TyKind::Modifier(id) => Some(DefId::Modifier(*id)),
-            TyKind::Function { callee, .. } => match callee {
-                Callee::Fn(id) => Some(DefId::Function(*id)),
-                Callee::Getter(id) => Some(DefId::Var(*id)),
-                Callee::Constructor(id) => Some(DefId::Contract(*id)),
-                Callee::Allocation(_) => None,
-                // A builtin has no declaration to navigate to.
-                Callee::Builtin(_) => None,
-            },
+            TyKind::Function { callee, .. } => callee.def_id(),
             TyKind::Module(file) => Some(DefId::File(*file)),
             TyKind::Super(id) => Some(DefId::Contract(*id)),
             _ => None,
@@ -219,9 +199,11 @@ impl TyKind {
                 .explicitly_converts_to(target, db),
             (TyKind::Literal(literal), target) => literal.explicit_widening(target, db),
             (TyKind::Primitive(from), TyKind::Primitive(to)) => from.explicit_widening(to),
-            (TyKind::Primitive(Primitive::Uint(_) | Primitive::Int(_)), TyKind::Enum(_)) => Some(1),
-            
-            (TyKind::Enum(_), TyKind::Primitive(Primitive::Uint(_))) => Some(1),
+            (
+                TyKind::Primitive(Primitive::Uint(_) | Primitive::Int(_)),
+                TyKind::TypeDef(TypeDefId::Enum(_)),
+            ) => Some(1),
+            (TyKind::TypeDef(TypeDefId::Enum(_)), TyKind::Primitive(Primitive::Uint(_))) => Some(1),
             (TyKind::Primitive(Primitive::Address | Primitive::AddressPayable), target)
                 if target.is_contract_like() && !target.is_payable(db) =>
             {
@@ -234,7 +216,7 @@ impl TyKind {
                 Some(1)
             },
             (TyKind::Type(inner), TyKind::Primitive(Primitive::Address))
-                if matches!(inner.kind(db), TyKind::Library(_)) =>
+                if matches!(inner.kind(db), TyKind::TypeDef(TypeDefId::Library(_))) =>
             {
                 Some(1)
             }
@@ -306,12 +288,7 @@ impl TyKind {
         match self {
             TyKind::Primitive(p) => p.to_string(),
             TyKind::Literal(literal) => literal.display(),
-            TyKind::Contract(id) => db.contract_data(*id).name.to_string(),
-            TyKind::Interface(id) => db.interface_data(*id).name.to_string(),
-            TyKind::Library(id) => db.library_data(*id).name.to_string(),
-            TyKind::Struct(id) => db.struct_data(*id).name.to_string(),
-            TyKind::Enum(id) => db.enum_data(*id).name.to_string(),
-            TyKind::Udvt(id) => db.udvt_data(*id).name.to_string(),
+            TyKind::TypeDef(id) => def_name(db, (*id).into()),
             TyKind::Function { callee, .. } => match callee {
                 Callee::Fn(id) => db.function_data(*id).name.to_string(),
                 Callee::Getter(id) => db.var_data(*id).name.to_string(),
@@ -371,15 +348,12 @@ impl TyKind {
 
     
     fn is_contract_like(&self) -> bool {
-        matches!(
-            self,
-            TyKind::Contract(_) | TyKind::Interface(_) | TyKind::Library(_)
-        )
+        matches!(self, TyKind::TypeDef(id) if id.is_contract_like())
     }
 
     fn is_payable(&self, db: &dyn HirDb) -> bool {
         match self {
-            TyKind::Contract(id) => db
+            TyKind::TypeDef(TypeDefId::Contract(id)) => db
                 .member_map(DefId::Contract(*id))
                 .data
                 .is_payable(db),
@@ -414,15 +388,7 @@ fn display_decl_parameters(parameters: &Arena<Local>, types: &Arena<TyName>) -> 
 }
 
 pub fn def_to_type(db: &dyn HirDb, def: DefId) -> Option<Type> {
-    let kind = match def {
-        DefId::Contract(id) => TyKind::Contract(id),
-        DefId::Interface(id) => TyKind::Interface(id),
-        DefId::Library(id) => TyKind::Library(id),
-        DefId::Struct(id) => TyKind::Struct(id),
-        DefId::Enum(id) => TyKind::Enum(id),
-        DefId::Udvt(id) => TyKind::Udvt(id),
-        _ => return None,
-    };
-    Some(Type::new(db, kind).expect("every type-position def kind is nameable"))
+    let id: TypeDefId = def.try_into().ok()?;
+    Some(Type::new(db, TyKind::TypeDef(id)).expect("every type-position def kind is nameable"))
 }
 

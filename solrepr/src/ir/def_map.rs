@@ -72,6 +72,143 @@ impl DefId {
     }
 }
 
+/// Lifts a typed id into a sum that contains it. Infallible by construction; the
+/// reverse direction is a `TryFrom` on the sum, so narrowing is the only place
+/// that has to match.
+macro_rules! impl_from {
+    ($sum:ident { $($variant:ident($id:ident)),* $(,)? }) => {
+        $(impl From<$id> for $sum {
+            #[inline]
+            fn from(id: $id) -> Self {
+                $sum::$variant(id)
+            }
+        })*
+    };
+}
+
+impl_from!(DefId {
+    Import(ImportId),
+    Udvt(UdvtId),
+    Using(UsingId),
+    Contract(ContractId),
+    Interface(InterfaceId),
+    Library(LibraryId),
+    Function(FunctionId),
+    Modifier(ModifierId),
+    Struct(StructId),
+    Event(EventId),
+    Enum(EnumId),
+    Error(ErrorId),
+    Var(VarId),
+});
+
+/// A declaration a type name can denote — the narrow sum over `DefId`'s
+/// type-position variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TypeDefId {
+    Contract(ContractId),
+    Interface(InterfaceId),
+    Library(LibraryId),
+    Struct(StructId),
+    Enum(EnumId),
+    Udvt(UdvtId),
+}
+
+impl TypeDefId {
+    /// A contract, interface or library — the kinds whose members come from a
+    /// scope rather than from a field list.
+    pub fn is_contract_like(self) -> bool {
+        matches!(self, Self::Contract(_) | Self::Interface(_) | Self::Library(_))
+    }
+}
+
+impl_from!(TypeDefId {
+    Contract(ContractId),
+    Interface(InterfaceId),
+    Library(LibraryId),
+    Struct(StructId),
+    Enum(EnumId),
+    Udvt(UdvtId),
+});
+
+impl From<TypeDefId> for DefId {
+    fn from(id: TypeDefId) -> Self {
+        match id {
+            TypeDefId::Contract(i) => DefId::Contract(i),
+            TypeDefId::Interface(i) => DefId::Interface(i),
+            TypeDefId::Library(i) => DefId::Library(i),
+            TypeDefId::Struct(i) => DefId::Struct(i),
+            TypeDefId::Enum(i) => DefId::Enum(i),
+            TypeDefId::Udvt(i) => DefId::Udvt(i),
+        }
+    }
+}
+
+impl TryFrom<DefId> for TypeDefId {
+    type Error = DefId;
+
+    fn try_from(def: DefId) -> Result<Self, DefId> {
+        Ok(match def {
+            DefId::Contract(i) => Self::Contract(i),
+            DefId::Interface(i) => Self::Interface(i),
+            DefId::Library(i) => Self::Library(i),
+            DefId::Struct(i) => Self::Struct(i),
+            DefId::Enum(i) => Self::Enum(i),
+            DefId::Udvt(i) => Self::Udvt(i),
+            other => return Err(other),
+        })
+    }
+}
+
+/// A declaration a value-position name can denote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CallableDefId {
+    Function(FunctionId),
+    Getter(VarId),
+    Constructor(ContractId),
+    Error(ErrorId),
+    Event(EventId),
+    Modifier(ModifierId),
+}
+
+impl_from!(CallableDefId {
+    Function(FunctionId),
+    Getter(VarId),
+    Constructor(ContractId),
+    Error(ErrorId),
+    Event(EventId),
+    Modifier(ModifierId),
+});
+
+impl From<CallableDefId> for DefId {
+    fn from(id: CallableDefId) -> Self {
+        match id {
+            CallableDefId::Function(i) => DefId::Function(i),
+            CallableDefId::Getter(i) => DefId::Var(i),
+            CallableDefId::Constructor(i) => DefId::Contract(i),
+            CallableDefId::Error(i) => DefId::Error(i),
+            CallableDefId::Event(i) => DefId::Event(i),
+            CallableDefId::Modifier(i) => DefId::Modifier(i),
+        }
+    }
+}
+
+impl TryFrom<DefId> for CallableDefId {
+    type Error = DefId;
+
+    fn try_from(def: DefId) -> Result<Self, DefId> {
+        Ok(match def {
+            DefId::Function(i) => Self::Function(i),
+            DefId::Var(i) => Self::Getter(i),
+            DefId::Contract(i) => Self::Constructor(i),
+            DefId::Error(i) => Self::Error(i),
+            DefId::Event(i) => Self::Event(i),
+            DefId::Modifier(i) => Self::Modifier(i),
+            other => return Err(other),
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Scope {
     pub owner: DefId,
