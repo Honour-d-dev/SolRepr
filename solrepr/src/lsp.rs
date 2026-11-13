@@ -331,12 +331,16 @@ impl LspServer {
             self.db.close_file(file);
         }
 
-        // Update the client with the new ignored list.
+        // The params must be an object: JSON-RPC reads an array as positional
+        // arguments, so a client spreads it into the handler instead of
+        // passing it as one value.
         self.send(Message::Notification(Notification::new(
             "solrepr/ignoredRoots".to_string(),
-            serde_json::json!(self.db.ignored_paths().iter()
-                .map(|root| to_url(root).to_string())
-                .collect::<Vec<_>>()),
+            serde_json::json!({
+                "roots": self.db.ignored_paths().iter()
+                    .map(|root| to_url(root).to_string())
+                    .collect::<Vec<_>>(),
+            }),
         )));
 
         self.run_diagnostics();

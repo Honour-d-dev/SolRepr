@@ -24,11 +24,15 @@ impl TempTree {
         .expect("temp dir is UTF-8");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).expect("create src");
+        // Discovery canonicalizes the root, and on Windows that returns the
+        // on-disk casing: `%TEMP%` may spell it differently, and path identity
+        // is case-sensitive.
+        let root = crate::utilities::canonicalize_path(&root).expect("the tree exists");
         Self { root }
     }
 
     fn write(&self, relative: &str, text: &str) {
-        let path = self.root.join(relative);
+        let path = self.path(relative);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create dir");
         }

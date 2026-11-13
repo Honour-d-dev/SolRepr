@@ -72,11 +72,16 @@ export function registerIgnoredRoots(
     refreshIgnoredStatus();
 
     // A reload can change which roots were deduplicated out, so the server
-    // sends the new set instead of the client guessing.
+    // sends the new set instead of the client guessing. The params are an
+    // object: JSON-RPC reads an array as positional arguments and spreads it
+    // into the handler.
     context.subscriptions.push(
-        client.onNotification("solrepr/ignoredRoots", (roots: string[]) => {
-            ignoredRoots = roots.map((uri) => vscode.Uri.parse(uri).fsPath);
-            refreshIgnoredStatus();
-        }),
+        client.onNotification(
+            "solrepr/ignoredRoots",
+            (params: { roots: string[] }) => {
+                ignoredRoots = params.roots.map((uri) => vscode.Uri.parse(uri).fsPath);
+                refreshIgnoredStatus();
+            },
+        ),
     );
 }

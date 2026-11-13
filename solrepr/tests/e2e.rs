@@ -405,7 +405,11 @@ fn a_folder_added_mid_session_is_discovered() {
 
     // The reload applies the new folder and refreshes the ignored set; only
     // then is the second folder's file under a root.
-    server.next_notification("solrepr/ignoredRoots");
+    let roots = server.next_notification("solrepr/ignoredRoots");
+    assert!(
+        roots["roots"].is_array(),
+        "params are an object: an array would be spread into the handler: {roots:#?}"
+    );
 
     let uri = Url::from_file_path(second.root.join("src/B.sol")).expect("B uri");
     server.open_with(&uri, "contract B { uint256 beta; }\n");
@@ -729,11 +733,25 @@ struct TempTree {
     root: PathBuf,
 }
 
+/// Canonical, minus the verbatim prefix Windows adds: `\\?\C:\…` cannot be
+/// turned into a `file:` URL, and the server never produces one either.
+fn canonical(path: &std::path::Path) -> PathBuf {
+    let path = std::fs::canonicalize(path).expect("the tree exists");
+    match path.to_str() {
+        Some(text) => PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text)),
+        None => path,
+    }
+}
+
 impl TempTree {
     fn new(name: &str) -> Self {
         let root = std::env::temp_dir().join(format!("solrepr_e2e_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).expect("create src");
+        // The server canonicalizes every path it receives, and on Windows that
+        // returns the on-disk casing: `%TEMP%` may spell it differently, and
+        // both path and URI identity are case-sensitive.
+        let root = canonical(&root);
         Self { root }
     }
 

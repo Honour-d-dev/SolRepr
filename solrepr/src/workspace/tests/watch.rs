@@ -3,9 +3,17 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use lsp_types::{FileChangeType, FileEvent, Url};
 
+use crate::utilities::normalize_path;
 use crate::workspace::watch::{self, Watched};
 
-fn event(path: &str) -> FileEvent {
+/// An absolute path on every platform: `/w/a.sol` is not one on Windows, so
+/// `Url::from_file_path` would refuse it.
+fn path(name: &str) -> Utf8PathBuf {
+    let temp = Utf8PathBuf::from_path_buf(std::env::temp_dir()).expect("temp dir is UTF-8");
+    normalize_path(&temp.join(name))
+}
+
+fn event(path: &Utf8Path) -> FileEvent {
     FileEvent {
         uri: Url::from_file_path(path).expect("file url"),
         typ: FileChangeType::CHANGED,
@@ -16,11 +24,13 @@ fn event(path: &str) -> FileEvent {
 /// create followed by a change — and the server should act on it once.
 #[test]
 fn a_batch_is_deduplicated_by_path() {
-    let events = vec![event("/w/a.sol"), event("/w/a.sol"), event("/w/b.sol")];
+    let a = path("solrepr_watch_a.sol");
+    let b = path("solrepr_watch_b.sol");
+    let events = vec![event(&a), event(&a), event(&b)];
 
     assert_eq!(
         watch::changed_paths(&events),
-        vec![Utf8PathBuf::from("/w/a.sol"), Utf8PathBuf::from("/w/b.sol")],
+        vec![a, b],
         "the first mention of each path survives, in order"
     );
 }

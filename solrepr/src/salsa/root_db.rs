@@ -57,9 +57,20 @@ pub fn item_tree(db: &dyn RootDb, file: File) -> ItemTree {
     Lowerer::lower(db, file)
 }
 
-#[salsa::tracked]
+#[salsa::tracked(cycle_fn = root_def_map_analysis_recover, cycle_initial = root_def_map_analysis_initial)]
 pub fn root_def_map_analysis(db: &dyn RootDb, root: SourceRootId) -> Analysis<DefMap> {
     Collector::collect_defmap(db, root)
+}
+
+/// The bottom of the domain: a root that has bound no names yet.
+fn root_def_map_analysis_initial(_db: &dyn RootDb, _id: salsa::Id, root: SourceRootId) -> Analysis<DefMap> {
+    Analysis::new(DefMap::empty(root), Arc::from(Vec::new()))
+}
+
+/// Keep what the round computed; salsa re-runs until two rounds agree, which
+/// it decides by comparing the maps and their diagnostics.
+fn root_def_map_analysis_recover( _db: &dyn RootDb, _cycle: &salsa::Cycle, _last_provisional: &Analysis<DefMap>, value: Analysis<DefMap>, _root: SourceRootId) -> Analysis<DefMap> {
+    value
 }
 
 #[salsa::db]

@@ -296,6 +296,20 @@ pub struct DefMap {
     pub unresolved: FxHashMap<FileId, UnresolvedImports>,
 }
 
+impl DefMap {
+    /// No names bound yet: the bottom of the domain a cycle starts from, and
+    /// the only value that is safe to read while the root is still computing.
+    pub fn empty(root: SourceRootId) -> Self {
+        Self {
+            root,
+            files: FxHashMap::default(),
+            scopes: Arena::default(),
+            defs: FxHashMap::default(),
+            unresolved: FxHashMap::default(),
+        }
+    }
+}
+
 pub struct FileCollector<'db, 'collector> {
     file: FileId,
     item_tree: &'db ItemTree,
@@ -742,8 +756,7 @@ impl<'db> Collector<'db> {
                     self.extend_scope(import_id, dep, self.root, &import.import_kind);
                     resolved.insert(import_id);
                 }
-            } else {
-                self.extend_scope(import_id, dep, other_root, &import.import_kind);
+            } else if self.extend_scope(import_id, dep, other_root, &import.import_kind) {
                 resolved.insert(import_id);
             }
         }
@@ -764,16 +777,20 @@ impl<'db> Collector<'db> {
         }
     }
 
+    /// Binds an import into its importing file's scope.
+    /// `false` indicates the depdata isnt available or ready yet (in the case the defmaps are cyclic) 
     fn extend_scope(
         &mut self,
         import: ImportId,
         dep: FileId,
         dep_root: SourceRootId,
         import_kind: &ImportKind,
-    ) {
+    ) -> bool {
+        let Some(dep_data) = self.file_data(dep_root, dep) else {
+            return false;
+        };
         match import_kind {
             ImportKind::Full => {
-                let dep_data = self.file_data(dep_root, dep);
                 let file_data = self.files.get_mut(&import.file).unwrap();
                 push_unique_scope(
                     &mut file_data.imported_scopes,
@@ -782,8 +799,8 @@ impl<'db> Collector<'db> {
                         scope: dep_data.scope,
                     },
                 );
-                for scope in dep_data.imported_scopes {
-                    push_unique_scope(&mut file_data.imported_scopes, scope);
+                for scope in &dep_data.imported_scopes {
+                    push_unique_scope(&mut file_data.imported_scopes, *scope);
                 }
             }
             ImportKind::Named { symbols } => {
@@ -799,7 +816,7 @@ impl<'db> Collector<'db> {
                 }
             }
             ImportKind::Namespace { alias } => {
-                let dep_def_id = self.file_data(dep_root, dep).id;
+                let dep_def_id = dep_data.id;
                 let file_scope = self.files.get(&import.file).unwrap().scope;
                 let mut previous = None;
                 match self
@@ -823,7 +840,8 @@ impl<'db> Collector<'db> {
                 }
             }
         }
-        self.extend_global_usings(import.file, dep, dep_root);
+        self.extend_global_usings(import.file, dep_data, dep_root);
+        true
     }
 
     /// Binds one named-import symbol into its importing file's scope. `false` means the symbol
@@ -886,8 +904,7 @@ impl<'db> Collector<'db> {
         }
     }
 
-    fn extend_global_usings(&mut self, file: FileId, dep: FileId, dep_root: SourceRootId) {
-        let dep_data = self.file_data(dep_root, dep);
+    fn extend_global_usings(&mut self, file: FileId, dep_data: FileData, dep_root: SourceRootId) {
         let file_scope = self.files.get(&file).unwrap().scope;
         // DFS resolution guarantees all globals (up to this point) are already accumulated in dep scope. no need to check imported scopes
         let to_add: Vec<DefId> = {
@@ -919,12 +936,11 @@ impl<'db> Collector<'db> {
         }
     }
 
-    fn file_data(&self, root: SourceRootId, file: FileId) -> FileData {
+    fn file_data(&self, root: SourceRootId, file: FileId) -> Option<FileData> {
         if self.root == root {
-            self.files.get(&file).unwrap().clone()
-        } else {
-            self.db.root_def_map(root).files.get(&file).unwrap().clone()
+            return Some(self.files.get(&file).unwrap().clone());
         }
+        self.db.root_def_map(root).files.get(&file).cloned()
     }
 
     fn find_name_in_file(
@@ -933,7 +949,7 @@ impl<'db> Collector<'db> {
         file: FileId,
         name: &Name,
     ) -> Option<ScopeData> {
-        let file_data = self.file_data(root, file);
+        let file_data = self.file_data(root, file)?;
         let local_scope = ScopeEntry {
             root,
             scope: file_data.scope,
@@ -950,13 +966,7 @@ impl<'db> Collector<'db> {
         if self.root == scope.root {
             self.scopes.index(scope.scope).by_name.get(name).cloned()
         } else {
-            self.db
-                .root_def_map(scope.root)
-                .scopes
-                .index(scope.scope)
-                .by_name
-                .get(name)
-                .cloned()
+            self.db.root_def_map(scope.root).scopes.index(scope.scope).by_name.get(name).cloned()
         }
     }
 }
