@@ -1,50 +1,76 @@
 use crate::utilities::fixture_path;
-use crate::workspace::{PackageId, discover_workspace, workspace_root};
+use crate::workspace::{
+    Package, PackageId, RootWithFiles, WorkspaceWithFiles, discover_workspace, discover_workspaces,
+    workspace_roots,
+};
 use camino::Utf8PathBuf;
-use lsp_types::InitializeParams;
+use lsp_types::{InitializeParams, Url};
 
 fn params(value: serde_json::Value) -> InitializeParams {
     serde_json::from_value(value).expect("a valid InitializeParams")
 }
 
-/// `rootUri` wins when the client sends it.
-#[test]
-fn workspace_root_prefers_root_uri() {
-    let root = fixture_path("fixtures/workspaces/foundry/nested");
-    let folder = fixture_path("fixtures/workspaces/foundry/container");
-    let params = params(serde_json::json!({
-        "processId": null,
-        "rootUri": lsp_types::Url::from_file_path(&root).unwrap().to_string(),
-        "capabilities": {},
-        "workspaceFolders": [{
-            "uri": lsp_types::Url::from_file_path(&folder).unwrap().to_string(),
-            "name": "folder",
-        }],
-    }));
-    assert_eq!(workspace_root(&params).unwrap(), root);
+fn folder(path: &camino::Utf8Path) -> serde_json::Value {
+    serde_json::json!({
+        "uri": Url::from_file_path(path).expect("folder uri").to_string(),
+        "name": "folder",
+    })
 }
 
-/// `rootUri` is deprecated and may be null, so the first workspace folder
-/// is the next candidate.
+/// Every advertised folder is a root: a multi-folder session discovers each
+/// one, and the merged result is what the database sees.
 #[test]
-fn workspace_root_falls_back_to_a_workspace_folder() {
-    let folder = fixture_path("fixtures/workspaces/foundry/container");
+fn workspace_roots_are_the_advertised_folders() {
+    let first = fixture_path("fixtures/workspaces/foundry/nested");
+    let second = fixture_path("fixtures/workspaces/foundry/container");
     let params = params(serde_json::json!({
         "processId": null,
         "rootUri": null,
         "capabilities": {},
-        "workspaceFolders": [{
-            "uri": lsp_types::Url::from_file_path(&folder).unwrap().to_string(),
-            "name": "folder",
-        }],
+        "workspaceFolders": [folder(&first), folder(&second)],
     }));
-    assert_eq!(workspace_root(&params).unwrap(), folder);
+
+    assert_eq!(
+        workspace_roots(&params).unwrap().to_vec(),
+        vec![first, second],
+        "folders keep the order the client sent"
+    );
 }
 
-/// With neither, the process working directory is used rather than
-/// failing the initialize handshake.
+/// `rootUri` is deprecated but still sent by single-folder clients, so it is
+/// the fallback when no folder is advertised.
 #[test]
-fn workspace_root_falls_back_to_the_working_directory() {
+fn workspace_roots_fall_back_to_root_uri() {
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
+    let params = params(serde_json::json!({
+        "processId": null,
+        "rootUri": Url::from_file_path(&root).unwrap().to_string(),
+        "capabilities": {},
+        "workspaceFolders": null,
+    }));
+
+    assert_eq!(workspace_roots(&params).unwrap().to_vec(), vec![root]);
+}
+
+/// A folder the server cannot read is skipped rather than failing the
+/// handshake, and an all-unreadable set falls back like an empty one.
+#[test]
+fn an_unreadable_folder_is_skipped() {
+    let params = params(serde_json::json!({
+        "processId": null,
+        "rootUri": null,
+        "capabilities": {},
+        "workspaceFolders": [{ "uri": "untitled:Untitled-1", "name": "virtual" }],
+    }));
+    let expected = Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap()).unwrap();
+
+    assert_eq!(workspace_roots(&params).unwrap().to_vec(), vec![expected]);
+}
+
+/// With neither, the process working directory is used rather than failing the
+/// initialize handshake.
+#[test]
+fn workspace_roots_fall_back_to_the_working_directory() {
     let params = params(serde_json::json!({
         "processId": null,
         "rootUri": null,
@@ -52,7 +78,58 @@ fn workspace_root_falls_back_to_the_working_directory() {
         "workspaceFolders": null,
     }));
     let expected = Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap()).unwrap();
-    assert_eq!(workspace_root(&params).unwrap(), expected);
+
+    assert_eq!(workspace_roots(&params).unwrap().to_vec(), vec![expected]);
+}
+
+/// One folder skips the merge: the discovery is the answer.
+#[test]
+fn one_folder_skips_the_merge() {
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
+
+    assert_eq!(
+        discover_workspaces(std::slice::from_ref(&root)),
+        discover_workspace(&root)
+    );
+}
+
+/// Folders nest and share dependencies, so a merge dedupes by identity and lets
+/// an opened folder win over another folder's ignored list.
+#[test]
+fn merging_folders_dedupes_shared_facts() {
+    let workspace = |root: &str, package: &str, ignored: &[&str]| WorkspaceWithFiles {
+        packages: vec![Package {
+            root: Utf8PathBuf::from(package),
+            remappings: Vec::new(),
+        }],
+        roots: vec![RootWithFiles {
+            path: Utf8PathBuf::from(root),
+            package_id: PackageId(Utf8PathBuf::from(package)),
+            files: vec![Utf8PathBuf::from(format!("{root}/A.sol"))],
+            is_dependency: false,
+        }],
+        ignored_roots: ignored.iter().map(Utf8PathBuf::from).collect(),
+    };
+
+    let outer = workspace("/proj", "/proj", &["/proj/lib/dep", "/proj/lib/other"]);
+    let inner = workspace("/proj/lib/dep", "/proj/lib/dep", &[]);
+    let merged = WorkspaceWithFiles::merge([outer, inner]);
+
+    assert_eq!(
+        merged
+            .roots
+            .iter()
+            .map(|root| root.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/proj", "/proj/lib/dep"],
+        "both folders contribute their roots, and a shared path is kept once"
+    );
+    assert_eq!(merged.packages.len(), 2, "a package is kept once per root");
+    assert_eq!(
+        merged.ignored_roots,
+        vec![Utf8PathBuf::from("/proj/lib/other")],
+        "a directory another folder opened is not ignored"
+    );
 }
 
 #[test]
@@ -79,9 +156,9 @@ fn nested_duplicate_library_is_skipped_but_unique_transitive_dependency_is_kept(
     );
     assert!(
         !discovered
-            .source_roots
+            .roots
             .iter()
-            .any(|source| source.root.ends_with("dependencies/dep-a/lib/duplicate/src"))
+            .any(|source| source.path.ends_with("dependencies/dep-a/lib/duplicate/src"))
     );
     // The skipped copy stays on the ignored list — out of the
     // compilation unit but tracked so opened files there stay silent.
@@ -112,8 +189,8 @@ fn discovers_hardhat_fixture_sources() {
     let discovered = discover_workspace(&root);
 
     assert_eq!(discovered.packages.len(), 1);
-    assert!(discovered.source_roots.iter().any(|source| {
-        source.root.ends_with("contracts") && !source.files.is_empty()
+    assert!(discovered.roots.iter().any(|source| {
+        source.path.ends_with("contracts") && !source.files.is_empty()
     }));
 }
 
@@ -122,9 +199,9 @@ fn discovers_hardhat_and_foundry_sources_in_hybrid_fixture() {
     let root = fixture_path("fixtures/workspaces/hybrid");
     let discovered = discover_workspace(&root);
     let roots: Vec<_> = discovered
-        .source_roots
+        .roots
         .iter()
-        .map(|source| source.root.file_name().unwrap_or_default())
+        .map(|source| source.path.file_name().unwrap_or_default())
         .collect();
 
     assert_eq!(discovered.packages.len(), 1);
@@ -138,9 +215,9 @@ fn standalone_fixture_gets_a_frameworkless_package_and_source_root() {
     let discovered = discover_workspace(&root);
 
     assert_eq!(discovered.packages.len(), 1);
-    assert_eq!(discovered.source_roots.len(), 1);
-    let source = &discovered.source_roots[0];
-    assert_eq!(source.package_id, PackageId(0));
+    assert_eq!(discovered.roots.len(), 1);
+    let source = &discovered.roots[0];
+    assert_eq!(source.package_id, PackageId(root.clone()));
     assert!(!source.is_dependency);
     assert!(
         source
@@ -158,9 +235,9 @@ fn container_root_indexes_loose_files_without_swallowing_nested_packages() {
     // The manifestless root and the nested foundry package coexist.
     assert_eq!(discovered.packages.len(), 2);
     let root_source = discovered
-        .source_roots
+        .roots
         .iter()
-        .find(|source| source.root == root)
+        .find(|source| source.path == root)
         .expect("a frameworkless source root at the container root");
     assert!(
         root_source
@@ -172,9 +249,9 @@ fn container_root_indexes_loose_files_without_swallowing_nested_packages() {
     assert!(!root_source.files.iter().any(|file| file.ends_with("P.sol")));
     assert!(
         discovered
-            .source_roots
+            .roots
             .iter()
-            .any(|source| source.root.ends_with("a/b/inner/src"))
+            .any(|source| source.path.ends_with("a/b/inner/src"))
     );
 }
 
@@ -197,11 +274,11 @@ fn remappings_only_root_keeps_remappings_and_indexes_vendored_files() {
     // The remapping names vendor/dep — a dependency package of its own,
     // not part of the root's source root.
     let dependency = discovered
-        .source_roots
+        .roots
         .iter()
-        .find(|source| source.is_dependency && source.root.ends_with("vendor/dep"))
+        .find(|source| source.is_dependency && source.path.ends_with("vendor/dep"))
         .expect("vendor/dep is a dependency source root");
-    assert!(dependency.root.ends_with("vendor/dep"));
+    assert!(dependency.path.ends_with("vendor/dep"));
     assert!(
         dependency
             .files
@@ -209,9 +286,9 @@ fn remappings_only_root_keeps_remappings_and_indexes_vendored_files() {
             .any(|file| file.ends_with("Dep.sol"))
     );
     let source = discovered
-        .source_roots
+        .roots
         .iter()
-        .find(|source| source.root == root)
+        .find(|source| source.path == root)
         .expect("the package root is the source root");
     assert!(!source.files.iter().any(|file| file.ends_with("Dep.sol")));
 }
@@ -222,11 +299,11 @@ fn external_remapping_target_becomes_a_dependency_source_root() {
     let discovered = discover_workspace(&root);
 
     let dependency = discovered
-        .source_roots
+        .roots
         .iter()
-        .find(|source| source.is_dependency && source.root.ends_with("ext_lib"))
+        .find(|source| source.is_dependency && source.path.ends_with("ext_lib"))
         .expect("the external remapping target is a dependency source root");
-    assert!(dependency.root.ends_with("ext_lib"));
+    assert!(dependency.path.ends_with("ext_lib"));
     assert!(
         dependency
             .files
@@ -242,9 +319,9 @@ fn empty_workspace_root_keeps_a_fallback_source_root() {
     let discovered = discover_workspace(&root);
 
     assert_eq!(discovered.packages.len(), 1);
-    assert_eq!(discovered.source_roots.len(), 1);
-    assert!(!discovered.source_roots[0].is_dependency);
-    assert!(discovered.source_roots[0].files.is_empty());
+    assert_eq!(discovered.roots.len(), 1);
+    assert!(!discovered.roots[0].is_dependency);
+    assert!(discovered.roots[0].files.is_empty());
 }
 
 #[test]
@@ -263,10 +340,10 @@ fn hardhat_imports_dir_discovers_vendored_dependency_and_synthesizes_remapping()
 
     // The configured (non-default) sources/tests dirs are source roots.
     let source_roots: Vec<_> = discovered
-        .source_roots
+        .roots
         .iter()
         .filter(|source| !source.is_dependency)
-        .map(|source| source.root.file_name().unwrap_or_default())
+        .map(|source| source.path.file_name().unwrap_or_default())
         .collect();
     assert!(source_roots.contains(&"src"));
     assert!(source_roots.contains(&"spec"));
@@ -335,12 +412,12 @@ fn file_root_discovers_the_parent_package() {
             .any(|remapping| remapping.prefix == "ext/"),
         "the parent's remappings.txt is read"
     );
-    assert!(discovered.source_roots.iter().any(|source| {
-        source.is_dependency && source.root.ends_with("ext_lib")
+    assert!(discovered.roots.iter().any(|source| {
+        source.is_dependency && source.path.ends_with("ext_lib")
     }));
     assert!(
         discovered
-            .source_roots
+            .roots
             .iter()
             .flat_map(|source| source.files.iter())
             .any(|file| file.ends_with("Main.sol"))
@@ -355,11 +432,11 @@ fn manifestless_library_child_is_a_named_dependency() {
     let discovered = discover_workspace(&root);
 
     let dependency = discovered
-        .source_roots
+        .roots
         .iter()
-        .find(|source| source.is_dependency && source.root.ends_with("dependencies/plain"))
+        .find(|source| source.is_dependency && source.path.ends_with("dependencies/plain"))
         .expect("the manifestless library is a dependency source root");
-    assert!(dependency.root.ends_with("dependencies/plain"));
+    assert!(dependency.path.ends_with("dependencies/plain"));
     assert!(
         dependency
             .files
@@ -386,9 +463,9 @@ fn nested_manifest_keeps_container_dirs_transparent() {
             .any(|package| package.root.ends_with("a/b/inner"))
     );
     let source = discovered
-        .source_roots
+        .roots
         .iter()
-        .find(|source| source.root == root)
+        .find(|source| source.path == root)
         .expect("a frameworkless source root owns the loose file");
     assert!(source.files.iter().any(|file| file.ends_with("Loose.sol")));
     assert!(!source.files.iter().any(|file| file.ends_with("P.sol")));
@@ -411,9 +488,9 @@ fn remapping_into_a_source_dir_resolves_to_the_package_root() {
         "the src-level remapping target deduplicates with the library package"
     );
     let dependency = discovered
-        .source_roots
+        .roots
         .iter()
-        .find(|source| source.is_dependency && source.root.ends_with("dependencies/fs"))
+        .find(|source| source.is_dependency && source.path.ends_with("dependencies/fs"))
         .expect("dependencies/fs is a dependency source root");
     assert!(dependency.files.iter().any(|file| file.ends_with("Lib.sol")));
 }
@@ -425,11 +502,11 @@ fn remapping_dependencies_are_traversed_transitively() {
     let root = fixture_path("fixtures/workspaces/foundry/remappings/external/proj");
     let discovered = discover_workspace(&root);
 
-    assert!(discovered.source_roots.iter().any(|source| {
-        source.is_dependency && source.root.ends_with("ext_a")
+    assert!(discovered.roots.iter().any(|source| {
+        source.is_dependency && source.path.ends_with("ext_a")
     }));
-    assert!(discovered.source_roots.iter().any(|source| {
-        source.is_dependency && source.root.ends_with("ext_b")
+    assert!(discovered.roots.iter().any(|source| {
+        source.is_dependency && source.path.ends_with("ext_b")
     }));
 }
 
@@ -452,8 +529,8 @@ fn remapping_into_an_ignored_library_copy_stays_ignored() {
             .iter()
             .any(|package| package.root.ends_with("dep-a/lib/duplicate"))
     );
-    assert!(!discovered.source_roots.iter().any(|source| {
-        source.root.ends_with("dep-a/lib/duplicate")
+    assert!(!discovered.roots.iter().any(|source| {
+        source.path.ends_with("dep-a/lib/duplicate")
     }));
 }
 
@@ -479,12 +556,38 @@ fn dependency_dev_dirs_are_ignored_and_not_indexed() {
     );
 
     let dep = discovered
-        .source_roots
+        .roots
         .iter()
-        .find(|source| source.root.ends_with("lib/dep"))
+        .find(|source| source.path.ends_with("lib/dep"))
         .expect("the dep indexes from its package root");
     assert!(dep.is_dependency);
     assert!(dep.files.iter().any(|file| file.ends_with("Dep.sol")));
     assert!(!dep.files.iter().any(|file| file.ends_with("Dep.t.sol")));
     assert!(!dep.files.iter().any(|file| file.ends_with("Deploy.s.sol")));
+}
+
+/// A package is identified by its root directory, not by its position in the
+/// package list — so adding a package cannot renumber a surviving root.
+#[test]
+fn a_source_root_names_its_package_by_path() {
+    let root = fixture_path("fixtures/workspaces/foundry/nested");
+    let discovered = discover_workspace(&root);
+
+    assert!(
+        discovered
+            .roots
+            .iter()
+            .any(|source| source.path != source.package_id.0),
+        "a foundry package's source root is its src dir, not its package root"
+    );
+    for source in &discovered.roots {
+        assert!(
+            discovered
+                .packages
+                .iter()
+                .any(|package| package.root == source.package_id.0),
+            "{} names a package that is not in the workspace",
+            source.path
+        );
+    }
 }
