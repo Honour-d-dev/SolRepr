@@ -3,7 +3,7 @@ use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::ir::def_map::*;
 use crate::salsa::Db;
 use crate::salsa::root_db::RootDb;
-use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, SourceRoot, Workspace};
+use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles};
 use camino::Utf8PathBuf;
 use ropey::Rope;
 
@@ -11,21 +11,21 @@ const ROOT: &str = "/tmp/def_map_tests";
 
 fn db_with(files: &[(&str, &str)]) -> Db {
     let root = Utf8PathBuf::from(ROOT);
-    let workspace = Workspace {
+    let workspace = WorkspaceWithFiles {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
             root: root.clone(),
             remappings: Vec::new(),
         }],
-        source_roots: vec![SourceRoot {
-            root: root.clone(),
-            package_id: PackageId(0),
+        roots: vec![RootWithFiles {
+            path: root.clone(),
+            package_id: PackageId(root.clone()),
             is_dependency: false,
             files: files
                 .iter()
                 .map(|(path, text)| LoadedFile {
                     path: root.join(path),
-                    text: Rope::from_str(text),
+                    text: Some(Rope::from_str(text)),
                 })
                 .collect(),
         }],

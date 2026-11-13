@@ -390,39 +390,36 @@ impl ItemBuilder {
 
         if let Some(body) = node.child_by_field_id(FieldKind::BODY.into()) {
             for member in body.named_children(&mut body.walk()) {
-                match member.kind_id().into() {
-                    NodeKind::STRUCT_MEMBER => {
-                        let Some((name, range)) =
-                            member.child_by_field_id(FieldKind::NAME.into()).map(|n| {
-                                (
-                                    self.root().text_by_range(n.byte_range()).trim().into(),
-                                    NodeRange::from(&n),
-                                )
-                            })
-                        else {
-                            continue;
-                        };
+                if let NodeKind::STRUCT_MEMBER = member.kind_id().into() {
+                    let Some((name, range)) =
+                        member.child_by_field_id(FieldKind::NAME.into()).map(|n| {
+                            (
+                                self.root().text_by_range(n.byte_range()).trim().into(),
+                                NodeRange::from(&n),
+                            )
+                        })
+                    else {
+                        continue;
+                    };
 
-                        let Some(ty_ref) = member
-                            .child_by_field_id(FieldKind::TYPE.into())
-                            .and_then(|ty| self.lower_type(ty))
-                        else {
-                            continue;
-                        };
+                    let Some(ty_ref) = member
+                        .child_by_field_id(FieldKind::TYPE.into())
+                        .and_then(|ty| self.lower_type(ty))
+                    else {
+                        continue;
+                    };
 
-                        let field_id = fields.alloc(Field { name, ty_ref });
+                    let field_id = fields.alloc(Field { name, ty_ref });
 
-                        self.source_map
-                            .field_ranges
-                            .insert(field_id, NodeRange::from(&member));
-                        self.source_map
-                            .range_to_semantic
-                            .insert(NodeRange::from(&member), SemanticId::Field(field_id));
-                        self.source_map
-                            .range_to_semantic
-                            .insert(range, SemanticId::Field(field_id));
-                    }
-                    _ => {}
+                    self.source_map
+                        .field_ranges
+                        .insert(field_id, NodeRange::from(&member));
+                    self.source_map
+                        .range_to_semantic
+                        .insert(NodeRange::from(&member), SemanticId::Field(field_id));
+                    self.source_map
+                        .range_to_semantic
+                        .insert(range, SemanticId::Field(field_id));
                 }
             }
         }
@@ -511,11 +508,8 @@ impl ItemBuilder {
             .map(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
-            match child.kind_id().into() {
-                NodeKind::ERROR_PARAMETER => {
-                    self.build_parameter(&mut parameters, child);
-                }
-                _ => {}
+            if let NodeKind::ERROR_PARAMETER = child.kind_id().into() {
+                self.build_parameter(&mut parameters, child);
             }
         }
 

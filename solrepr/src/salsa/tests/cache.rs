@@ -58,7 +58,7 @@ fn fixture() -> (Db, File, Recorder) {
     let recorder = Recorder::default();
     let sink = recorder.clone();
     let workspace = test_workspace(SOURCE);
-    let path = workspace.source_roots[0].files[0].path.clone();
+    let path = workspace.roots[0].files[0].path.clone();
     let db = Db::with_events(workspace, move |event| {
         if let salsa::EventKind::WillExecute { database_key } = event.kind {
             sink.seen.lock().unwrap().push(format!("{database_key:?}"));
@@ -179,13 +179,13 @@ fn lsp_diagnostics_survives_an_edit_in_another_file() {
     let recorder = Recorder::default();
     let sink = recorder.clone();
     let mut workspace = test_workspace(SOURCE);
-    let root = workspace.source_roots[0].root.clone();
+    let root = workspace.roots[0].path.clone();
     let other_path = root.join("src/Other.sol");
-    workspace.source_roots[0].files.push(LoadedFile {
+    workspace.roots[0].files.push(LoadedFile {
         path: other_path.clone(),
-        text: Rope::from_str(OTHER),
+        text: Some(Rope::from_str(OTHER)),
     });
-    let path = workspace.source_roots[0].files[0].path.clone();
+    let path = workspace.roots[0].files[0].path.clone();
     let mut db = Db::with_events(workspace, move |event| {
         if let salsa::EventKind::WillExecute { database_key } = event.kind {
             sink.seen.lock().unwrap().push(format!("{database_key:?}"));

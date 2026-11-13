@@ -4,7 +4,7 @@ use camino::Utf8Path;
 use tree_sitter::Parser;
 use triomphe::Arc;
 
-use super::db::{File, FileId, Packages, Db, SourceRootId};
+use super::db::{File, FileId, FilesRevision, Packages, Db, SourceRootId};
 use crate::ast::kinds::FieldKind;
 use crate::ast::{Ast, AstIdMap, AstNode, NodeRange};
 use crate::hir::analysis::Analysis;
@@ -31,9 +31,10 @@ pub fn package_config(db: &dyn salsa::Database, root: SourceRootId) -> Package {
     let package_id = root.package_id(db);
     Packages::get(db)
         .packages(db)
-        .get(package_id.0)
+        .iter()
+        .find(|package| package.root == package_id.0)
         .cloned()
-        .unwrap()
+        .expect("a source root names a package that is not in the workspace")
 }
 
 #[salsa::tracked]
@@ -106,6 +107,7 @@ impl RootDb for Db {
     }
 
     fn file_source_root(&self, file: FileId) -> SourceRootId {
+        FilesRevision::get(self).revision(self);
         self.file_source_root(file).expect("file has no root")
     }
 
@@ -143,6 +145,7 @@ impl RootDb for Db {
     }
 
     fn resolve_to_file(&self, from: FileId, rel_path: &str) -> Option<FileId> {
+        FilesRevision::get(self).revision(self);
         self.resolve_to_file(from, rel_path)
     }
 

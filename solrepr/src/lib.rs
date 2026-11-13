@@ -11,5 +11,6 @@ mod live_docs;
 mod salsa;
 mod utilities;
 mod workspace;
+mod worker;
 
 pub mod lsp;

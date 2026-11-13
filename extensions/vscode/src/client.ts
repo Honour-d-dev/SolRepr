@@ -160,14 +160,11 @@ export async function startClient(
     }
 
     const isDev = context.extensionMode === vscode.ExtensionMode.Development;
+    // The level is the only cache-logging knob: `debug` shows misses, `trace`
+    // adds hits and blocks. A release binary installs no subscriber at all, so
+    // this only has an effect on a development build.
     const env = { ...process.env };
     env.RUST_LOG = isDev ? "solrepr=debug" : "solrepr=info";
-    if (isDev) {
-        // The dev binary installs the salsa cache observer; this also opts a
-        // release binary in when it is used from a development host.
-        env.SOLREPR_SALSA_EVENTS = "1";
-        // env.SOLREPR_SALSA_HITS = "1"; // also log cache hits (noisy)
-    }
 
     const serverOptions: ServerOptions = {
         command: serverPath,
@@ -202,9 +199,6 @@ export async function startClient(
         await client.setTrace(traceLevel);
         channels.output.appendLine(`SolRepr started: ${serverPath}`);
         channels.output.appendLine(`Server env RUST_LOG=${env.RUST_LOG}`);
-        channels.output.appendLine(
-            `Server env SOLREPR_SALSA_EVENTS=${env.SOLREPR_SALSA_EVENTS ?? "0"}`,
-        );
         return client;
     } catch (error) {
         const msg = `Failed to start SolRepr: ${String(error)}`;

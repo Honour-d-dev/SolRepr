@@ -12,7 +12,7 @@ export function registerIgnoredRoots(
     const experimental = client.initializeResult?.capabilities.experimental as
         | { ignoredRoots?: string[] }
         | undefined;
-    const ignoredRoots = (experimental?.ignoredRoots ?? []).map(
+    let ignoredRoots = (experimental?.ignoredRoots ?? []).map(
         (uri) => vscode.Uri.parse(uri).fsPath,
     );
 
@@ -70,4 +70,13 @@ export function registerIgnoredRoots(
         vscode.window.onDidChangeActiveTextEditor(refreshIgnoredStatus),
     );
     refreshIgnoredStatus();
+
+    // A reload can change which roots were deduplicated out, so the server
+    // sends the new set instead of the client guessing.
+    context.subscriptions.push(
+        client.onNotification("solrepr/ignoredRoots", (roots: string[]) => {
+            ignoredRoots = roots.map((uri) => vscode.Uri.parse(uri).fsPath);
+            refreshIgnoredStatus();
+        }),
+    );
 }

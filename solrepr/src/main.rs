@@ -21,28 +21,27 @@ fn main() -> anyhow::Result<()> {
     // tiny cli wrapper to support basic commands like version etc
     match std::env::args().nth(1).as_deref() {
         None | Some("--stdio") => {
-            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("solrepr=debug"))
-                .add_directive(
-                    "lsp_server::msg=off"
-                        .parse()
-                        .expect("valid tracing directive"),
-                )
-                .add_directive(
-                    "lsp_server::stdio=off"
-                        .parse()
-                        .expect("valid tracing directive"),
-                );
+            // Tracing is a development tool: every log line is a checkpoint or a
+            // cache event, so a release build installs no subscriber and pays
+            // nothing for it. `Db` decides whether to observe salsa by asking
+            // tracing whether anything is enabled.
+            #[cfg(debug_assertions)]
+            {
+                let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("solrepr=debug"))
+                    .add_directive("lsp_server::msg=off".parse().expect("valid tracing directive"))
+                    .add_directive("lsp_server::stdio=off".parse().expect("valid tracing directive"));
 
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_writer(std::io::stderr)
-                .with_ansi(false)
-                .without_time()
-                .with_level(false)
-                .with_target(false)
-                .init();
-            tracing::info!("solrepr {} starting", env!("CARGO_PKG_VERSION"));
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::io::stderr)
+                    .with_ansi(false)
+                    .without_time()
+                    .with_level(false)
+                    .with_target(false)
+                    .init();
+                tracing::info!("solrepr {} starting", env!("CARGO_PKG_VERSION"));
+            }
 
             let (connection, io_threads) = Connection::stdio();
 

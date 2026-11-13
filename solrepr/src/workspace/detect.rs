@@ -26,16 +26,24 @@ const HARDHAT_CONFIGS: [&str; 6] = [
     "hardhat.config.mjs",
 ];
 
+/// A file whose contents decide the shape of a package. Editing one can add,
+/// move, or remove source roots, so discovery has to run again — unlike a
+/// `.sol` file, which is one path in or out of an existing root.
+pub(crate) fn is_manifest(path: &Utf8Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    matches!(name, "foundry.toml" | "remappings.txt" | "package.json")
+        || HARDHAT_CONFIGS.contains(&name)
+}
+
 /// Basenames that conventionally hold a package's Solidity sources — a
 /// remapping target ending in one names the parent as the package root.
 const SOURCE_DIR_NAMES: [&str; 5] = ["src", "contracts", "test", "tests", "script"];
 
-/// A package digested from the manifests at its root: its source roots,
-/// ignored dev dirs, completed remapping table, and outgoing package edges.
-///
-/// A package can have Foundry and Hardhat configuration at the same time. The
-/// descriptor records the resolved facts those configs declare — rather than
-/// assigning one package kind to the root.
+/// A package digested from its manifests: source roots, dev dirs, remappings
+/// and outgoing edges. Foundry and Hardhat config can coexist, so this records
+/// the resolved facts rather than one package kind.
 #[derive(Debug, Clone, Default)]
 pub(super) struct PackageDescriptor {
     pub root: Utf8PathBuf,
@@ -185,10 +193,8 @@ fn manifests_in(dir: &Utf8Path) -> Option<Manifests> {
     (!manifests.is_empty()).then_some(manifests)
 }
 
-/// The digested package at a manifest-bearing root. A package can have
-/// Foundry and Hardhat configuration at the same time; the descriptor records
-/// the resolved facts the configs declare rather than assigning one package
-/// kind to the root.
+/// The digested package at a manifest-bearing root: both configs' facts,
+/// resolved into one descriptor.
 fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -> PackageDescriptor {
     let root = normalize_path(dir);
     let foundry = manifests.foundry_toml.as_ref().and_then(|path| {
@@ -258,12 +264,8 @@ fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -
         })
     }));
 
-    // The completed remapping table. forge synthesizes a
-    // `<dir-name>/ -> <child source dir>` remapping for every library in a
-    // `libs` directory unless `auto_detect_remappings` is off; hardhat does
-    // the same for vendored `imports` unconditionally. Explicit remappings
-    // always claim a prefix first; npm dependencies claim theirs before
-    // synthesized libraries.
+    // forge and hardhat synthesize `<dir>/ -> <child src>` for vendored
+    // libraries; explicit remappings claim their prefixes first.
     for (name, dependency_root) in &resolved_dependencies {
         remappings.push(Remapping {
             context: None,
@@ -329,10 +331,9 @@ fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -
     }
 }
 
-/// `Workspace` edges for each npm `workspaces` glob — members must contain a
-/// package.json, so globbing for it directly encodes that rule and handles
-/// `*`, `**`, `?`, and `[...]` for free. Brace alternates (`{a,b}`) are
-/// expanded here since `glob` lacks them.
+/// `Workspace` edges for each npm `workspaces` glob. Globbing for
+/// `package.json` encodes the "members must have one" rule; braces are expanded
+/// here because `glob` lacks them.
 fn workspace_references(root: &Utf8Path, patterns: &[String]) -> Vec<PackageReference> {
     let mut references = Vec::new();
     for pattern in patterns {
@@ -358,9 +359,8 @@ fn workspace_references(root: &Utf8Path, patterns: &[String]) -> Vec<PackageRefe
     references
 }
 
-/// forge's auto-detected library remappings — and hardhat's vendored
-/// `imports` equivalents: `<dir-name>/ -> <child source dir>` per immediate
-/// child. `claimed` starts with the explicitly configured prefixes; the first
+/// `<dir-name>/ -> <child source dir>` per immediate child, for forge's
+/// auto-detected libraries and hardhat's vendored `imports`. The first
 /// remapping to claim a prefix wins.
 fn synthesize_library_remappings(
     libraries: &[(String, Utf8PathBuf)],
@@ -385,15 +385,9 @@ fn synthesize_library_remappings(
     }
 }
 
-/// The package root a remapping target belongs to: the nearest
-/// manifest-bearing ancestor below the declaring package, else the parent of
-/// a conventional source directory (`forge-std/=lib/forge-std/src/` belongs
-/// to `lib/forge-std`), else the target itself.
-///
-/// `None` when the target is not a directory, or resolves to the declaring
-/// package's own root or an ancestor — a self or enclosing mapping adds no
-/// package. The ancestor walk stops at the declaring package's boundary:
-/// climbing into the declaring root would collapse the target into self.
+/// The package root a remapping target belongs to: the nearest manifest-bearing
+/// ancestor below the declaring package, else the parent of a conventional
+/// source dir, else the target. `None` for a self or enclosing mapping.
 fn resolve_package_root(declaring: &Utf8Path, target: &Utf8Path) -> Option<Utf8PathBuf> {
     if !target.is_dir() {
         return None;

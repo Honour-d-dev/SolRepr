@@ -167,6 +167,32 @@ pub(crate) fn byte_to_point(r: &Rope, byte_idx: usize) -> Point {
     }
 }
 
+pub(crate) fn log_info(message: impl Into<String>) {
+    tracing::info!("{}", message.into());
+}
+
+/// Salsa events logger (for debug only): 
+/// `WillExecute` is a miss/recompute, `DidValidateMemoizedValue` is a hit. 
+/// The level is the knob — `debug` shows misses, `trace` adds hits and blocks.
+pub(crate) fn logger(event: salsa::Event) {
+    use salsa::EventKind;
+    match event.kind {
+        EventKind::WillExecute { database_key } => {
+            tracing::debug!(query = ?database_key, "execute")
+        }
+        EventKind::DidValidateMemoizedValue { database_key } => {
+            tracing::trace!(query = ?database_key, "hit")
+        }
+        EventKind::WillBlockOn { database_key, .. } => {
+            tracing::trace!(query = ?database_key, "blocked")
+        }
+        EventKind::WillIterateCycle { database_key, iteration_count, } => {
+            tracing::warn!(query = ?database_key, iteration_count = ?iteration_count, "cycle")
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn print_tree(
     cursor: &mut tree_sitter::TreeCursor,
     source_code: &str,
@@ -208,10 +234,6 @@ pub(crate) fn print_named_tree(
         result.push_str(&print_named_tree(cursor, source_code, indentation + 2));
     });
     result
-}
-
-pub(crate) fn log_info(message: impl Into<String>) {
-    tracing::info!("{}", message.into());
 }
 
 /**

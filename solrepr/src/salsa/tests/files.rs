@@ -1,11 +1,11 @@
 use crate::salsa::Db;
 use crate::utilities::fixture_path;
-use crate::workspace::loader::load_root;
+use crate::workspace::loader::load_roots;
 use camino::Utf8PathBuf;
 
 fn standalone_db() -> Db {
     let root = fixture_path("fixtures/workspaces/standalone/basic");
-    Db::new(load_root(root))
+    Db::new(load_roots(root))
 }
 
 /// A stray document still attaches when a source root encloses it —
@@ -13,7 +13,7 @@ fn standalone_db() -> Db {
 #[test]
 fn stray_file_under_a_source_root_attaches_to_that_root() {
     let root = fixture_path("fixtures/workspaces/foundry/container");
-    let mut db = Db::new(load_root(root.clone()));
+    let mut db = Db::new(load_roots(root.clone()));
     let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/workspaces/foundry/container/a/b/inner/stray.sol");
 
@@ -30,7 +30,7 @@ fn stray_file_under_a_source_root_attaches_to_that_root() {
 #[test]
 fn stray_file_outside_source_dirs_is_not_indexed() {
     let root = fixture_path("fixtures/workspaces/foundry/nested");
-    let mut db = Db::new(load_root(root));
+    let mut db = Db::new(load_roots(root));
     let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/workspaces/foundry/nested/stray.sol");
 
@@ -61,7 +61,7 @@ fn file_outside_every_source_root_is_not_indexed() {
 #[test]
 fn remappings_only_workspace_resolves_vendored_imports() {
     let fixture = fixture_path("fixtures/workspaces/foundry/remappings/vendor");
-    let db = Db::new(load_root(fixture.clone()));
+    let db = Db::new(load_roots(fixture.clone()));
     let main = db
         .file(&fixture.join("Main.sol"))
         .expect("the workspace indexes Main.sol");
@@ -76,7 +76,7 @@ fn remappings_only_workspace_resolves_vendored_imports() {
 #[test]
 fn external_remapping_target_resolves_into_a_synthesized_dependency() {
     let fixture = fixture_path("fixtures/workspaces/foundry/remappings/external/proj");
-    let db = Db::new(load_root(fixture.clone()));
+    let db = Db::new(load_roots(fixture.clone()));
     let main = db
         .file(&fixture.join("Main.sol"))
         .expect("the workspace indexes Main.sol");
@@ -92,7 +92,7 @@ fn external_remapping_target_resolves_into_a_synthesized_dependency() {
 #[test]
 fn manifestless_library_resolves_through_the_synthesized_remapping() {
     let fixture = fixture_path("fixtures/workspaces/foundry/nested");
-    let db = Db::new(load_root(fixture.clone()));
+    let db = Db::new(load_roots(fixture.clone()));
     let main = db
         .file(&fixture.join("src/Root.sol"))
         .expect("the workspace indexes src/Root.sol");
@@ -107,7 +107,7 @@ fn manifestless_library_resolves_through_the_synthesized_remapping() {
 #[test]
 fn remapping_into_src_dir_resolves_imports() {
     let fixture = fixture_path("fixtures/workspaces/foundry/nested");
-    let db = Db::new(load_root(fixture.clone()));
+    let db = Db::new(load_roots(fixture.clone()));
     let main = db
         .file(&fixture.join("src/Root.sol"))
         .expect("the workspace indexes src/Root.sol");
@@ -122,7 +122,7 @@ fn remapping_into_src_dir_resolves_imports() {
 #[test]
 fn transitive_remapping_dependencies_resolve_imports() {
     let fixture = fixture_path("fixtures/workspaces/foundry/remappings/external");
-    let db = Db::new(load_root(fixture.clone()));
+    let db = Db::new(load_roots(fixture.clone()));
     let main = db
         .file(&fixture.join("proj/Main.sol"))
         .expect("the workspace indexes proj/Main.sol");
@@ -142,7 +142,7 @@ fn transitive_remapping_dependencies_resolve_imports() {
 #[test]
 fn deduplicated_library_files_are_never_indexed() {
     let root = fixture_path("fixtures/workspaces/foundry/nested");
-    let mut db = Db::new(load_root(root));
+    let mut db = Db::new(load_roots(root));
     let path = fixture_path("fixtures/workspaces/foundry/nested/dependencies/dep-a/lib/duplicate/src/Duplicate.sol");
 
     assert!(db.is_ignored_path(&path));
@@ -161,7 +161,7 @@ fn deduplicated_library_files_are_never_indexed() {
 fn dependency_dev_files_are_never_indexed() {
     let root = fixture_path("fixtures/workspaces/foundry/dev_dirs");
     let path = root.join("lib/dep/test/Dep.t.sol");
-    let mut db = Db::new(load_root(root));
+    let mut db = Db::new(load_roots(root));
 
     assert!(db.is_ignored_path(&path));
     assert!(
@@ -170,4 +170,24 @@ fn dependency_dev_files_are_never_indexed() {
         "a dependency dev file gets no File and no source root"
     );
     assert!(db.file(&path).is_none());
+}
+
+/// The live root set must equal a fresh discovery of the same tree, otherwise
+/// every watcher event produces a phantom diff.
+#[test]
+fn live_root_set_matches_a_fresh_discovery() {
+    let fixtures = [
+        "fixtures/workspaces/foundry/nested",
+        "fixtures/workspaces/foundry/remappings",
+        "fixtures/workspaces/foundry/dev_dirs",
+        "fixtures/workspaces/hardhat/imports",
+        "fixtures/workspaces/hybrid",
+        "fixtures/workspaces/standalone/npm_workspace",
+    ];
+    for fixture in fixtures {
+        let root = fixture_path(fixture);
+        let db = Db::new(load_roots(root.clone()));
+        let discovered = crate::workspace::Workspace::<()>::from(&crate::workspace::discover_workspaces(std::slice::from_ref(&root)));
+        assert_eq!(db.workspace(), discovered, "{fixture}");
+    }
 }

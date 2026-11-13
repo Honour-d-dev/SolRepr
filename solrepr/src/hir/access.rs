@@ -97,11 +97,11 @@ impl<'db> AccessChecker<'db> {
     fn belongs_to_set(&self, path: CallKind, namespace: &DefNamespace, def: DefId) -> bool {
         match path {
             CallKind::Direct => true,
-            CallKind::External => match (namespace, def) {
-                (DefNamespace::Functions, DefId::Function(_)) => true,
-                (DefNamespace::Variables, DefId::Var(_)) => true,
-                _ => false,
-            },
+            CallKind::External => matches!(
+                (namespace, def),
+                (DefNamespace::Functions, DefId::Function(_))
+                    | (DefNamespace::Variables, DefId::Var(_))
+            ),
             CallKind::ViaType(_) | CallKind::Base(BaseKind::SelfQualified | BaseKind::Explicit) => {
                 match namespace {
                     DefNamespace::Types

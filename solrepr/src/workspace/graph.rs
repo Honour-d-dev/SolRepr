@@ -1,7 +1,5 @@
-//! Package-graph traversal: expanding local packages, workspace packages,
-//! vendored libraries (Foundry `libs`, Hardhat `imports`), npm dependencies,
-//! and declared remapping targets into one deduplicated set of package
-//! descriptors.
+//! Package-graph traversal: local and workspace packages, vendored libraries,
+//! npm dependencies and remapping targets, deduplicated.
 
 use std::collections::VecDeque;
 
@@ -13,19 +11,11 @@ use super::detect::{
     remapped_descriptor,
 };
 
-/// Expand local packages, workspace packages, vendored libraries (Foundry
-/// `libs`, Hardhat `imports`), npm dependencies, and declared remapping
-/// targets into one deduplicated package graph.
+/// Expand every package source into one deduplicated graph, with the roots kept
+/// out of the compilation unit in `ignored`.
 ///
-/// Traversal is breadth-first so direct dependencies are discovered before the
-/// nested libraries of those dependencies. That ordering lets a nested library
-/// be skipped when an ancestor package already owns a library with the same
-/// directory name — the duplicate OpenZeppelin copies found under nested `lib/`
-/// directories — while libraries whose names are not claimed by any ancestor
-/// are still discovered as unique transitive dependencies.
-///
-/// Roots kept out of the compilation unit come back in `ignored`: shadowed
-/// library copies and dependency dev dirs.
+/// Breadth-first, so an ancestor's claim on a library name skips the nested
+/// copy (duplicate OpenZeppelin under `lib/`) while unclaimed ones survive.
 pub(super) fn discover_package_graph( root: &Utf8Path ) -> (Vec<PackageDescriptor>, Vec<Utf8PathBuf>) {
     let mut queue = VecDeque::from(find_package_roots(root, false));
     let mut discovered = Vec::new();
@@ -64,10 +54,8 @@ pub(super) fn discover_package_graph( root: &Utf8Path ) -> (Vec<PackageDescripto
                         continue;
                     }
                     own_libraries.push(name.clone());
-                    // A configured library dir is a named dependency edge —
-                    // trusted like a remapping target — so a manifestless
-                    // child is a package in its own right, while nested
-                    // manifests beneath it are still discovered by the scan.
+                    // A configured library dir is a named edge like a remapping
+                    // target, so a manifestless child is a package in its own right.
                     let mut roots = find_package_roots(root, true);
                     if !roots.iter().any(|d| d.root.as_path() == root.as_path()) {
                         roots.push(package_descriptor(root, true));

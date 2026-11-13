@@ -18,11 +18,11 @@ use crate::salsa::hir_db::inference;
 use crate::ir::def_map::DefId;
 use crate::salsa::interned_db::Id;
 use crate::salsa::{File, HirDb, RootDb, Db};
-use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, SourceRoot, Workspace};
+use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles};
 
 pub fn make_test_db(source: &str) -> (Db, File) {
     let workspace = test_workspace(source);
-    let path = workspace.source_roots[0].files[0].path.clone();
+    let path = workspace.roots[0].files[0].path.clone();
     let db = Db::new(workspace);
     let file = db.file(&path).unwrap();
     (db, file)
@@ -30,21 +30,21 @@ pub fn make_test_db(source: &str) -> (Db, File) {
 
 /// The single-file workspace behind `make_test_db`, for tests that build their
 /// own database (the salsa cache tests install an event recorder).
-pub fn test_workspace(source: &str) -> Workspace<LoadedFile> {
+pub fn test_workspace(source: &str) -> WorkspaceWithFiles<LoadedFile> {
     let root = Utf8PathBuf::from_path_buf(std::env::temp_dir().join("next_tests")).expect("temp dir is UTF-8");
-    Workspace {
+    WorkspaceWithFiles {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
             root: root.clone(),
             remappings: Vec::new(),
         }],
-        source_roots: vec![SourceRoot {
-            root: root.clone(),
-            package_id: PackageId(0),
+        roots: vec![RootWithFiles {
+            path: root.clone(),
+            package_id: PackageId(root.clone()),
             is_dependency: false,
             files: vec![LoadedFile {
                 path: root.join("src/Test.sol"),
-                text: Rope::from_str(source),
+                text: Some(Rope::from_str(source)),
             }],
         }],
     }

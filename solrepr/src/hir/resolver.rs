@@ -419,7 +419,7 @@ impl<'db> Resolver<'db> {
     }
 
     fn def_resolution(&self, def: &ScopeData) -> Resolution {
-        self.defs_resolution(def.namespace.clone(), &def.defs)
+        self.defs_resolution(def.namespace, &def.defs)
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////

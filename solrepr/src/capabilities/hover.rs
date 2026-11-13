@@ -259,13 +259,11 @@ impl<'db> Hover<'db> {
         let doc = self.db.docs(DefId::Var(*var_id));
         let mut parts = Vec::new();
         parts.push(ty);
-        match var_data.vis {
-            v @ (Visibility::Public | Visibility::Private) => parts.push(v.as_str().into()),
-            _ => {}
+        if let v @ (Visibility::Public | Visibility::Private) = var_data.vis {
+            parts.push(v.as_str().into());
         }
-        match var_data.kind {
-            k @ (VariableKind::Const | VariableKind::Immutable) => parts.push(k.to_string().to_lowercase()),
-            _ => {}
+        if let k @ (VariableKind::Const | VariableKind::Immutable) = var_data.kind {
+            parts.push(k.to_string().to_lowercase());
         }
         
         parts.push(var_data.name.as_str().to_string());

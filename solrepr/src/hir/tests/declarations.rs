@@ -20,13 +20,12 @@ fn bodyless_definitions_follow_solc() {
             "#,
     );
 
-    for name in ["cf"] {
-        assert_eq!(
-            codes(&named_function_inference(&db, file, name)),
-            vec![DiagnosticCode::MissingVirtual],
-            "{name}",
-        );
-    }
+    let name = "cf";
+    assert_eq!(
+        codes(&named_function_inference(&db, file, name)),
+        vec![DiagnosticCode::MissingVirtual],
+        "{name}",
+    );
     for name in ["cm", "ln"] {
         assert_eq!(
             codes(&named_modifier_inference(&db, file, name)),

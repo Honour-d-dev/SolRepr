@@ -5,24 +5,30 @@ use crate::capabilities::hover::hover;
 use crate::capabilities::view_ast::{ViewAstRequest, view_ast};
 use crate::capabilities::view_hir::{ViewHirRequest, view_hir};
 use crate::live_docs::LiveDocs;
-use crate::workspace::load_workspace;
-use crate::salsa::{File, Db};
-use crate::utilities::{document_path, log_info, to_url};
+use crate::workspace::diff::WorkspaceDiff;
+use crate::worker::Worker;
+use crate::workspace::worker::WorkspaceWorker;
+use crate::workspace::watch::{self, ChangeEvent, Watched};
+use crate::workspace::worker::ReloadRequest;
+use crate::workspace::{LoadedFile, discover_workspaces, workspace_roots};
+use crate::salsa::{Db, File};
+use crate::utilities::{document_path, log_info, to_url, to_utf8path};
 
 use anyhow::Context;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Exit,
-    Notification as LspNotification, PublishDiagnostics,
+    DidChangeTextDocument, DidChangeWatchedFiles, DidChangeWorkspaceFolders, DidCloseTextDocument,
+    DidOpenTextDocument, Exit, Notification as LspNotification, PublishDiagnostics,
 };
 use lsp_types::request::{
     Completion as CompletionRequest, GotoDefinition, HoverRequest, Request as LspRequest, Shutdown,
 };
 use lsp_types::{
     CompletionOptions, Diagnostic as LspDiagnostic, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, HoverProviderCapability, InitializeParams,
-    InitializeResult, OneOf, PublishDiagnosticsParams, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind,
+    DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, HoverProviderCapability, InitializeParams, InitializeResult, OneOf,
+    PublishDiagnosticsParams, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+    WorkspaceFolder, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
 };
 use triomphe::Arc;
 
@@ -32,6 +38,9 @@ pub struct LspServer {
     live_docs: LiveDocs,
     diagnostics: DiagnosticsWorker,
     diagnostics_generation: u64,
+    ws_worker: Worker<WorkspaceWorker>,
+    /// Whether the client's watchers are registered per folder
+    watch_folders: bool,
     shutdown_requested: bool,
 }
 
@@ -42,9 +51,11 @@ impl LspServer {
         let params: InitializeParams = serde_json::from_value(initialize_params)
             .context("failed to deserialize InitializeParams from client")?;
 
-        // Block on workspace loading
-        let workspace = load_workspace(&params)?;
-        log_info("Workspace fully loaded");
+        // Block on workspace discovery; file contents are read when the
+        // database is built, after the handshake is answered.
+        let roots = workspace_roots(&params)?;
+        let workspace = discover_workspaces(&roots);
+        log_info("Workspace discovered");
 
         let ignored_roots: Vec<String> = workspace.ignored_roots.iter()
             .map(|root| to_url(root).to_string())
@@ -58,13 +69,18 @@ impl LspServer {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![
-                        ".".to_string(),
-                        "{".to_string(),
-                        ",".to_string(),
-                    ]),
+                    trigger_characters: Some(vec![".".to_string(), "{".to_string(), ",".to_string()]),
                     resolve_provider: Some(false),
                     ..Default::default()
+                }),
+                // The session loads every workspace folder the client opened
+                // so we listen on folders being added or removed.
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
                 }),
                 experimental: Some(serde_json::json!({
                     "ignoredRoots": ignored_roots,
@@ -81,8 +97,15 @@ impl LspServer {
             .context("failed to finish LSP initialize handshake")?;
         log_info("LSP initialize handshake completed");
 
+        // This is the first moment the spec allows a server-to-client request
+        // The client owns the watch; this only tells it what to watch
+        watch::register_watchers(&connection.sender, &params, &roots)
+            .context("failed to register watched files")?;
+        let watch_folders = watch::registers_per_folder(&params);
+
         let db = Db::new(workspace);
         let diagnostics = DiagnosticsWorker::spawn();
+        let ws_worker = Worker::spawn("ws", 8, WorkspaceWorker::new(roots, db.workspace()));
         log_info("DB Initialized");
 
         Ok((Self {
@@ -91,6 +114,8 @@ impl LspServer {
             diagnostics,
             live_docs: LiveDocs::new(),
             diagnostics_generation: 0,
+            ws_worker,
+            watch_folders,
             shutdown_requested: false,
         }, connection.receiver))
     }
@@ -100,7 +125,21 @@ impl LspServer {
         receiver: crossbeam_channel::Receiver<Message>,
     ) -> anyhow::Result<()> {
         loop {
-            crossbeam_channel::select! {
+            // Biased, with reload first: a finished diff is a root-set change
+            // that a pending watcher event has to see. If a `.sol` creation
+            // were handled before the diff that adds its root, the path would
+            // look unrooted and the event would be answered by a rediscovery
+            // that finds nothing new.
+            crossbeam_channel::select_biased! {
+                recv(self.ws_worker.rx) -> workspace => {
+                    match workspace {
+                        Ok(diff) => self.handle_reload(diff),
+                        Err(_) => {
+                            log_info("reload worker stopped; the workspace is fixed for this session");
+                            self.ws_worker.stop();
+                        }
+                    }
+                }
                 recv(receiver) -> message => {
                     // A closed channel means the client is gone.
                     let Ok(message) = message else { break; };
@@ -150,9 +189,12 @@ impl LspServer {
             DidOpenTextDocument::METHOD => self.did_open(&notification),
             DidChangeTextDocument::METHOD => self.did_change(&notification),
             DidCloseTextDocument::METHOD => self.did_close(&notification),
+            DidChangeWatchedFiles::METHOD => self.did_change_watched_files(&notification),
+            DidChangeWorkspaceFolders::METHOD => self.did_change_workspace_folders(&notification),
             _ => log_info(format!( "Ignoring unsupported notification: {}", notification.method )),
         }
     }
+
 
     fn did_open(&mut self, notification: &Notification) {
         if let Some(params) = self.notification_params::<DidOpenTextDocumentParams>(notification)
@@ -191,7 +233,113 @@ impl LspServer {
             // before forgetting it so the clear carries its version.
             self.publish_diagnostics(file, Arc::from(Vec::new()));
             self.live_docs.close(&file);
+            self.db.close_file(file);
         }
+    }
+
+    /// A watcher event is a trigger, not a decision: a manifest may have added
+    /// or removed roots (rediscover), a `.sol` file may have appeared or
+    /// vanished inside a known root (one path in, one path out).
+    ///
+    /// The event's type is not consulted. `reload_path` re-reads the path and
+    /// decides from what is on disk, so create, change and delete are one
+    /// operation — and an open document is never re-read, because the client
+    /// owns its text.
+    fn did_change_watched_files(&mut self, notification: &Notification) {
+        let Some(params) = self.notification_params::<DidChangeWatchedFilesParams>(notification) else {
+            return;
+        };
+
+        let mut rediscover = false;
+        let mut changed = false;
+        for path in watch::changed_paths(&params.changes) {
+            match watch::classify(&path) {
+                Some(Watched::Manifest) => rediscover = true,
+                Some(Watched::Source) => match self.db.apply_file_change(&path) {
+                    ChangeEvent::Updated(_) | ChangeEvent::Created(_) => changed = true,
+                    ChangeEvent::Removed(file) => {
+                        self.publish_diagnostics(file, Arc::from(Vec::new()));
+                        changed = true;
+                    }
+                    // Under no root we know: a dependency directory may have
+                    // appeared.
+                    ChangeEvent::Unrooted => rediscover = true,
+                    ChangeEvent::Skipped => {}
+                },
+                None => {}
+            }
+        }
+
+        if rediscover {
+            self.ws_worker.request(ReloadRequest::Rediscover);
+        } else if changed {
+            self.run_diagnostics();
+        }
+    }
+
+    /// The client opened or closed a folder. The delta is all the worker needs:
+    /// it owns the folder set, so applying it there keeps the set in one place.
+    /// The watchers are per folder, so the same delta registers and revokes
+    /// them.
+    fn did_change_workspace_folders(&mut self, notification: &Notification) {
+        let Some(params) = self
+            .notification_params::<DidChangeWorkspaceFoldersParams>(notification)
+        else {
+            return;
+        };
+
+        let added = folder_paths(params.event.added);
+        let removed = folder_paths(params.event.removed);
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
+
+        if self.watch_folders {
+            for root in &added {
+                if let Err(error) = watch::register_folder(&self.sender, root) {
+                    log_info(format!("failed to watch {root}: {error}"));
+                }
+            }
+            for root in &removed {
+                if let Err(error) = watch::unregister_folder(&self.sender, root) {
+                    log_info(format!("failed to stop watching {root}: {error}"));
+                }
+            }
+        }
+
+        log_info(format!(
+            "workspace folders changed: {} added, {} removed",
+            added.len(),
+            removed.len()
+        ));
+        self.ws_worker.request(ReloadRequest::Folders {
+            added: added.into_boxed_slice(),
+            removed: removed.into_boxed_slice(),
+        });
+    }
+
+    fn handle_reload(&mut self, diff: WorkspaceDiff<LoadedFile>) {
+        // Apply the workspace diff to the database
+        self.db.reload_workspace(diff);
+
+        log_info("workspace reloaded".to_string());
+        // Remove deleted files from the live docs
+        let deleted: Vec<_> = self.live_docs.iter().filter(|file| self.db.file(file.path(&self.db)).is_none()).collect();
+        for file in deleted {
+            self.publish_diagnostics(file, Arc::from(Vec::new()));
+            self.live_docs.close(&file);
+            self.db.close_file(file);
+        }
+
+        // Update the client with the new ignored list.
+        self.send(Message::Notification(Notification::new(
+            "solrepr/ignoredRoots".to_string(),
+            serde_json::json!(self.db.ignored_paths().iter()
+                .map(|root| to_url(root).to_string())
+                .collect::<Vec<_>>()),
+        )));
+
+        self.run_diagnostics();
     }
 
     /// A notification's params, or `None` when they do not fit. A notification
@@ -287,4 +435,13 @@ impl LspServer {
             "server is shutting down".into(),
         )));
     }
+}
+
+/// The `file:` folders among `folders`, in order. A folder the server cannot
+/// read is skipped — it has no files to discover.
+fn folder_paths(folders: Vec<WorkspaceFolder>) -> Vec<camino::Utf8PathBuf> {
+    folders
+        .iter()
+        .filter_map(|folder| to_utf8path(&folder.uri).ok())
+        .collect()
 }

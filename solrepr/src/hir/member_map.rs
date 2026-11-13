@@ -291,7 +291,7 @@ impl<'db> MemberBuilder<'db> {
                                     DefId::Var(id) if self.db.var_data(id).vis == Visibility::Public
                                 )
                         })
-                        .map(|def| (name.clone(), scope_data.namespace.clone(), def))
+                        .map(|def| (name.clone(), scope_data.namespace, def))
                 })
                 .collect();
             declarations.sort_by_key(|(_, _, def)| {
@@ -357,11 +357,11 @@ impl<'db> MemberBuilder<'db> {
             DefId::Event(id) => self
                 .db
                 .event_signature(id)
-                .map(|sig| SlotKey::Overload(name, namespace.clone(), sig.params)),
+                .map(|sig| SlotKey::Overload(name, namespace, sig.params)),
             DefId::Error(id) => self
                 .db
                 .error_signature(id)
-                .map(|sig| SlotKey::Overload(name, namespace.clone(), sig.params)),
+                .map(|sig| SlotKey::Overload(name, namespace, sig.params)),
             _ if matches!(namespace, DefNamespace::Types | DefNamespace::Variables) => {
                 Some(SlotKey::NonOverloadable(name))
             }

@@ -1,7 +1,5 @@
-//! Pure parsers for the configuration file formats workspace discovery reads:
-//! `package.json` manifests, `foundry.toml`, `hardhat.config.*`, and
-//! `remappings.txt`. Each format has a `*_text` entry point so the parsing can
-//! be tested without touching the filesystem.
+//! Pure parsers for the config formats discovery reads. Each has a `*_text`
+//! entry point, so parsing is tested without touching the filesystem.
 
 use std::fs;
 
@@ -10,10 +8,8 @@ use camino::Utf8Path;
 use super::Remapping;
 use crate::utilities::normalize_path;
 
-/// The package.json data needed to expand the package graph.
-///
-/// We intentionally keep this small. JavaScript build configuration and plugin
-/// execution are outside the LSP's workspace-discovery responsibilities.
+/// The package.json data needed to expand the package graph. Deliberately
+/// small: plugin execution is outside workspace discovery.
 #[derive(Debug, Clone, Default)]
 pub(super) struct PackageManifest {
     pub workspace_patterns: Vec<String>,
@@ -91,13 +87,9 @@ pub(super) fn parse_hardhat_config(path: &Utf8Path) -> HardhatConfig {
         .unwrap_or_default()
 }
 
-/// Extract `paths` from a Hardhat config. Comments are stripped and only the
-/// `paths { ... }` block is scanned, with keys matched on identifier
-/// boundaries — a `dataSources` field or a stray `sources:` comment cannot
-/// leak in. `"./dir"` and `["./a", "./b"]` values are both accepted.
-///
-/// The file is still text, not parsed JavaScript — computed or `require`d
-/// values fall back to the defaults.
+/// Extract `paths` from a Hardhat config. The file is text, not JavaScript, so
+/// computed or `require`d values fall back to the defaults; keys match on
+/// identifier boundaries so `dataSources` cannot leak in.
 pub(super) fn parse_hardhat_config_text(text: &str) -> HardhatConfig {
     let text = strip_comments(text);
     let Some(paths) = paths_block(&text) else {
@@ -242,12 +234,8 @@ fn quoted_strings(text: &str) -> Vec<String> {
     out
 }
 
-/// The `foundry.toml` configuration discovery needs: where the package's own
-/// sources live, where its libraries are installed, and which remappings
-/// apply.
-///
-/// `libs` defaults to `["lib"]` and `auto_detect_remappings` to `true`,
-/// matching forge.
+/// The `foundry.toml` facts discovery needs: source dir, library dirs and
+/// remappings. `libs` defaults to `["lib"]`, matching forge.
 #[derive(Debug, Clone)]
 pub(super) struct FoundryConfig {
     pub src: String,
