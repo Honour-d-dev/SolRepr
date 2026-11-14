@@ -2,8 +2,8 @@
   "name": "solrepr",
   "displayName": "SolRepr",
   "description": "Semantic analyzer and language server for Solidity",
-  "version": "0.1.0",
-  "publisher": "local",
+  "version": "0.1.0-beta.1",
+  "publisher": "solrepr",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
@@ -87,7 +87,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p ./",
     "compile": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=out/extension.js",
-    "watch": "npm run compile -- --watch"
+    "watch": "npm run compile -- --watch",
+    "package": "npm run compile && vsce package --no-dependencies --out solrepr.vsix",
+    "package:platform": "node scripts/package-platform.mjs"
   },
   "dependencies": {
     "vscode-languageclient": "^11.0.0"

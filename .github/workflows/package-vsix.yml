@@ -1,0 +1,153 @@
+name: Package VSIX
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-vsix-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package VSIX
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extensions/vscode/package-lock.json
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.event.release.tag_name }}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check versions
+        run: node scripts/check-versions.mjs "${{ steps.tag.outputs.tag }}"
+
+      - name: Download release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          mkdir -p dist
+          expected=(
+            solrepr-x86_64-unknown-linux-gnu.tar.xz
+            solrepr-aarch64-apple-darwin.tar.xz
+            solrepr-x86_64-pc-windows-msvc.zip
+          )
+          for attempt in $(seq 1 30); do
+            gh release download "$tag" --dir dist --clobber || true
+            missing=0
+            for file in "${expected[@]}"; do
+              [ -f "dist/$file" ] || missing=1
+            done
+            [ "$missing" -eq 0 ] && break
+            sleep 10
+          done
+          for file in "${expected[@]}"; do
+            [ -f "dist/$file" ] || { echo "missing release asset: $file"; exit 1; }
+          done
+
+      - name: Ad-hoc sign macOS binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="dist/solrepr-aarch64-apple-darwin.tar.xz"
+          work="$(mktemp -d)"
+          tar -xJf "$archive" -C "$work"
+          binary="$(find "$work" -type f -name solrepr | head -n 1)"
+          codesign --force --sign - "$binary"
+          top="$(basename "$(dirname "$binary")")"
+          tar -cJf "$archive" -C "$work" "$top"
+          rm -rf "$work"
+
+      - name: Upload signed macOS archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" \
+            dist/solrepr-aarch64-apple-darwin.tar.xz \
+            --clobber
+
+      - name: Build extension
+        working-directory: extensions/vscode
+        run: |
+          npm ci
+          npm run typecheck
+          npm run compile
+
+      - name: Package platform VSIX files
+        working-directory: extensions/vscode
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          out="$GITHUB_WORKSPACE/vsix"
+          mkdir -p "$out"
+
+          while IFS='|' read -r target triple binary_name; do
+            archive="$GITHUB_WORKSPACE/dist/solrepr-${triple}.tar.xz"
+            [ -f "$archive" ] || archive="$GITHUB_WORKSPACE/dist/solrepr-${triple}.zip"
+
+            work="$(mktemp -d)"
+            case "$archive" in
+              *.zip) unzip -q "$archive" -d "$work" ;;
+              *) tar -xJf "$archive" -C "$work" ;;
+            esac
+            binary="$(find "$work" -type f -name "$binary_name" | head -n 1)"
+
+            stage="$(mktemp -d)/extension"
+            mkdir -p "$stage/bin/$target"
+            cp package.json .vscodeignore LICENSE README.md icon.png "$stage/"
+            cp -R out "$stage/out"
+            cp "$binary" "$stage/bin/$target/$binary_name"
+
+            (cd "$stage" && npx vsce package --target "$target" --pre-release --no-dependencies --out "$out/solrepr-${version}-${target}.vsix")
+            rm -rf "$work" "$(dirname "$stage")"
+          done <<'TARGETS'
+          linux-x64|x86_64-unknown-linux-gnu|solrepr
+          darwin-arm64|aarch64-apple-darwin|solrepr
+          win32-x64|x86_64-pc-windows-msvc|solrepr.exe
+          TARGETS
+
+      - name: Package universal VSIX
+        working-directory: extensions/vscode
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          out="$GITHUB_WORKSPACE/vsix"
+          stage="$(mktemp -d)/extension"
+          mkdir -p "$stage"
+          cp package.json .vscodeignore LICENSE README.md icon.png "$stage/"
+          cp -R out "$stage/out"
+          (cd "$stage" && npx vsce package --pre-release --no-dependencies --out "$out/solrepr-${version}-universal.vsix")
+          rm -rf "$(dirname "$stage")"
+
+      - name: Upload VSIX files to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ steps.tag.outputs.tag }}" vsix/*.vsix --clobber
