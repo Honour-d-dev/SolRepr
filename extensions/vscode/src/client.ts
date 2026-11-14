@@ -150,7 +150,8 @@ export async function startClient(
     channels.output.appendLine("Activating SolRepr extension...");
     channels.output.appendLine(`Resolved server path: ${serverPath} (${resolved.source})`);
     channels.output.appendLine(`Configured trace.server: ${traceSetting}`);
-    channels.output.show(true);
+    // The channel stays in the Output dropdown; activating the extension must
+    // not steal the panel from whatever the user was reading.
 
     if (!fs.existsSync(serverPath)) {
         const msg = `SolRepr server not found at ${serverPath}. Build it first (cargo build).`;

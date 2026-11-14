@@ -1017,3 +1017,73 @@ fn resolver_failures_accumulate_until_inference_finalization() {
                 if ["internalOnly", "privateOnly"].contains(&db.function_data(id).name.as_str())))
     )));
 }
+
+/// A constant read through a *type name* follows the owner's scoping, not the
+/// declared visibility. A contract constant is reachable only inside the
+/// contract and its bases; a library's members inline into every caller, so
+/// both `public` and `internal` constants are reachable from anywhere and only
+/// `private` is not. Verified against solc 0.8.33.
+#[test]
+fn qualified_constants_follow_the_owner_kind() {
+    let allowed = [
+        r#"library L { uint public constant X = 1; } contract C { function f() external pure returns (uint) { return L.X; } }"#,
+        r#"library L { uint internal constant X = 1; } contract C { function f() external pure returns (uint) { return L.X; } }"#,
+        r#"contract B { uint public constant X = 1; } contract C is B { function f() external pure returns (uint) { return B.X; } }"#,
+    ];
+    for source in allowed {
+        let (db, file) = make_test_db(source);
+        let inference = named_function_inference(&db, file, "f");
+        assert!(
+            inference.diagnostics.is_empty(),
+            "{source}: {:?}",
+            codes(&inference)
+        );
+    }
+
+    let denied = [
+        r#"library L { uint private constant X = 1; } contract C { function f() external pure returns (uint) { return L.X; } }"#,
+        r#"contract B { uint public constant X = 1; } contract C { function f() external pure returns (uint) { return B.X; } }"#,
+    ];
+    for source in denied {
+        let (db, file) = make_test_db(source);
+        let inference = named_function_inference(&db, file, "f");
+        assert!(
+            inference
+                .diagnostics
+                .iter()
+                .any(|diagnostic| matches!(diagnostic, SemanticDiagnostic::UnresolvedMember { .. })),
+            "{source}: {:?}",
+            codes(&inference)
+        );
+    }
+}
+
+/// The denial's related info names the visibility only when it explains the
+/// rejection: `private`/`internal` do, `public`/`external` do not — "declared
+/// public and is not visible" contradicts itself.
+#[test]
+fn access_denial_names_a_visibility_only_when_it_explains() {
+    let (db, file) = make_test_db(
+        r#"contract B { uint public constant X = 1; } contract C { function f() external pure returns (uint) { return B.X; } }"#,
+    );
+    let messages = related_messages(&db, file);
+    assert!(
+        messages.iter().any(|message| message == "`X` is not visible here"),
+        "{messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("declared public")),
+        "{messages:?}"
+    );
+
+    let (db, file) = make_test_db(
+        r#"library L { uint private constant X = 1; } contract C { function f() external pure returns (uint) { return L.X; } }"#,
+    );
+    let messages = related_messages(&db, file);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "`X` is declared private and is not visible here"),
+        "{messages:?}"
+    );
+}

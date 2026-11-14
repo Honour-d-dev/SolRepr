@@ -9,7 +9,7 @@ use crate::ir::def_map::*;
 use crate::hir::syntax_store::semantic_at;
 use crate::salsa::hir_db::def_name;
 use crate::salsa::root_db::RootDb;
-use crate::salsa::{HirDb, Db};
+use crate::salsa::{Db, File, HirDb};
 use helper::*;
 
 pub mod helper;
@@ -60,6 +60,15 @@ fn failure_messages(inference: &Inference) -> Vec<String> {
             SemanticDiagnostic::InferenceFailure { message, .. } => Some(message.clone()),
             _ => None,
         })
+        .collect()
+}
+
+/// Every related-information message the file's rendered diagnostics carry.
+fn related_messages(db: &Db, file: File) -> Vec<String> {
+    collect_diagnostics(db, file)
+        .into_iter()
+        .flat_map(|diagnostic| diagnostic.related)
+        .map(|related| related.message)
         .collect()
 }
 

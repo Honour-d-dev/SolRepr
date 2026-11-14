@@ -1,11 +1,13 @@
 use la_arena::ArenaMap;
 use num_bigint::BigInt;
 
+use crate::ast::UdvtId;
 use crate::hir::body_map::ScopeId;
+use crate::hir::builtins::BuiltinFn;
 use crate::hir::types::VariableKind;
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Literal, Name, UnaryOp};
 use crate::hir::syntax_store::SyntaxStore;
-use crate::hir::resolution::{CallableOrigin, Resolution};
+use crate::hir::resolution::{Callable, CallableOrigin, Resolution};
 use crate::hir::resolver::Resolver;
 use crate::hir::diagnostics::DiagnosticAnchor;
 use crate::hir::types::{Primitive, TyKind, Type};
@@ -483,9 +485,10 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         }
     }
 
-    /// `T(x)` — the only const-evaluable call: a conversion of a folded argument.
-    /// Foldable builtins (`keccak256`, `addmod`, …) yield `Opaque`, but their
-    /// arguments still evaluate so nested non-constants report.
+    /// `T(x)` — a conversion of a folded argument. A builtin call resolves to
+    /// its [`Callable`]: UDVT conversions are the identity on the value,
+    /// the other foldable builtins (`keccak256`, `addmod`, …) yield `Opaque`,
+    /// and every other callable is not a constant.
     fn eval_call(
         &mut self,
         expr: ExprId,
@@ -503,35 +506,29 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 let value = self.eval(*arg)?;
                 self.convert(expr, &ty, value)
             }
-            _ => {
+            Some(Resolution::Callable(callable)) => {
+                let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     if matches!(self.store.exprs[*arg], Expr::NamedArgs(_)) {
                         return Err(self.not_constant(expr));
                     }
-                    self.eval(*arg)?;
+                    values.push(self.eval(*arg)?);
                 }
-                if self.is_foldable_builtin(callee) {
-                    Ok(ConstValue::Opaque)
-                } else {
-                    Err(self.not_constant(expr))
+                match callable.origin() {
+                    CallableOrigin::Builtin(BuiltinFn::Wrap(_) | BuiltinFn::Unwrap(_)) => {
+                        match values.as_slice() {
+                            [value] => Ok(value.clone()),
+                            _ => Err(self.not_constant(expr)),
+                        }
+                    }
+                    CallableOrigin::Builtin(builtin) if builtin.is_const() => {
+                        Ok(ConstValue::Opaque)
+                    }
+                    _ => Err(self.not_constant(expr)),
                 }
             }
+            _ => Err(self.not_constant(expr)),
         }
-    }
-
-    /// A builtin function solc folds in constant expressions. Checked
-    /// through resolution so a user-defined `keccak256` shadow stays
-    /// `NotConstant` — it is genuinely not foldable.
-    fn is_foldable_builtin(&self, callee: ExprId) -> bool {
-        let Expr::Ident(name) = &self.store.exprs[callee] else {
-            return false;
-        };
-        matches!(
-            self.resolve_ident(callee, name),
-            Some(Resolution::Callable(callable))
-                if matches!(callable.origin(), CallableOrigin::Builtin(builtin)
-                    if builtin.is_const())
-        )
     }
 
     /// `b[i]` on a constant `bytes` value.
@@ -666,6 +663,8 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     Some(def @ (DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_))) => {
                         self.scope_member(&def, prop)
                     }
+                    // A UDVT type name's only members are its two conversions.
+                    Some(DefId::Udvt(id)) => udvt_member(id, prop),
                     _ => None,
                 },
                 Resolution::Module(file) => self.file_member_ref(file, prop),
@@ -849,4 +848,15 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             _ => Err(self.not_constant(expr)),
         }
     }
+}
+
+/// `T.wrap` / `T.unwrap` — the only members a UDVT type name has, and both are
+/// the identity on the value they convert.
+fn udvt_member(id: UdvtId, name: &Name) -> Option<Resolution> {
+    let builtin = match name.as_str() {
+        "wrap" => BuiltinFn::Wrap(id),
+        "unwrap" => BuiltinFn::Unwrap(id),
+        _ => return None,
+    };
+    Some(Resolution::Callable(Callable::new_builtin(builtin)))
 }

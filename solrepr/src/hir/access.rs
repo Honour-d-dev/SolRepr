@@ -149,7 +149,9 @@ impl<'db> AccessChecker<'db> {
                     (_, Visibility::Internal) => {
                         !matches!(owner, DefId::Library(_)) && !is_base_of_container
                     }
-                    (DefId::Var(_), _) => !is_base_of_container,
+                    (DefId::Var(_), _) => {
+                        !matches!(owner, DefId::Library(_)) && !is_base_of_container
+                    }
                     (_, Visibility::Private) => true,
                     (_, Visibility::Public | Visibility::External) => false,
                 }

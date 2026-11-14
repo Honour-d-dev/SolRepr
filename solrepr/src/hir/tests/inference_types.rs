@@ -257,6 +257,18 @@ fn array_sizes_fold_constant_expressions() {
             "#,
             2,
         ),
+        (
+            // A UDVT conversion is the identity on the value, so `wrap` and
+            // `unwrap` both keep the number the size needs.
+            r#"
+            type U is uint8;
+            contract C {
+                U constant N = U.wrap(4);
+                function f() external { uint[U.unwrap(N)] memory a; }
+            }
+            "#,
+            4,
+        ),
     ];
     for (type_text, expected) in [
         ("uint[type(uint8).max]", 255usize),
@@ -1691,4 +1703,41 @@ fn located_slots_never_nest_references() {
     );
     let g = named_function_inference(&db, file, "g");
     assert!(g.diagnostics.is_empty(), "{:?}", codes(&g));
+}
+
+/// A UDVT conversion folds only when its argument does. `wrap`/`unwrap` are not
+/// special-cased past the argument's constness, and a contract's own `wrap`
+/// function is not the builtin.
+#[test]
+fn udvt_conversion_keeps_the_argument_constness_rule() {
+    for source in [
+        // A parameter is not a constant, wrapped or not.
+        "type U is uint8; contract C { function f(U n) external { uint[U.unwrap(n)] memory a; } }",
+        // A user function called `wrap` is not the conversion builtin.
+        "type U is uint8; contract B { function f() external { uint[B.wrap(4)] memory a; } function wrap(uint x) internal pure returns (uint) { return x; } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let inference = named_function_inference(&db, file, "f");
+        assert!(
+            inference.diagnostics.iter().any(|diagnostic| {
+                matches!(diagnostic, SemanticDiagnostic::InferenceFailure { message, .. }
+                    if message.contains("constant"))
+            }),
+            "{source}: {:?}",
+            codes(&inference)
+        );
+    }
+
+    // The declaration-level rule: an `immutable` is not a compile-time
+    // constant, so wrapping one does not make the initialiser one.
+    let (db, file) = make_test_db(
+        "type U is uint8; contract C { uint8 immutable I = 4; U constant N = U.wrap(I); }",
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("compile-time constant")),
+        "{diagnostics:?}"
+    );
 }

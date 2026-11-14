@@ -571,7 +571,7 @@ impl<'db> Hover<'db> {
         .render()
     }
 
-    fn format_variant(
+    pub(crate) fn format_variant(
         &self,
         enum_data: &EnumData,
         variant_id: VariantId,
@@ -582,7 +582,7 @@ impl<'db> Hover<'db> {
         let doc = self.db.inline_docs(file, range);
         HoverInfo {
             title: "Enum_variant".into(),
-            signature: Some(format!("enum variant {}.{}", enum_data.name, variant.name)),
+            signature: Some(format!("{}.{}", enum_data.name, variant.name)),
             documentation: doc,
             definition_link: Some(self.range_link(file, range)),
         }

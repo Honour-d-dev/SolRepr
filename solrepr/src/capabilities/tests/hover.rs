@@ -201,3 +201,36 @@ fn hover_after_an_unrelated_edit_reads_no_stale_type() {
     assert!(hovered.contains("uint256"), "hover after the edit: {hovered}");
     assert_eq!(hovered, warm_hover, "hover must answer identically");
 }
+
+/// A variant's signature is the qualified member — `Status.Active`, the way it
+/// is written in Solidity. The title already says it is a variant, so the
+/// signature does not repeat it.
+#[test]
+fn enum_variant_hover_names_the_qualified_member() {
+    let (db, file) = make_test_db("enum Status { Pending, Active } contract C {}");
+    let enum_id = db
+        .file_def_map(file)
+        .defs
+        .keys()
+        .find_map(|def| match def {
+            DefId::Enum(id) if db.enum_data(*id).name == "Status" => Some(*id),
+            _ => None,
+        })
+        .expect("fixture declares Status");
+    let enum_data = db.enum_data(enum_id);
+    let (variant_id, _) = enum_data
+        .variants
+        .iter()
+        .find(|(_, variant)| variant.name == "Active")
+        .expect("Status has Active");
+
+    let hover = Hover { db: &db }.format_variant(
+        &enum_data,
+        variant_id,
+        file,
+        crate::ast::NodeRange { start: 0, end: 0 },
+    );
+    assert!(hover.contains("### Enum_variant"), "{hover}");
+    assert!(hover.contains("Status.Active"), "{hover}");
+    assert!(!hover.contains("enum variant"), "{hover}");
+}

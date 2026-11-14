@@ -8,7 +8,7 @@ use crate::hir::access::AccessDenial;
 use crate::hir::resolution::Callable;
 use crate::hir::signatures::OverrideMismatch;
 use crate::hir::syntax_store::anchor_range;
-use crate::hir::types::Mutability;
+use crate::hir::types::{Mutability, Visibility};
 use crate::ir::def_map::DefId;
 use crate::salsa::hir_db::def_name;
 use crate::salsa::root_db::def_range;
@@ -509,14 +509,21 @@ fn access_related(db: &dyn HirDb, denials: &[AccessDenial]) -> Vec<RelatedDiagno
     denials
         .iter()
         .filter_map(|denial| {
+            let name = def_name(db, denial.def);
+            // ``public`/`external` do not add visibility, since the denial is 
+            // owner/access path based, so naming the visibility would contradict itself.
+            let message = match denial.vis {
+                Visibility::Private | Visibility::Internal => {
+                    format!("`{name}` is declared {} and is not visible here", denial.vis.as_str())
+                }
+                Visibility::Public | Visibility::External => {
+                    format!("`{name}` is not visible here")
+                }
+            };
             Some(RelatedDiagnostic {
                 file: denial.def.file(),
                 range: def_range(db, denial.def)?,
-                message: format!(
-                    "`{}` is declared {} and is not visible here",
-                    def_name(db, denial.def),
-                    denial.vis.as_str()
-                ),
+                message,
             })
         })
         .collect()
