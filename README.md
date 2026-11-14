@@ -61,6 +61,9 @@
   Platform packages are published for Linux x64, macOS Apple Silicon, and Windows x64. The
   universal package covers every other platform.
 
+  The release ships `solrepr-installer.sh` and `solrepr-installer.ps1`, which install the
+  server binary to `~/.cargo/bin`.
+
 ### From source
 
 Build the release server, then package the extension for your platform:
@@ -88,7 +91,8 @@ Install the same way, then point `solrepr.serverPath` at the binary or put it on
 
 ### Any editor
 
-`solrepr` speaks LSP over stdio. Put it on `PATH` and point any editor at it.
+`solrepr` speaks LSP over stdio. Put it on `PATH` and point any editor at it. The release's
+`solrepr-installer.sh` / `solrepr-installer.ps1` installs it to `~/.cargo/bin`.
 The editor still needs a Solidity syntax highlighter; the server provides the analysis.
 
 ## Configuration
