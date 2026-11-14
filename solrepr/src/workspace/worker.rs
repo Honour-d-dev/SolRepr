@@ -3,7 +3,7 @@ use std::time::Duration;
 use camino::Utf8PathBuf;
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::worker::Job;
+use crate::worker::{Job, coalesce, debounce};
 
 use super::diff::{WorkspaceDiff, diff};
 use super::{LoadedFile, Workspace, WorkspaceWithFiles, discover_workspaces};
@@ -101,15 +101,15 @@ impl Job for WorkspaceWorker {
 
         while let Ok(request) = match pending.take() {
             Some(request) => Ok(request),
-            None => rx.recv(),
+            None => rx.recv(),// nothing pending, block on recv
         } {
-            self.apply(Self::debounce(&rx, request, DEBOUNCE, ReloadRequest::combine));
+            self.apply(debounce(&rx, request, DEBOUNCE, ReloadRequest::combine));
 
             let (next, diff) = self.plan(discover_workspaces(&self.roots));
 
             // A newer request arrived while discovery ran: this pass is already
             // stale. Drop it without moving `workspace`, and debounce again
-            match Self::coalesce(&rx, ReloadRequest::combine) {
+            match coalesce(&rx, ReloadRequest::combine) {
                 Some(newer) => {
                     pending = Some(newer);
                     continue;

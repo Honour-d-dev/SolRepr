@@ -1,8 +1,9 @@
-use std::thread;
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender};
 use lsp_types::{Diagnostic as LspDiagnostic, DiagnosticSeverity, NumberOrString};
 use ropey::Rope;
+use rustc_hash::FxHashMap;
 use tree_sitter::Node;
 use triomphe::Arc;
 
@@ -13,76 +14,143 @@ use crate::hir::diagnostics::{
 };
 use crate::salsa::{DbSnapshot, File, HirDb};
 use crate::utilities::{byte_to_position, to_url};
+use crate::worker::{Job, coalesce, debounce};
 
-pub(crate) struct DiagnosticsWorker {
-    pub(crate) tx: Sender<DiagnosticRequest>,
-    pub(crate) rx: Receiver<DiagnosticResult>,
+/// A pass answers an edit, so it is worth waiting out a burst of keystrokes
+/// before converting anything.
+const DEBOUNCE: Duration = Duration::from_millis(50);
+
+/// One conversion pass: the snapshot to read, and which documents to convert
+/// with the version and open epoch each was read at.
+pub(crate) struct DiagnosticRequest {
+    pub(crate) snapshot: DbSnapshot,
+    pub(crate) files: Vec<DiagnosedFile>,
+}
+
+/// A live document as the pass saw it. The version stamps the publish, and the
+/// epoch distinguishes a reopened document from the one that was closed.
+#[derive(Clone, Copy)]
+pub(crate) struct DiagnosedFile {
+    pub(crate) file: File,
+    pub(crate) version: i32,
+    pub(crate) epoch: u64,
 }
 
 pub(crate) struct DiagnosticResult {
-    pub file: File,
-    pub generation: u64,
-    pub diagnostics: Arc<[LspDiagnostic]>,
+    pub(crate) file: File,
+    pub(crate) version: i32,
+    pub(crate) diagnostics: Arc<[LspDiagnostic]>,
 }
 
-pub(crate) struct DiagnosticRequest {
-    snapshot: DbSnapshot,
-    generation: u64,
-    files: Vec<File>,
+/// Converts diagnostics off the main loop, streaming one result per document.
+///
+/// `published` is what the client was last sent, per document. Without it every
+/// pass republishes every open document, and one keystroke 
+/// costs a conversion, a copy and a notification per tab.
+#[derive(Default)]
+pub(crate) struct DiagnosticsWorker {
+    published: FxHashMap<File, Published>,
+}
+
+#[derive(Clone)]
+struct Published {
+    epoch: u64,
+    version: i32,
+    diagnostics: Arc<[LspDiagnostic]>,
 }
 
 impl DiagnosticsWorker {
-    pub fn spawn() -> Self {
-        let (tx_request, rx_request) = unbounded();
-        let (tx_result, rx_result) = unbounded();
-        thread::Builder::new()
-            .name("solrepr-diagnostics".to_string())
-            .stack_size(8 * 1024 * 1024)
-            .spawn(move || run_worker(rx_request, tx_result))
-            .expect("failed to spawn diagnostics worker");
-        Self {
-            tx: tx_request,
-            rx: rx_result,
+    fn unchanged(&self, file: File, epoch: u64, version: i32, diagnostics: &Arc<[LspDiagnostic]>) -> bool {
+        self.published.get(&file).is_some_and(|published| {
+            published.epoch == epoch
+                && published.version == version
+                && same(&published.diagnostics, diagnostics)
+        })
+    }
+
+    /// Drops entries for documents that left the diagnosed set since the last
+    /// pass, so the map cannot outgrow the live set.
+    fn retain_live(&mut self, files: &[DiagnosedFile]) {
+        if self.published.len() <= files.len() {
+            return;
         }
+        let live = files.iter().map(|file| file.file).collect::<rustc_hash::FxHashSet<_>>();
+        self.published.retain(|file, _| live.contains(file));
     }
 
-    pub fn request(&self, snapshot: DbSnapshot, generation: u64, files: Vec<File>) {
-        let _ = self.tx.send(DiagnosticRequest {
-            snapshot,
-            generation,
-            files,
-        });
-    }
+    /// One pass: convert what changed, hand each result to the loop, and stop
+    /// early if a newer request arrives.
+    ///
+    /// Committing before sending is deliberate: the entry means "last handed to
+    /// the loop", which is what the next pass has to compare against.
+    pub(super) fn pass(
+        &mut self,
+        request: &DiagnosticRequest,
+        rx: &Receiver<DiagnosticRequest>,
+        tx: &Sender<DiagnosticResult>,
+    ) -> Option<DiagnosticRequest> {
+        self.retain_live(&request.files);
 
-    /// Stop listening for results: the worker thread is gone, so selecting on
-    /// its channel would otherwise return immediately on every loop turn.
-    pub fn stop(&mut self) {
-        self.rx = crossbeam_channel::never();
+        for diagnosed in &request.files {
+            let diagnostics = match request.snapshot.lsp_diagnostics(diagnosed.file) {
+                Ok(diagnostics) => diagnostics,
+                // Cancelled: a write bumped the revision, and the request that
+                // write queued resumes the pass.
+                Err(_) => return None,
+            };
+            if self.unchanged(diagnosed.file, diagnosed.epoch, diagnosed.version, &diagnostics) {
+                continue;
+            }
+            self.published.insert(
+                diagnosed.file,
+                Published {
+                    epoch: diagnosed.epoch,
+                    version: diagnosed.version,
+                    diagnostics: diagnostics.clone(),
+                },
+            );
+            if tx.send(DiagnosticResult {
+                    file: diagnosed.file,
+                    version: diagnosed.version,
+                    diagnostics,
+                })
+                .is_err()
+            {
+                return None;
+            }
+            // Every request carries the whole live set, so abandoning this one
+            // loses nothing: the newer request covers the rest.
+            if let Some(newer) = coalesce(rx, |_, newer| newer) {
+                return Some(newer);
+            }
+        }
+        None
     }
 }
 
-fn run_worker(receiver: Receiver<DiagnosticRequest>, output: Sender<DiagnosticResult>) {
-    while let Ok(mut request) = receiver.recv() {
-        // Every request reads the current revision, so a queued one is stale
-        // the moment a newer one exists: only the newest is worth converting.
-        while let Ok(newer) = receiver.try_recv() {
-            request = newer;
-        }
-        for file in request.files.iter().copied() {
-            let diagnostics = match request.snapshot.lsp_diagnostics(file) {
-                Ok(diagnostics) => diagnostics,
-                Err(_) => break,
-            };
-            if output.send(DiagnosticResult {
-                    file,
-                    generation: request.generation,
-                    diagnostics,
-                }).is_err()
-            {
-                return;
+impl Job for DiagnosticsWorker {
+    type Req = DiagnosticRequest;
+    type Res = DiagnosticResult;
+
+    fn run(mut self, rx: Receiver<Self::Req>, tx: Sender<Self::Res>) {
+        let mut pending = None;
+
+        while let Ok(request) = match pending.take() {
+            Some(request) => Ok(request),
+            None => rx.recv(),
+        } {
+            let request = debounce(&rx, request, DEBOUNCE, |_, newer| newer);
+
+            if let Some(newer) = self.pass(&request, &rx, &tx) {
+                pending = Some(newer);
             }
         }
     }
+}
+
+
+fn same(a: &Arc<[LspDiagnostic]>, b: &Arc<[LspDiagnostic]>) -> bool {
+    Arc::ptr_eq(a, b) || a == b
 }
 
 pub(crate) const MAX_PARSE_DIAGNOSTICS: usize = 100;

@@ -205,7 +205,7 @@ fn tables_are_keyed_by_expr_id() {
     assert!(inference.expr_types.get(binary).is_some());
 }
 #[test]
-fn cycle_recovery_fills_all_allocated_types_with_invalid() {
+fn cycle_recovery_converges_on_the_declared_types() {
     let (db, file) =
         make_test_db(r#"contract C { uint256 constant A = B; uint256 constant B = A; }"#);
     let vars = db
@@ -220,11 +220,13 @@ fn cycle_recovery_fills_all_allocated_types_with_invalid() {
         let inference = db.inference(var);
         let DefId::Var(id) = var else { continue };
         let data = db.var_data(id);
+        // The cycle iterates to a fixed point, so the declared type survives
+        // instead of the whole owner degrading to `Invalid`.
         for (expr, _) in data.syntax_store.exprs.iter() {
-            assert!(matches!(inference.expr_ty(expr).kind(&db), TyKind::Invalid));
+            assert!(!inference.expr_ty(expr).is_invalid(&db), "{var:?} initializer");
         }
         for (ty_ref_id, _) in data.syntax_store.types.iter() {
-            assert!(matches!(inference.ty(ty_ref_id).kind(&db), TyKind::Invalid));
+            assert!(!inference.ty(ty_ref_id).is_invalid(&db), "{var:?} declared type");
         }
     }
 }

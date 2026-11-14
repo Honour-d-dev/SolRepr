@@ -1,6 +1,6 @@
 use crate::capabilities::completion::completion;
 use crate::capabilities::definition::definition;
-use crate::capabilities::diagnostics::{DiagnosticResult, DiagnosticsWorker};
+use crate::capabilities::diagnostics::{DiagnosedFile, DiagnosticRequest, DiagnosticResult, DiagnosticsWorker};
 use crate::capabilities::hover::hover;
 use crate::capabilities::view_ast::{ViewAstRequest, view_ast};
 use crate::capabilities::view_hir::{ViewHirRequest, view_hir};
@@ -36,8 +36,7 @@ pub struct LspServer {
     sender: crossbeam_channel::Sender<Message>,
     db: Db,
     live_docs: LiveDocs,
-    diagnostics: DiagnosticsWorker,
-    diagnostics_generation: u64,
+    diagnostics: Worker<DiagnosticsWorker>,
     ws_worker: Worker<WorkspaceWorker>,
     /// Whether the client's watchers are registered per folder
     watch_folders: bool,
@@ -99,12 +98,11 @@ impl LspServer {
 
         // This is the first moment the spec allows a server-to-client request
         // The client owns the watch; this only tells it what to watch
-        watch::register_watchers(&connection.sender, &params, &roots)
-            .context("failed to register watched files")?;
+        watch::register_watchers(&connection.sender, &params, &roots).context("failed to register watched files")?;
         let watch_folders = watch::registers_per_folder(&params);
 
         let db = Db::new(workspace);
-        let diagnostics = DiagnosticsWorker::spawn();
+        let diagnostics = Worker::spawn("diagnostics", 8, DiagnosticsWorker::default());
         let ws_worker = Worker::spawn("ws", 8, WorkspaceWorker::new(roots, db.workspace()));
         log_info("DB Initialized");
 
@@ -113,7 +111,6 @@ impl LspServer {
             db,
             diagnostics,
             live_docs: LiveDocs::new(),
-            diagnostics_generation: 0,
             ws_worker,
             watch_folders,
             shutdown_requested: false,
@@ -231,7 +228,8 @@ impl LspServer {
             // Clear the diagnostics for a document we no longer own,
             // otherwise the client keeps showing the last set. Publish
             // before forgetting it so the clear carries its version.
-            self.publish_diagnostics(file, Arc::from(Vec::new()));
+            let version = self.live_docs.version(&file);
+            self.publish_diagnostics(file, version, Arc::from(Vec::new()));
             self.live_docs.close(&file);
             self.db.close_file(file);
         }
@@ -258,7 +256,7 @@ impl LspServer {
                 Some(Watched::Source) => match self.db.apply_file_change(&path) {
                     ChangeEvent::Updated(_) | ChangeEvent::Created(_) => changed = true,
                     ChangeEvent::Removed(file) => {
-                        self.publish_diagnostics(file, Arc::from(Vec::new()));
+                        self.publish_diagnostics(file, None, Arc::from(Vec::new()));
                         changed = true;
                     }
                     // Under no root we know: a dependency directory may have
@@ -326,7 +324,8 @@ impl LspServer {
         // Remove deleted files from the live docs
         let deleted: Vec<_> = self.live_docs.iter().filter(|file| self.db.file(file.path(&self.db)).is_none()).collect();
         for file in deleted {
-            self.publish_diagnostics(file, Arc::from(Vec::new()));
+            let version = self.live_docs.version(&file);
+            self.publish_diagnostics(file, version, Arc::from(Vec::new()));
             self.live_docs.close(&file);
             self.db.close_file(file);
         }
@@ -372,35 +371,51 @@ impl LspServer {
         self.send(Message::Response(response));
     }
 
-    fn run_diagnostics(&mut self) {
-        if self.live_docs.is_empty() {
+    fn run_diagnostics(&self) {
+        let files = self
+            .live_docs
+            .iter()
+            .filter_map(|file| {
+                Some(DiagnosedFile {
+                    file,
+                    version: self.live_docs.version(&file)?,
+                    epoch: self.live_docs.epoch(&file)?,
+                })
+            })
+            .collect::<Vec<_>>();
+        if files.is_empty() {
             return;
         }
-
-        self.diagnostics_generation += 1;
-        let generation = self.diagnostics_generation;
-        let documents = self.live_docs.iter().collect();
-        self.diagnostics
-            .request(self.db.snapshot(), generation, documents);
+        self.diagnostics.request(DiagnosticRequest {
+            snapshot: self.db.snapshot(),
+            files,
+        });
     }
 
     fn handle_diagnostic_result(&mut self, result: DiagnosticResult) {
-        if result.generation != self.diagnostics_generation
-            || !self.live_docs.is_live(&result.file)
+        // Closed, evicted, or edited again in the gap after the worker's own
+        // coalesce check: the newer edit already queued its own pass.
+        if !self.live_docs.is_live(&result.file)
+            || self.live_docs.version(&result.file) != Some(result.version)
         {
             return;
         }
 
-        self.publish_diagnostics(result.file, result.diagnostics);
+        self.publish_diagnostics(result.file, Some(result.version), result.diagnostics);
     }
 
-    fn publish_diagnostics(&self, file: File, diagnostics: Arc<[LspDiagnostic]>) {
+    fn publish_diagnostics(
+        &self,
+        file: File,
+        version: Option<i32>,
+        diagnostics: Arc<[LspDiagnostic]>,
+    ) {
         self.send(Message::Notification(Notification::new(
             PublishDiagnostics::METHOD.to_string(),
             PublishDiagnosticsParams {
                 uri: to_url(file.path(&self.db)),
                 diagnostics: diagnostics.to_vec(),
-                version: self.live_docs.version(&file),
+                version,
             },
         )));
     }

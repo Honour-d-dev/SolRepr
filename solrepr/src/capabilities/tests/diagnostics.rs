@@ -296,3 +296,96 @@ fn collects_incomplete_member_expressions() {
             .any(|diagnostic| { diagnostic.message == "expected a member name after `.`" })
     );
 }
+
+// ---- the conversion job: what a pass republishes ----
+
+use crossbeam_channel::unbounded;
+use lsp_types::TextDocumentContentChangeEvent;
+use ropey::Rope;
+
+use crate::hir::tests::helper::test_workspace;
+use crate::salsa::{Db, File};
+use crate::workspace::LoadedFile;
+
+/// Two documents with one unresolved name each, so both start with a publish.
+fn two_documents() -> (Db, File, File, camino::Utf8PathBuf) {
+    let mut workspace = test_workspace("contract A { uint x = missing; }");
+    let root = workspace.roots[0].path.clone();
+    let other = root.join("src/Other.sol");
+    workspace.roots[0].files.push(LoadedFile {
+        path: other.clone(),
+        text: Some(Rope::from_str("contract B { uint y = missing; }")),
+    });
+
+    let db = Db::new(workspace);
+    let a = db.file(&root.join("src/Test.sol")).expect("A is indexed");
+    let b = db.file(&other).expect("B is indexed");
+    (db, a, b, root.join("src/Test.sol"))
+}
+
+fn request(db: &Db, files: &[(File, i32, u64)]) -> DiagnosticRequest {
+    DiagnosticRequest {
+        snapshot: db.snapshot(),
+        files: files
+            .iter()
+            .map(|&(file, version, epoch)| DiagnosedFile {
+                file,
+                version,
+                epoch,
+            })
+            .collect(),
+    }
+}
+
+/// A pass converts what changed and hands it to the loop; a second pass with
+/// nothing changed publishes nothing. The unchanged sibling is skipped even
+/// though the edit made salsa recompute its def map, because the value compare
+/// catches a recompute that produced the same diagnostics.
+#[test]
+fn a_pass_republishes_only_what_changed() {
+    let (mut db, a, b, a_path) = two_documents();
+    let mut job = DiagnosticsWorker::default();
+    let (tx, rx) = unbounded();
+    let (_requests, no_requests) = unbounded::<DiagnosticRequest>();
+
+    assert!(job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
+    assert_eq!(rx.try_iter().count(), 2, "both documents are published once");
+
+    assert!(job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
+    assert_eq!(rx.try_iter().count(), 0, "nothing changed, so nothing is sent");
+
+    // Only A is edited.
+    db.apply_changes(
+        a_path,
+        vec![TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: "contract A { uint x = 1; }".to_string(),
+        }],
+    );
+
+    assert!(job.pass(&request(&db, &[(a, 2, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
+    let sent = rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(sent.len(), 1, "only the edited document is republished");
+    assert_eq!(sent[0].file, a);
+}
+
+/// A document closed and reopened at the same version with the same content
+/// must be published again: the client cleared its diagnostics on close, and
+/// only the epoch distinguishes the reopen from the earlier open.
+#[test]
+fn a_reopened_document_is_republished() {
+    let (db, a, b, _) = two_documents();
+    let mut job = DiagnosticsWorker::default();
+    let (tx, rx) = unbounded();
+    let (_requests, no_requests) = unbounded::<DiagnosticRequest>();
+
+    assert!(job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
+    assert_eq!(rx.try_iter().count(), 2);
+
+    // Same version, same content, new open.
+    assert!(job.pass(&request(&db, &[(a, 1, 1), (b, 1, 0)]), &no_requests, &tx).is_none());
+    let sent = rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(sent.len(), 1, "the reopened document is republished");
+    assert_eq!(sent[0].file, a);
+}

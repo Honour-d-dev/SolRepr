@@ -72,10 +72,9 @@ pub struct Packages {
     pub packages: Arc<[Package]>,
 }
 
-/// Bumped by every change to the file index. Import resolution reads it, so a
-/// new or removed root invalidates the def maps that resolved through the
-/// index — without it a dependency root added later leaves `UnresolvedImport`
-/// memoized, because the path lookup is not a salsa value.
+/// Bumped by every change to the file index, so a new or removed root
+/// invalidates the def maps that resolved through it.
+/// Is a direct dependency in [`RootDb::resolve_to_file`].
 #[salsa::input(singleton)]
 pub struct FilesRevision {
     pub revision: u32,

@@ -2,32 +2,8 @@ use std::{thread, time::Duration};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
-pub(crate) trait Job: Send + 'static {
-    type Req: Send + 'static;
-    type Res: Send + 'static;
-    fn run(self, rx: Receiver<Self::Req>, tx: Sender<Self::Res>);
 
-    /// Collapses a burst of requests until the channel goes quiet for `timeout`,
-    fn debounce<T>(rx: &Receiver<T>, mut latest: T, timeout: Duration, combine: impl Fn(T, T) -> T) -> T {
-        while let Ok(newer) = rx.recv_timeout(timeout) {
-            latest = combine(latest, newer);
-        }
-        latest
-    }
-
-    /// Collapses the queued requests, combining each into the running value.
-    fn coalesce<T>(rx: &Receiver<T>, combine: impl Fn(T, T) -> T) -> Option<T> {
-        let mut latest = None;
-        while let Ok(newer) = rx.try_recv() {
-            latest = Some(match latest {
-                Some(latest) => combine(latest, newer),
-                None => newer,
-            });
-        }
-        latest
-    }
-}
-
+/// Spawns new threads with a designated Job.
 pub(crate) struct Worker<J: Job> {
     tx: Sender<J::Req>,
     pub(crate) rx: Receiver<J::Res>
@@ -58,5 +34,36 @@ impl<J: Job> Worker<J> {
         self.rx = crossbeam_channel::never();
     }
 }
+
+
+/// A job that runs on its own thread. Reads requests from `rx` and answers on `tx`.
+pub(crate) trait Job: Send + 'static {
+    type Req: Send + 'static;
+    type Res: Send + 'static;
+    fn run(self, rx: Receiver<Self::Req>, tx: Sender<Self::Res>);
+}
+
+/// Collapses a burst of requests until the channel goes quiet for `timeout`,
+/// combining each arrival into the running value. `combine` decides what
+/// collapsing means
+pub(crate) fn debounce<T>(rx: &Receiver<T>, mut latest: T, timeout: Duration, combine: impl Fn(T, T) -> T) -> T {
+    while let Ok(newer) = rx.recv_timeout(timeout) {
+        latest = combine(latest, newer);
+    }
+    latest
+}
+
+/// Collapses the queued requests, combining each into the running value.
+pub(crate) fn coalesce<T>(rx: &Receiver<T>, combine: impl Fn(T, T) -> T) -> Option<T> {
+    let mut latest = None;
+    while let Ok(newer) = rx.try_recv() {
+        latest = Some(match latest {
+            Some(latest) => combine(latest, newer),
+            None => newer,
+        });
+    }
+    latest
+}
+
 
 

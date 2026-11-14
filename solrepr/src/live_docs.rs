@@ -9,6 +9,9 @@ type NodeId = Idx<Node>;
 struct Node {
     key: File,
     version: i32,
+    /// Distinguishes this open from any earlier one, so a document reopened at
+    /// the same version is not mistaken for the one that was closed.
+    epoch: u64,
     previous: Option<NodeId>,
     next: Option<NodeId>,
 }
@@ -25,6 +28,7 @@ pub(crate) struct LiveDocs {
     most_recent: Option<NodeId>,
     least_recent: Option<NodeId>,
     capacity: usize,
+    next_epoch: u64,
 }
 
 impl LiveDocs {
@@ -41,16 +45,13 @@ impl LiveDocs {
             most_recent: None,
             least_recent: None,
             capacity,
+            next_epoch: 0,
         }
     }
 
     /// The size of the diagnosed set, not counting evicted documents.
     pub(crate) fn len(&self) -> usize {
         self.map.len()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.map.is_empty()
     }
 
     /// `file` is in the diagnosed set.
@@ -97,6 +98,14 @@ impl LiveDocs {
     /// this, since an open document is never untracked.
     pub(crate) fn close(&mut self, file: &File) -> bool {
         self.remove(file) || self.evicted.remove(file).is_some()
+    }
+
+    /// The identity of this open, or `None` when `file` is not in the diagnosed
+    /// set. A reopen gets a fresh epoch.
+    pub(crate) fn epoch(&self, file: &File) -> Option<u64> {
+        self.map
+            .get(file)
+            .map(|node_id| self.nodes[*node_id].epoch)
     }
 
     /// The version the client last reported for `file`, or `None` when it is
@@ -156,9 +165,11 @@ impl LiveDocs {
         let node = Node {
             key: file,
             version,
+            epoch: self.next_epoch,
             previous: None,
             next: None,
         };
+        self.next_epoch += 1;
         if let Some(node_id) = self.dead_nodes.pop() {
             self.nodes[node_id] = node;
             node_id

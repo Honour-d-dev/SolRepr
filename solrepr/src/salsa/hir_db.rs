@@ -612,17 +612,25 @@ fn bases_cycle_error<'db>(
     _id: salsa::Id,
     def: DefWithBases<'db>,
 ) -> Analysis<[DefId]> {
-    let container = match def.id(db) {
+    let container = cycle_container(db, def);
+    Analysis::new(vec![container], cycle_diagnostic(container))
+}
+
+/// The container a `DefWithBases` names, for the cycle fallbacks.
+fn cycle_container(db: &dyn HirDb, def: DefWithBases<'_>) -> DefId {
+    match def.id(db) {
         DefWithBasesId::Contract(c) => DefId::Contract(c),
         DefWithBasesId::Interface(i) => DefId::Interface(i),
-    };
-    Analysis::new(
-        vec![container],
-        Arc::from(vec![SemanticDiagnostic::InheritanceFailure {
-            contract: container,
-            problems: vec!["cyclic inheritance hierarchy".to_string()],
-        }]),
-    )
+    }
+}
+
+/// Every one of these queries cycles only on a cyclic inheritance hierarchy, so
+/// the same diagnosis is the right answer whichever one is the cycle head.
+fn cycle_diagnostic(container: DefId) -> Arc<[SemanticDiagnostic]> {
+    Arc::from(vec![SemanticDiagnostic::InheritanceFailure {
+        contract: container,
+        problems: vec!["cyclic inheritance hierarchy".to_string()],
+    }])
 }
 
 /// Cached declaration-to-base facts used recursively by the single public
@@ -641,16 +649,16 @@ fn override_facts<'db>(
 }
 
 fn override_facts_cycle_result<'db>(
-    _db: &'db dyn HirDb,
+    db: &'db dyn HirDb,
     _id: salsa::Id,
-    _def: DefWithBases<'db>,
+    def: DefWithBases<'db>,
 ) -> Analysis<OverrideFacts> {
     Analysis::new(
         OverrideFacts {
             complete: false,
             ..Default::default()
         },
-        Arc::from(Vec::new()),
+        cycle_diagnostic(cycle_container(db, def)),
     )
 }
 
@@ -667,23 +675,24 @@ pub fn member_map<'db>(
 }
 
 fn member_map_cycle_result<'db>(
-    _db: &'db dyn HirDb,
+    db: &'db dyn HirDb,
     _id: salsa::Id,
-    _def: DefWithBases<'db>,
+    def: DefWithBases<'db>,
 ) -> Analysis<MemberMap> {
     Analysis::new(
         MemberMap {
             complete: false,
             ..MemberMap::default()
         },
-        Arc::from(Vec::new()),
+        cycle_diagnostic(cycle_container(db, def)),
     )
 }
 
 
-/// Cycle fallback: initializers and struct fields can reference each other
-/// cyclically, so fill every allocated ID with `Invalid` to keep tables total.
-#[salsa::tracked(cycle_result = inference_cycle_result)]
+/// Initializers and struct fields can reference each other cyclically. The
+/// cycle is legal code, and the declared types are still knowable, so this
+/// iterates to a fixed point instead of degrading to `Invalid`.
+#[salsa::tracked(cycle_fn = inference_cycle_recover, cycle_initial = inference_cycle_initial)]
 pub fn inference<'db>(db: &'db dyn HirDb, owner: Id<'db>) -> Arc<Inference> {
     let owner = owner.id(db);
 
@@ -693,11 +702,9 @@ pub fn inference<'db>(db: &'db dyn HirDb, owner: Id<'db>) -> Arc<Inference> {
     }
 }
 
-fn inference_cycle_result<'db>(
-    db: &'db dyn HirDb,
-    _id: salsa::Id,
-    owner: Id<'db>,
-) -> Arc<Inference> {
+/// The bottom of the domain: every allocated id is `Invalid`, so the tables
+/// stay total while the other side of the cycle is still unknown.
+fn inference_cycle_initial<'db>(db: &'db dyn HirDb, _id: salsa::Id, owner: Id<'db>) -> Arc<Inference> {
     let tables = match with_owner_store(db, owner.id(db), |input| {
         Inference::invalid_for(db, input.store, input.locals, input.fields, input.variants)
     }) {
@@ -705,6 +712,12 @@ fn inference_cycle_result<'db>(
         None => Inference::empty(),
     };
     tables.into()
+}
+
+/// Keep what the round computed; salsa re-runs until two rounds agree, which it
+/// decides by comparing the tables and their diagnostics.
+fn inference_cycle_recover<'db>(_db: &'db dyn HirDb, _c: &salsa::Cycle, _last: &Arc<Inference>, value: Arc<Inference>, _owner: Id<'db>) -> Arc<Inference> {
+    value
 }
 
 /// The declaration containing `offset` — the innermost enclosing container in
