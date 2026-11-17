@@ -1,5 +1,5 @@
-//! Package-graph traversal: local and workspace packages, vendored libraries,
-//! npm dependencies and remapping targets, deduplicated.
+//! Package-graph traversal: local and workspace packages, vendored libraries
+//! and npm dependencies, deduplicated.
 
 use std::collections::VecDeque;
 
@@ -8,7 +8,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::detect::{
     PackageDescriptor, PackageReference, find_package_roots, package_descriptor,
-    remapped_descriptor,
 };
 
 /// Expand every package source into one deduplicated graph, with the roots kept
@@ -61,11 +60,6 @@ pub(super) fn discover_package_graph( root: &Utf8Path ) -> (Vec<PackageDescripto
                         roots.push(package_descriptor(root, true));
                     }
                     queue.extend(roots);
-                }
-                PackageReference::Remapped { root, target } => {
-                    if !seen.contains(root) {
-                        queue.push_back(remapped_descriptor(root, true, Some(target.clone())));
-                    }
                 }
             }
         }

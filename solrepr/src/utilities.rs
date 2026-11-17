@@ -95,6 +95,9 @@ pub(crate) fn resolve_import(
             (
                 remapping.context.as_ref().map_or(0, |context| context.as_str().len()),
                 remapping.prefix.len(),
+                // A manifest can declare one prefix twice with different targets — Foundry's are relative to
+                // the package root and may miss the installed layout, while the resolver found the real one.
+                remapping.target.is_dir(),
             )
         });
 
@@ -272,6 +275,35 @@ pub(crate) use iterate_children;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A manifest can declare one prefix twice — Foundry's `remappings` are relative to the
+    /// package root and may not match the installed layout, while the dependency resolver
+    /// found the real package. Ties on specificity must prefer the target that exists;
+    /// `max_by_key` returning the last of equal maxima used to pick the broken one.
+    #[test]
+    fn a_duplicate_prefix_prefers_the_target_that_exists() {
+        let root = fixture_path("fixtures/workspaces/standalone/basic");
+        let missing = root.join("node_modules-that-is-not-installed");
+        assert!(!missing.is_dir());
+
+        // Discovery sorts by target, so the missing one is last — the case that used to win.
+        let remappings = vec![
+            Remapping {
+                context: None,
+                prefix: "@oz/".to_string(),
+                target: root.clone(),
+            },
+            Remapping {
+                context: None,
+                prefix: "@oz/".to_string(),
+                target: missing,
+            },
+        ];
+
+        let base = root.join("Main.sol");
+        let resolved = resolve_import(&base, "@oz/Dependency.sol", &remappings).expect("resolves");
+        assert_eq!(resolved, normalize_path(&root.join("Dependency.sol")));
+    }
 
 
     #[test]

@@ -37,10 +37,6 @@ pub(crate) fn is_manifest(path: &Utf8Path) -> bool {
         || HARDHAT_CONFIGS.contains(&name)
 }
 
-/// Basenames that conventionally hold a package's Solidity sources — a
-/// remapping target ending in one names the parent as the package root.
-const SOURCE_DIR_NAMES: [&str; 5] = ["src", "contracts", "test", "tests", "script"];
-
 /// A package digested from its manifests: source roots, dev dirs, remappings
 /// and outgoing edges. Foundry and Hardhat config can coexist, so this records
 /// the resolved facts rather than one package kind.
@@ -72,12 +68,6 @@ pub(super) enum PackageReference {
     /// is its directory name — an enclosing package owning a library with
     /// the same name shadows this copy.
     Library { name: String, root: Utf8PathBuf },
-    /// A declared remapping target: `root` is the package it resolves to,
-    /// `target` the directory the remapping actually points at.
-    Remapped {
-        root: Utf8PathBuf,
-        target: Utf8PathBuf,
-    },
 }
 
 pub(super) fn find_package_roots( root: &Utf8Path, is_dependency: bool) -> Vec<PackageDescriptor> {
@@ -112,30 +102,13 @@ pub(super) fn find_package_roots( root: &Utf8Path, is_dependency: bool) -> Vec<P
 
 /// The descriptor at `root`: the manifest's digest when present, else a
 /// manifestless package trusted by the edge that named it (a configured
-/// library dir, an npm dependency, or a remapping target).
+/// library dir or an npm dependency).
 pub(super) fn package_descriptor(root: &Utf8Path, is_dependency: bool) -> PackageDescriptor {
-    remapped_descriptor(root, is_dependency, None)
-}
-
-/// `package_descriptor` for a `Remapped` edge: when the resolved root has no
-/// manifest, the remapping `target` subtree is its source root — the target
-/// subtree is exactly what the remapping exposes.
-pub(super) fn remapped_descriptor(
-    root: &Utf8Path,
-    is_dependency: bool,
-    target: Option<Utf8PathBuf>,
-) -> PackageDescriptor {
-    detect_package(root, is_dependency).unwrap_or_else(|| {
-        let root = normalize_path(root);
-        let source_roots = target
-            .map(|target| vec![target])
-            .unwrap_or_else(|| default_source_roots(&root, is_dependency));
-        PackageDescriptor {
-            root,
-            is_dependency,
-            source_roots,
-            ..PackageDescriptor::default()
-        }
+    detect_package(root, is_dependency).unwrap_or_else(|| PackageDescriptor {
+        root: normalize_path(root),
+        is_dependency,
+        source_roots: default_source_roots(root, is_dependency),
+        ..PackageDescriptor::default()
     })
 }
 
@@ -235,9 +208,40 @@ fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -
         .map(|hardhat| libraries_under(&root, &hardhat.imports))
         .unwrap_or_default();
 
-    // Outgoing package edges. Only *declared* remappings become `Remapped`
-    // edges — the npm and library remappings synthesized below resolve
-    // through the Dependency and Library edges already recorded here.
+    // Dev dirs are source roots for workspace packages; a dependency's tests
+    // and scripts are outside the compilation unit entirely.
+    let mut source_roots = Vec::new();
+    let mut dev_dirs = Vec::new();
+    if let Some(foundry) = &foundry {
+        // `contracts` is a conventional extra root, not a forge key.
+        source_roots.extend(dirs_under(&root, [foundry.src.as_str(), "contracts"]));
+        dev_dirs.extend(dirs_under(
+            &root,
+            [foundry.test.as_str(), foundry.script.as_str()],
+        ));
+    }
+    if let Some(hardhat) = &hardhat {
+        source_roots.extend(dirs_under(&root, &hardhat.sources));
+        dev_dirs.extend(dirs_under(&root, &hardhat.tests));
+    }
+    // Both configs can name one directory — foundry `test = 'test'` beside a
+    // hardhat default `tests = ['test']` — and it is one ignored root.
+    dev_dirs.sort();
+    dev_dirs.dedup();
+    let ignored_dirs = if is_dependency {
+        dev_dirs
+    } else {
+        source_roots.extend(dev_dirs);
+        Vec::new()
+    };
+    if source_roots.is_empty() {
+        source_roots = default_source_roots(&root, is_dependency);
+    }
+    source_roots.sort();
+    source_roots.dedup();
+
+    // Outgoing package edges: vendored libraries, npm workspace members and npm dependencies.
+    // Remappings are resolution data, not edges — they never decide what gets indexed.
     let mut references = Vec::new();
     for (name, child) in foundry_libraries.iter().chain(&hardhat_libraries) {
         references.push(PackageReference::Library {
@@ -257,12 +261,6 @@ fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -
             .iter()
             .map(|(_, root)| PackageReference::Dependency(root.clone())),
     );
-    references.extend(remappings.iter().filter_map(|remapping| {
-        Some(PackageReference::Remapped {
-            root: resolve_package_root(&root, &remapping.target)?,
-            target: remapping.target.clone(),
-        })
-    }));
 
     // forge and hardhat synthesize `<dir>/ -> <child src>` for vendored
     // libraries; explicit remappings claim their prefixes first.
@@ -292,34 +290,6 @@ fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -
             .then(left.target.cmp(&right.target))
     });
     remappings.dedup();
-
-    // Dev dirs are source roots for workspace packages; a dependency's tests
-    // and scripts are outside the compilation unit entirely.
-    let mut source_roots = Vec::new();
-    let mut dev_dirs = Vec::new();
-    if let Some(foundry) = &foundry {
-        // `contracts` is a conventional extra root, not a forge key.
-        source_roots.extend(dirs_under(&root, [foundry.src.as_str(), "contracts"]));
-        dev_dirs.extend(dirs_under(
-            &root,
-            [foundry.test.as_str(), foundry.script.as_str()],
-        ));
-    }
-    if let Some(hardhat) = &hardhat {
-        source_roots.extend(dirs_under(&root, &hardhat.sources));
-        dev_dirs.extend(dirs_under(&root, &hardhat.tests));
-    }
-    let ignored_dirs = if is_dependency {
-        dev_dirs
-    } else {
-        source_roots.extend(dev_dirs);
-        Vec::new()
-    };
-    if source_roots.is_empty() {
-        source_roots = default_source_roots(&root, is_dependency);
-    }
-    source_roots.sort();
-    source_roots.dedup();
 
     PackageDescriptor {
         root,
@@ -372,7 +342,9 @@ fn synthesize_library_remappings(
         if !claimed.insert(prefix.clone()) {
             continue;
         }
-        let target = ["src", "contracts"]
+        // Forge maps `lib/<name>` to its `src/` when it has one, and to the library root otherwise —
+        // never to `contracts/`.
+        let target = ["src"]
             .iter()
             .map(|dir| child.join(dir))
             .find(|dir| dir.is_dir())
@@ -383,28 +355,6 @@ fn synthesize_library_remappings(
             target,
         });
     }
-}
-
-/// The package root a remapping target belongs to: the nearest manifest-bearing
-/// ancestor below the declaring package, else the parent of a conventional
-/// source dir, else the target. `None` for a self or enclosing mapping.
-fn resolve_package_root(declaring: &Utf8Path, target: &Utf8Path) -> Option<Utf8PathBuf> {
-    if !target.is_dir() {
-        return None;
-    }
-    let resolved = target
-        .ancestors()
-        .take_while(|ancestor| !declaring.starts_with(ancestor))
-        .find(|ancestor| manifests_in(ancestor).is_some())
-        .map(Utf8Path::to_path_buf)
-        .or_else(|| {
-            target
-                .file_name()
-                .filter(|name| SOURCE_DIR_NAMES.contains(name))
-                .and_then(|_| target.parent().map(Utf8Path::to_path_buf))
-        })
-        .unwrap_or_else(|| target.to_path_buf());
-    (!declaring.starts_with(&resolved)).then_some(resolved)
 }
 
 /// `dir.join(name)` when that file exists.

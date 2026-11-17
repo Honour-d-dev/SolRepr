@@ -271,44 +271,24 @@ fn remappings_only_root_keeps_remappings_and_indexes_vendored_files() {
             .iter()
             .any(|remapping| remapping.prefix == "dep/")
     );
-    // The remapping names vendor/dep — a dependency package of its own,
-    // not part of the root's source root.
-    let dependency = discovered
-        .roots
-        .iter()
-        .find(|source| source.is_dependency && source.path.ends_with("vendor/dep"))
-        .expect("vendor/dep is a dependency source root");
-    assert!(dependency.path.ends_with("vendor/dep"));
+    // The remapping is resolution data only: `vendor/dep` is inside the root's
+    // own source tree, so it is indexed there and never becomes a package.
     assert!(
-        dependency
-            .files
+        discovered
+            .packages
             .iter()
-            .any(|file| file.ends_with("Dep.sol"))
+            .all(|package| package.root == root),
+        "a remapping never creates a package: {:?}",
+        discovered.packages
     );
     let source = discovered
         .roots
         .iter()
         .find(|source| source.path == root)
         .expect("the package root is the source root");
-    assert!(!source.files.iter().any(|file| file.ends_with("Dep.sol")));
-}
-
-#[test]
-fn external_remapping_target_becomes_a_dependency_source_root() {
-    let root = fixture_path("fixtures/workspaces/foundry/remappings/external/proj");
-    let discovered = discover_workspace(&root);
-
-    let dependency = discovered
-        .roots
-        .iter()
-        .find(|source| source.is_dependency && source.path.ends_with("ext_lib"))
-        .expect("the external remapping target is a dependency source root");
-    assert!(dependency.path.ends_with("ext_lib"));
     assert!(
-        dependency
-            .files
-            .iter()
-            .any(|file| file.ends_with("Ext.sol"))
+        source.files.iter().any(|file| file.ends_with("Dep.sol")),
+        "the vendored file is indexed with the package that declares the alias"
     );
 }
 
@@ -398,23 +378,20 @@ fn npm_workspace_globs_discover_all_members() {
 /// as the package — manifest, remappings, and nested packages included.
 #[test]
 fn file_root_discovers_the_parent_package() {
-    let file = fixture_path("fixtures/workspaces/foundry/remappings/external/proj/Main.sol");
+    let file = fixture_path("fixtures/workspaces/foundry/remappings/vendor/Main.sol");
     let discovered = discover_workspace(&file);
 
     let proj = discovered
         .packages
         .iter()
-        .find(|package| package.root.ends_with("proj"))
+        .find(|package| package.root.ends_with("vendor"))
         .expect("the file's parent directory is a package");
     assert!(
         proj.remappings
             .iter()
-            .any(|remapping| remapping.prefix == "ext/"),
+            .any(|remapping| remapping.prefix == "dep/"),
         "the parent's remappings.txt is read"
     );
-    assert!(discovered.roots.iter().any(|source| {
-        source.is_dependency && source.path.ends_with("ext_lib")
-    }));
     assert!(
         discovered
             .roots
@@ -495,23 +472,6 @@ fn remapping_into_a_source_dir_resolves_to_the_package_root() {
     assert!(dependency.files.iter().any(|file| file.ends_with("Lib.sol")));
 }
 
-/// Remapping dependencies are traversed transitively: `ext_a`'s own
-/// remappings.txt carries the graph to `ext_b`.
-#[test]
-fn remapping_dependencies_are_traversed_transitively() {
-    let root = fixture_path("fixtures/workspaces/foundry/remappings/external/proj");
-    let discovered = discover_workspace(&root);
-
-    assert!(discovered.roots.iter().any(|source| {
-        source.is_dependency && source.path.ends_with("ext_a")
-    }));
-    assert!(discovered.roots.iter().any(|source| {
-        source.is_dependency && source.path.ends_with("ext_b")
-    }));
-}
-
-/// A remapping edge into a deduplicated library copy dies with the
-/// copy — the dependency stays out of the compilation unit.
 #[test]
 fn remapping_into_an_ignored_library_copy_stays_ignored() {
     let root = fixture_path("fixtures/workspaces/foundry/nested");
@@ -590,4 +550,53 @@ fn a_source_root_names_its_package_by_path() {
             source.path
         );
     }
+}
+/// A dependency can ship a manifest inside its own source dir: npm does it for
+/// `@openzeppelin/contracts`, whose `contracts/package.json` is the published
+/// package root. A remapping into that dir (`@openzeppelin/contracts/=contracts/`)
+/// is an alias, not an edge to another package — treating it as one indexed the
+/// same files twice, and the copy took ownership of them, dropping the parent's
+/// remappings from their scope.
+#[test]
+fn a_remapping_into_the_packages_own_sources_is_not_a_package() {
+    let root = fixture_path("fixtures/workspaces/foundry/self_remap");
+    let discovered = discover_workspace(&root);
+
+    let package_roots = discovered
+        .packages
+        .iter()
+        .map(|package| package.root.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        !package_roots
+            .iter()
+            .any(|package| package.ends_with("lib/dep/contracts")),
+        "the source dir is not a package of its own: {package_roots:?}"
+    );
+
+    let roots = discovered
+        .roots
+        .iter()
+        .filter(|source| source.path.ends_with("lib/dep/contracts"))
+        .collect::<Vec<_>>();
+    assert_eq!(roots.len(), 1, "one root indexes those files");
+    assert_eq!(
+        roots[0].package_id.0,
+        root.join("lib/dep"),
+        "the files belong to the package that declares the source dir"
+    );
+
+    // Dropping the edge must not drop the alias: imports still resolve.
+    let dep = discovered
+        .packages
+        .iter()
+        .find(|package| package.root.ends_with("lib/dep"))
+        .expect("dep is a package");
+    assert!(
+        dep.remappings.iter().any(|remapping| {
+            remapping.prefix == "@dep/" && remapping.target.ends_with("lib/dep/contracts")
+        }),
+        "the remapping survives: {:?}",
+        dep.remappings
+    );
 }
