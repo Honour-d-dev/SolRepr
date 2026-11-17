@@ -167,7 +167,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ steps.tag.outputs.tag }}" vsix/*.vsix --clobber
 
-      - name: Add VSIX links to the release notes
+      - name: Set VSIX release notes
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -176,13 +176,10 @@ jobs:
           tag="${{ steps.tag.outputs.tag }}"
           version="$(node -p "require('./extensions/vscode/package.json').version")"
           body="$(mktemp)"
-          gh release view "$tag" --json body --jq .body > "$body"
-          if grep -q "## VS Code extension" "$body"; then
-            exit 0
-          fi
           {
+            echo "## SolRepr ${version}"
             echo ""
-            echo "## VS Code extension"
+            echo "### VS Code extension"
             echo ""
             echo "| File | Platform |"
             echo "| --- | --- |"
@@ -201,5 +198,7 @@ jobs:
             echo '```bash'
             echo "code --install-extension solrepr-${version}-<platform>.vsix"
             echo '```'
-          } >> "$body"
+            echo ""
+            echo "The standalone server and installers remain available as release assets."
+          } > "$body"
           gh release edit "$tag" --notes-file "$body"

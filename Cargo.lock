@@ -997,7 +997,7 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 [[package]]
 name = "tree-sitter-solidity"
 version = "1.2.13"
-source = "git+https://github.com/Honour-d-dev/tree-sitter-solidity.git?rev=3ba3dd3#3ba3dd3da22653c923c6ea69063c1da321604910"
+source = "git+https://github.com/Honour-d-dev/tree-sitter-solidity.git?rev=014bab0#014bab0a91b0d54e9f0db475945a19e510cb09ad"
 dependencies = [
  "cc",
  "tree-sitter-language",

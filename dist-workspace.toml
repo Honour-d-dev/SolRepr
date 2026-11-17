@@ -17,3 +17,5 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# The source is available at the tag; do not attach a second copy
+source-tarball = false
