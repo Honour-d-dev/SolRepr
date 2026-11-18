@@ -81,6 +81,47 @@ fn local_hover_drops_stack_and_notes_pointer_kinds() {
 }
 
 #[test]
+fn constant_hover_shows_the_folded_value() {
+    let (db, file) = make_test_db(
+        r#"
+            type Price is uint128;
+            contract C {
+                uint256 constant A = 1 + 2;
+                uint256 constant D = A + 1;
+                Price constant P = Price.wrap(5);
+                bytes4 constant B = hex"01ff";
+                bool constant F = true;
+                bytes32 constant SLOT = keccak256("x");
+            }
+        "#,
+    );
+    let defs = db.file_def_map(file);
+    let var = |name: &str| {
+        defs.defs
+            .keys()
+            .find_map(|def| match def {
+                DefId::Var(id) if db.var_data(*id).name == name => Some(*id),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("fixture declares {name}"))
+    };
+    let hover = Hover { db: &db };
+    for (name, expected) in [
+        ("A", "uint256 constant A = 3"),
+        ("D", "uint256 constant D = 4"),
+        ("P", "Price constant P = 5"),
+        ("B", "bytes4 constant B = hex\"01ff\""),
+        ("F", "bool constant F = true"),
+        // An opaque constant has no folded value, so the initializer's
+        // source text stands in.
+        ("SLOT", "bytes32 constant SLOT = keccak256(\"x\")"),
+    ] {
+        let text = hover.hover_var(&var(name)).unwrap();
+        assert!(text.contains(expected), "{name}: {text}");
+    }
+}
+
+#[test]
 fn enum_hover_formats_one_variant_per_line() {
     let (db, file) = make_test_db("enum Status { Pending, Active, Closed } contract C {}");
     let id = db

@@ -8,7 +8,8 @@ mod usage;
 use num_bigint::BigInt;
 use triomphe::Arc;
 pub use tables::Inference;
-use const_eval::ConstErrorKind;
+pub use const_eval::{ConstErrorKind, ConstValue, const_value};
+use const_eval::ConstError;
 use usage::UsageContext;
 
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Name, UnaryOp};
@@ -279,6 +280,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// A variable's declaration checks: the constant-type rule, initializer assignability,
     /// `constant` folding, and the uninitialized-`constant` error.
     fn check_var_declaration(&mut self, var_def: DefId, data: &VarData) -> Type {
+        // The only entry point is a variable's declaration-site occurrence.
+        let DefId::Var(var_id) = var_def else {
+            return Type::invalid(self.db);
+        };
         // The initializer is checked against the type the variable *binds* — a state variable's
         // slot, so an array initializer is a copy into storage.
         let declared = self
@@ -309,8 +314,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Some(init) => {
                 let init_ty = self.expect_assignable(init, declared);
                 if data.kind == VariableKind::Const
-                    && let Err(error) = self.eval_const(init)
+                    && let Err(kind) = self.db.const_value(var_id)
                 {
+                    // The query drops the failing expression, so re-evaluate on the
+                    // error path to anchor a nested failure where it happened.
+                    let error = self
+                        .eval_const(init)
+                        .err()
+                        .unwrap_or(ConstError { expr: init, kind });
                     // An untypeable initializer already owns its diagnostic; report
                     // only what the type level cannot see (cycles, fold errors).
                     if !init_ty.is_invalid(self.db)

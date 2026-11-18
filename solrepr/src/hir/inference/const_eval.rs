@@ -3,15 +3,16 @@ use num_bigint::{BigInt, Sign};
 
 use crate::hir::body_map::ScopeId;
 use crate::hir::builtins::BuiltinFn;
-use crate::hir::types::VariableKind;
+use crate::hir::diagnostics::DiagnosticAnchor;
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Literal, Name, UnaryOp};
-use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, CallableOrigin, Resolution};
 use crate::hir::resolver::Resolver;
-use crate::hir::diagnostics::DiagnosticAnchor;
+use crate::hir::syntax_store::SyntaxStore;
+use crate::hir::types::VariableKind;
 use crate::hir::types::{LiteralKind, Primitive, Ty, TyKind, Type};
 use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::hir_db::def_name;
+use crate::salsa::interned_db::Var;
 use crate::salsa::{FileId, HirDb};
 
 use super::Inferer;
@@ -25,8 +26,8 @@ const BIGINT_BITS: u64 = 1 << 20;
 
 /// A folded compile-time value. Integer and rational arithmetic is exact;
 /// an integer is a rational with `den == 1`.
-#[derive(Clone)]
-pub(super) enum ConstValue {
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ConstValue {
     /// `num / den` — `den > 0` always. Integer literals, enum indices, and
     /// addresses-as-numbers live here; non-integral literals keep their
     /// fraction so `1/2*4` is `2`.
@@ -63,6 +64,19 @@ impl ConstValue {
             }
             Self::Wide(kind) => Some(*kind),
             _ => None,
+        }
+    }
+
+    /// The folded value as source-shaped text for hover. `None` when there is
+    /// no value to show — an opaque constant, or one too wide to build.
+    pub(crate) fn render(&self) -> Option<String> {
+        match self {
+            Self::Rational(num, den) if *den == BigInt::from(1u8) => Some(num.to_string()),
+            Self::Rational(num, den) => Some(format!("{num}/{den}")),
+            Self::Bool(value) => Some(value.to_string()),
+            Self::Bytes(bytes) => Some(format!("hex\"{}\"", hex(bytes))),
+            Self::String(text) => Some(quote(text)),
+            Self::Opaque | Self::Wide(_) => None,
         }
     }
 
@@ -108,12 +122,40 @@ impl ConstValue {
     }
 }
 
+// ConstValue Helper fns -------------------------------------------------------------
 fn rat(num: BigInt, den: BigInt) -> ConstValue {
     if den < BigInt::from(0u8) {
         ConstValue::Rational(-num, -den)
     } else {
         ConstValue::Rational(num, den)
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// A Solidity string literal spelling `text`.
+fn quote(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn two_pow(bits: u32) -> BigInt {
@@ -160,6 +202,16 @@ fn saturated_kind(num: &BigInt, den: &BigInt, exponent: i64) -> LiteralKind {
     }
 }
 
+/// The kind `value << shift` denotes past [`BIGINT_BITS`]: every nonzero value
+/// is wider than any type, and zero was folded before this was needed.
+fn saturated_shift_kind(value: &BigInt) -> LiteralKind {
+    LiteralKind::Int {
+        neg: value.sign() == Sign::Minus,
+        min_bits: 257,
+        exact_bytes: None,
+    }
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────
 
 /// Why an expression does not fold to a [`ConstValue`]. `range` always
@@ -170,7 +222,8 @@ pub(super) struct ConstError {
     pub kind: ConstErrorKind,
 }
 
-pub(super) enum ConstErrorKind {
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ConstErrorKind {
     /// No constant denotes this expression — an unresolved name, a call, an
     /// `immutable`, `msg.sender`. Reported with the call site's own phrasing.
     NotConstant,
@@ -187,6 +240,28 @@ pub(super) enum ConstErrorKind {
     /// The failure belongs to another declaration's initializer — that
     /// declaration's own const-init check owns the diagnostic.
     Foreign,
+}
+
+/// A constant's folded value, keyed by its declaration. The value is a
+/// property of the declaration, not of a body's inference run, so it is
+/// memoized at the query. `ConstEval::eval_var` keeps inlining a referenced
+/// constant's initializer, so the query never re-enters itself and a cycle
+/// never becomes a salsa cycle.
+#[salsa::tracked]
+pub fn const_value<'db>(db: &'db dyn HirDb, v: Var<'db>) -> Result<ConstValue, ConstErrorKind> {
+    let id = v.id(db);
+    let data = db.var_data(id);
+    if data.kind != VariableKind::Const {
+        return Err(ConstErrorKind::NotConstant);
+    }
+    let Some(init) = data.init else {
+        return Err(ConstErrorKind::NotConstant);
+    };
+    let def = DefId::Var(id);
+    let resolver = Resolver::for_declaration(db, def);
+    let mut eval = ConstEval::new(db, &data.syntax_store, &resolver, None, None);
+    eval.visiting.push(def);
+    eval.eval(init).map_err(|error| error.kind)
 }
 
 // ── Inferer entry points ─────────────────────────────────────────────────
@@ -242,9 +317,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 "The value of the constant {} has a cyclic dependency.",
                 def_name(self.db, *via)
             ),
-            ConstErrorKind::ZeroDivision { modulo } => {
-                if *modulo { "Modulo by zero." } else { "Division by zero." }.into()
+            ConstErrorKind::ZeroDivision { modulo } => if *modulo {
+                "Modulo by zero."
+            } else {
+                "Division by zero."
             }
+            .into(),
             ConstErrorKind::Eval(message) => message.clone(),
         };
         self.fail(DiagnosticAnchor::Expr(error.expr), message, ());
@@ -297,15 +375,14 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         }
     }
     fn resolve_ident(&self, expr: ExprId, name: &Name) -> Option<Resolution> {
-        let scope = self
-            .expr_scopes
-            .and_then(|map| map.get(expr).copied());
+        let scope = self.expr_scopes.and_then(|map| map.get(expr).copied());
         let order = self
             .expr_orders
             .and_then(|map| map.get(expr).copied())
             .unwrap_or_default();
         let is_self_name = self.store.name_expr == Some(expr);
-        self.resolver.resolve_name_in(name, scope, order, is_self_name)
+        self.resolver
+            .resolve_name_in(name, scope, order, is_self_name)
     }
 
     pub(super) fn eval(&mut self, expr: ExprId) -> Result<ConstValue, ConstError> {
@@ -313,9 +390,9 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             Expr::Literal(literal) => self.eval_literal(expr, &literal),
             Expr::Ident(name) => match self.resolve_ident(expr, &name) {
                 Some(Resolution::Var(def)) => self.eval_var(expr, def),
-                Some(Resolution::Variant(variant)) => Ok(ConstValue::int(u32::from(
-                    variant.id.into_raw(),
-                ))),
+                Some(Resolution::Variant(variant)) => {
+                    Ok(ConstValue::int(u32::from(variant.id.into_raw())))
+                }
                 _ => Err(self.not_constant(expr)),
             },
             Expr::Binary { op, left, right } => self.eval_binary(expr, op, left, right),
@@ -429,7 +506,9 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 }))
             }
             BinaryOp::Eq | BinaryOp::Ne => {
-                let equal = self.values_equal(&left, &right).ok_or_else(|| self.not_constant(expr))?;
+                let equal = self
+                    .values_equal(&left, &right)
+                    .ok_or_else(|| self.not_constant(expr))?;
                 Ok(ConstValue::Bool(matches!(op, BinaryOp::Eq) == equal))
             }
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
@@ -467,9 +546,8 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     .map_err(|_| self.eval_error(expr, "exponent too large"))?;
                 // Not built: `(2 ** 4096) ** 4096` is two megabytes, so the result's width is
                 // capped first. Its kind stays exact, so the conversion rejects it on width.
-                let too_wide = |base: &BigInt| {
-                    base.bits().saturating_mul(u64::from(unsigned)) > BIGINT_BITS
-                };
+                let too_wide =
+                    |base: &BigInt| base.bits().saturating_mul(u64::from(unsigned)) > BIGINT_BITS;
                 if unsigned > POW_LIMIT || too_wide(&num) || too_wide(&den) {
                     return Ok(ConstValue::Wide(saturated_kind(&num, &den, exponent)));
                 }
@@ -489,12 +567,17 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 let shift = right.as_int().ok_or_else(|| self.not_constant(expr))?;
                 let shift = u32::try_from(&shift)
                     .map_err(|_| self.eval_error(expr, "invalid shift amount"))?;
-                // `1 << 4_000_000_000` would allocate half a gigabyte; past the width cap the
-                // value is left uncomputed, as for a wide `**`.
+                // `1 << 4_000_000_000` would allocate half a gigabyte; past the width cap a
+                // nonzero value is left unbuilt but keeps an exact-enough kind, so the
+                // conversion rejects it on width. Zero folds outright.
                 if matches!(op, BinaryOp::Shl)
                     && value.bits().saturating_add(u64::from(shift)) > BIGINT_BITS
                 {
-                    return Ok(ConstValue::Opaque);
+                    return Ok(if value == BigInt::from(0u8) {
+                        ConstValue::int(0u8)
+                    } else {
+                        ConstValue::Wide(saturated_shift_kind(&value))
+                    });
                 }
                 Ok(ConstValue::int(match op {
                     BinaryOp::Shl => value << shift,
@@ -645,9 +728,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             (TyKind::Primitive(Primitive::Uint(n)), "max") => {
                 Ok(ConstValue::int(bits(n) - BigInt::from(1u8)))
             }
-            (TyKind::Primitive(Primitive::Int(n)), "min") => {
-                Ok(ConstValue::int(-bits(n - 1)))
-            }
+            (TyKind::Primitive(Primitive::Int(n)), "min") => Ok(ConstValue::int(-bits(n - 1))),
             (TyKind::Primitive(Primitive::Int(n)), "max") => {
                 Ok(ConstValue::int(bits(n - 1) - BigInt::from(1u8)))
             }
@@ -694,7 +775,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             _ => match self.type_member_ref(ty, prop) {
                 Some(Resolution::Var(def)) => self.eval_var(expr, def),
                 _ => Err(self.not_constant(expr)),
-            }
+            },
         }
     }
 
@@ -755,7 +836,9 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     Resolution::Builtin(object) => Ty::new(self.db, TyKind::Builtin(object)),
                     _ => return None,
                 };
-                self.resolver.member_named(receiver, prop).effective_resolution()
+                self.resolver
+                    .member_named(receiver, prop)
+                    .effective_resolution()
             }
             _ => None,
         }
@@ -810,7 +893,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
 
     /// `T(x)` — evaluates `x` to a `ConstValue`, then applies the target
     /// type's wrap/pad semantics. Conversions the type level rejects still
-    /// fail here 
+    /// fail here
     fn convert(
         &self,
         expr: ExprId,
@@ -902,7 +985,10 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 .as_bytes()
                 .map(|bytes| ConstValue::Bytes(bytes.into()))
                 .ok_or_else(|| self.not_constant(expr)),
-            Primitive::String => match value.as_bytes().and_then(|bytes| String::from_utf8(bytes).ok()) {
+            Primitive::String => match value
+                .as_bytes()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+            {
                 Some(text) => Ok(ConstValue::String(text.into())),
                 None => Err(self.not_constant(expr)),
             },
@@ -910,5 +996,3 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         }
     }
 }
-
-

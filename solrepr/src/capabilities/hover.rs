@@ -253,7 +253,7 @@ impl<'db> Hover<'db> {
         ))
     }
 
-    fn hover_var(&self, var_id: &VarId) -> anyhow::Result<String> {
+    pub(crate) fn hover_var(&self, var_id: &VarId) -> anyhow::Result<String> {
         let var_data = self.db.var_data(*var_id);
         let ty = var_data.syntax_store.types[var_data.ty_ref].to_string(&var_data.syntax_store.types);
         let doc = self.db.docs(DefId::Var(*var_id));
@@ -282,17 +282,31 @@ impl<'db> Hover<'db> {
         var_data: &VarData,
         signature: &str,
     ) -> String {
+        // The folded value when one is available; an opaque constant
+        // (`keccak256`, `type(I).interfaceId`) or an error falls back to the
+        // initializer's source text.
+        if let Some(rendered) = self
+            .db
+            .const_value(var_id)
+            .ok()
+            .and_then(|value| value.render())
+        {
+            return format!("{signature} = {rendered}");
+        }
         let Some(init) = var_data.init else {
             return signature.to_string();
         };
-        let Some(range) =
-            self.db
-                .source_map(DefId::Var(var_id))
-                .range_to_semantic
-                .iter()
-                .find_map(|(range, semantic)| {
-                    matches!(semantic, SemanticId::Expr(expr) if *expr == init).then_some(*range)
-                })
+        // A call maps both its callee's range and its own to the same
+        // expression, and a member maps its property's range too, so take the
+        // widest span rather than whichever the map yields first.
+        let Some(range) = self
+            .db
+            .source_map(DefId::Var(var_id))
+            .range_to_semantic
+            .iter()
+            .filter(|(_, semantic)| matches!(semantic, SemanticId::Expr(expr) if *expr == init))
+            .map(|(range, _)| *range)
+            .max_by_key(|range| range.end.saturating_sub(range.start))
         else {
             return signature.to_string();
         };

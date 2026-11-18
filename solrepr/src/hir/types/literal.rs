@@ -6,7 +6,7 @@ use crate::hir::types::syntax::Location;
 use crate::ir::def_map::TypeDefId;
 use crate::salsa::HirDb;
 
-#[derive(PartialEq, Eq, Clone, Copy, Hash)]
+#[derive(PartialEq, Eq, Clone, Copy, Hash, Debug)]
 pub enum LiteralKind {
     Int {
         neg: bool,

@@ -15,7 +15,7 @@ use crate::hir::body_map::{BodyBuilder, BodyMap, BodyOwnerId, BodySourceMap, Byt
 use crate::hir::member_map::{MemberBuilder, MemberMap};
 use crate::hir::docs::{docs, inline_docs};
 use crate::hir::exprs::Name;
-use crate::hir::inference::{Inference, Inferer};
+use crate::hir::inference::{ConstErrorKind, ConstValue, Inference, Inferer, const_value};
 use crate::hir::syntax_store::{OwnerStore, SourceMap, with_owner_store};
 use crate::hir::signatures::getter_signature;
 use crate::hir::item_data::{
@@ -44,6 +44,7 @@ pub trait HirDb: RootDb {
     fn struct_data(&self, id: ast::StructId) -> Arc<StructData>;
     fn enum_data(&self, id: ast::EnumId) -> Arc<EnumData>;
     fn var_data(&self, id: ast::VarId) -> Arc<VarData>;
+    fn const_value(&self, id: ast::VarId) -> Result<ConstValue, ConstErrorKind>;
     fn error_data(&self, id: ast::ErrorId) -> Arc<ErrorData>;
     fn modifier_data(&self, id: ast::ModifierId) -> Arc<ModifierData>;
     fn function_signature(&self, id: ast::FunctionId) -> Option<Fn<Type>>;
@@ -123,6 +124,10 @@ impl HirDb for Db {
 
     fn var_data(&self, id: ast::VarId) -> Arc<VarData> {
         var_data(self, Var::new(self, id))
+    }
+
+    fn const_value(&self, id: ast::VarId) -> Result<ConstValue, ConstErrorKind> {
+        const_value(self, Var::new(self, id))
     }
 
     fn error_data(&self, id: ast::ErrorId) -> Arc<ErrorData> {

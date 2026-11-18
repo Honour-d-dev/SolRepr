@@ -342,6 +342,32 @@ fn invalid_array_lengths_are_reported() {
 
 /// `x / 0` is a compile error wherever the divisor folds — not only inside
 /// constant contexts.
+/// Inference's divisor check and the constant's own fold report the same
+/// failure; the sink dedups them because both anchor the failing division.
+#[test]
+fn a_nested_constant_failure_is_reported_once() {
+    let (db, file) = make_test_db("contract C { uint constant A = 1 + (1 / 0); }");
+    let inference = var_inference(&db, file, "A");
+    let count = inference
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            matches!(diagnostic, SemanticDiagnostic::InferenceFailure { message, .. }
+                if message.contains("Division by zero"))
+        })
+        .count();
+    assert_eq!(
+        count,
+        1,
+        "{:?}",
+        inference
+            .diagnostics
+            .iter()
+            .map(SemanticDiagnostic::code)
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn constant_zero_divisor_is_an_error_anywhere() {
     let (db, file) = make_test_db(
@@ -414,6 +440,28 @@ fn variable_declarations_are_checked() {
     }
 }
 
+/// A constant cycle is reported at every declaration on it; the query seeds
+/// the evaluated constant so a self-reference closes the cycle immediately.
+#[test]
+fn constant_cycles_are_reported_at_each_declaration() {
+    let (db, file) = make_test_db("contract C { uint constant A = B; uint constant B = A; }");
+    for name in ["A", "B"] {
+        let inference = var_inference(&db, file, name);
+        assert!(
+            inference.diagnostics.iter().any(|diagnostic| {
+                matches!(diagnostic, SemanticDiagnostic::InferenceFailure { message, .. }
+                    if message.contains("cyclic dependency"))
+            }),
+            "{name}: {:?}",
+            inference
+                .diagnostics
+                .iter()
+                .map(SemanticDiagnostic::code)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 /// Constructs solc folds but the evaluator does not implement —
 /// `keccak256`, `addmod`, `type(I).interfaceId` — yield `ConstValue::Opaque`:
 /// the initializer is a legal constant, so no diagnostic may appear. The
@@ -446,6 +494,39 @@ fn opaque_constants_stay_silent() {
     assert!(expr_results(&inference).any(|(_, ty, _)| {
         matches!(ty.kind(&db), TyKind::Primitive(Primitive::FixedBytes(32)))
     }), "the keccak256 call should still infer to bytes32");
+}
+
+/// A shift past the fold width cap keeps an exact-enough kind, so the
+/// conversion rejects it on width instead of staying silently `Opaque`. Zero
+/// shifted past the cap is exactly zero and stays legal.
+#[test]
+fn an_oversized_shift_is_rejected_on_width() {
+    let (db, file) = make_test_db("contract C { uint constant A = 1 << 4_000_000_000; }");
+    let inference = var_inference(&db, file, "A");
+    assert!(
+        inference
+            .diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic, SemanticDiagnostic::TypeMismatch { .. })),
+        "{:?}",
+        inference
+            .diagnostics
+            .iter()
+            .map(SemanticDiagnostic::code)
+            .collect::<Vec<_>>()
+    );
+
+    let (db, file) = make_test_db("contract C { uint constant A = 0 << 4_000_000_000; }");
+    let inference = var_inference(&db, file, "A");
+    assert!(
+        inference.diagnostics.is_empty(),
+        "{:?}",
+        inference
+            .diagnostics
+            .iter()
+            .map(SemanticDiagnostic::code)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
