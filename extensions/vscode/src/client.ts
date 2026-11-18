@@ -61,14 +61,34 @@ function findOnPath(name: string): string | undefined {
     return undefined;
 }
 
-///@notice Resolves the server binary: explicit setting, bundled copy, PATH, then a
-/// development build. Throws with instructions when none is found.
+/// The workspace build a development host runs, debug first — the profile
+/// `cargo build` writes there.
+function findDevBuild(context: vscode.ExtensionContext): string | undefined {
+    const root = path.resolve(context.extensionPath, "..", "..");
+    const candidates = [
+        path.join(root, "target", "debug", executableName()),
+        path.join(root, "target", "release", executableName()),
+        path.join(root, "solrepr", "target", "debug", executableName()),
+    ];
+    return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+///@notice Resolves the server binary: explicit setting, a development build in a
+/// development host, bundled copy, then PATH. Throws with instructions when none is found.
 export function resolveServerPath(context: vscode.ExtensionContext): ResolvedServer {
     const configuredPath = vscode.workspace
         .getConfiguration("solrepr")
         .get<string>("serverPath");
     if (configuredPath && configuredPath.trim().length > 0) {
         return { path: configuredPath, source: "setting" };
+    }
+
+    const isDev = context.extensionMode === vscode.ExtensionMode.Development;
+    // The workspace build is the one being edited, so it outranks an installed
+    // copy on PATH or a bundled binary.
+    const devBuild = isDev ? findDevBuild(context) : undefined;
+    if (devBuild) {
+        return { path: devBuild, source: "dev" };
     }
 
     const key = platformKey();
@@ -86,28 +106,10 @@ export function resolveServerPath(context: vscode.ExtensionContext): ResolvedSer
         return { path: onPath, source: "path" };
     }
 
-    if (context.extensionMode === vscode.ExtensionMode.Development) {
-        const devCandidates = [
-            path.resolve(context.extensionPath, "..", "..", "target", "debug", executableName()),
-            path.resolve(
-                context.extensionPath,
-                "..",
-                "..",
-                "solrepr",
-                "target",
-                "debug",
-                executableName(),
-            ),
-        ];
-        for (const candidate of devCandidates) {
-            if (fs.existsSync(candidate)) {
-                return { path: candidate, source: "dev" };
-            }
-        }
-    }
-
     throw new Error(
-        `solrepr binary not found. Set "solrepr.serverPath", put "${executableName()}" on PATH, or install a platform-specific build.`,
+        isDev
+            ? `solrepr binary not found. Run \`cargo build\` at the repo root, set "solrepr.serverPath", or put "${executableName()}" on PATH.`
+            : `solrepr binary not found. Set "solrepr.serverPath", put "${executableName()}" on PATH, or install a platform-specific build.`,
     );
 }
 
