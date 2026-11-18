@@ -328,7 +328,7 @@ impl ItemBuilder {
                 }
                 NodeKind::IDENTIFIER => {
                     if let Some(expr_id) = self.lower_expr(child) {
-                        self.syntax_store.own_name_expr = Some(expr_id);
+                        self.syntax_store.name_expr = Some(expr_id);
                     }
                     name = self.root.text_by_range(child.byte_range()).trim().into();
                 }
@@ -472,8 +472,11 @@ impl ItemBuilder {
         let mut parameters = Arena::new();
         let mut anonymous = false;
 
-        node.child_by_field_id(FieldKind::NAME.into())
-            .map(|n| self.lower_expr(n));
+        if let Some(expr_id) = node
+            .child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n))
+        {
+            self.syntax_store.name_expr = Some(expr_id);
+        }
 
         for child in node.children(&mut node.walk()) {
             match child.kind_id().into() {
@@ -504,8 +507,11 @@ impl ItemBuilder {
         let name = error.name().unwrap_or_default();
         let mut parameters = Arena::new();
 
-        node.child_by_field_id(FieldKind::NAME.into())
-            .map(|n| self.lower_expr(n));
+        if let Some(expr_id) = node
+            .child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n))
+        {
+            self.syntax_store.name_expr = Some(expr_id);
+        }
 
         for child in node.named_children(&mut node.walk()) {
             if let NodeKind::ERROR_PARAMETER = child.kind_id().into() {

@@ -18,9 +18,7 @@ use crate::hir::resolution::{Field as ResolvedField, Resolution};
 use crate::hir::resolver::Resolver;
 use crate::hir::diagnostics::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::types::Primitive::FixedBytes;
-use crate::hir::types::{
-    Location, Mutability, Primitive, RefKind, Ty, TyKind, Type, VariableKind,
-};
+use crate::hir::types::{LiteralKind, Location, Mutability, Primitive, RefKind, Ty, TyKind, Type, VariableKind};
 use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::HirDb;
 
@@ -160,6 +158,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
         )
     }
 
+    fn is_literal(db: &dyn HirDb, ty: Ty) -> bool {
+        matches!(ty.kind(db), TyKind::Literal(_))
+    }
+
     /// Infers `expr` as a value and asserts it converts to `expected`, poisoning
     /// on failure. Skipped when either side is invalid — it already owns a diagnostic.
     pub(super) fn expect_assignable(&mut self, expr: ExprId, expected: impl Into<Ty>) -> Ty {
@@ -184,9 +186,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
     // ── Expression resolution ────────────────────────────────────────────
 
     fn infer_resolution(&mut self, expr: ExprId, resolution: Resolution) -> Ty {
-        let is_own_name = self.input.store.own_name_expr == Some(expr);
         self.tables.set_expr_resolution(expr, resolution.clone());
-        self.check_resolution_mutability(expr, &resolution);
+        let ty = self.resolution_ty(expr, &resolution);
+        self.check_resolution_mutability(expr, &resolution, ty);
+        ty
+    }
+
+    /// The type a resolution denotes, split from [`Self::infer_resolution`] because the mutability
+    /// charge needs it to tell a storage pointer from a bound storage reference.
+    fn resolution_ty(&mut self, expr: ExprId, resolution: &Resolution) -> Ty {
         match resolution {
             Resolution::Local(local) => self
                 .tables
@@ -196,6 +204,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 .unwrap_or_else(|| Type::invalid(self.db))
                 .ty(),
             Resolution::Var(var_def) => {
+                let var_def = *var_def;
                 let data = if let DefId::Var(id) = var_def {
                     self.db.var_data(id)
                 } else {
@@ -209,7 +218,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     // The declaration-site occurrence is the only entry point for a
                     // variable's declaration checks; any other self-resolution
                     // (`uint a = a`) is an illegal self-read.
-                    if is_own_name {
+                    if self.input.store.name_expr == Some(expr) {
                         self.check_var_declaration(var_def, &data)
                     } else {
                         return self.fail(
@@ -223,17 +232,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 };
                 ty.ty().upcast_from_kind(self.db, data.kind)
             }
-            Resolution::Callable(callable) => self.callable_type(&callable),
+            Resolution::Callable(callable) => self.callable_type(callable),
             Resolution::Callables(_) => Ty::invalid(self.db),
             // An invalid type name stays contagious.
-            Resolution::Type(ty) if ty.is_invalid(self.db) => {
-                Ty::invalid(self.db)
-            }
-            Resolution::Type(ty) => Ty::new(self.db, TyKind::Type(ty)),
-            Resolution::Module(file) => Ty::new(self.db, TyKind::Module(file)),
-            Resolution::MetaType(ty) => Ty::new(self.db, TyKind::Meta(ty)),
-            Resolution::Builtin(object) => Ty::new(self.db, TyKind::Builtin(object)),
-            Resolution::This(def) => match TypeDefId::try_from(def) {
+            Resolution::Type(ty) if ty.is_invalid(self.db) => Ty::invalid(self.db),
+            Resolution::Type(ty) => Ty::new(self.db, TyKind::Type(*ty)),
+            Resolution::Module(file) => Ty::new(self.db, TyKind::Module(*file)),
+            Resolution::MetaType(ty) => Ty::new(self.db, TyKind::Meta(*ty)),
+            Resolution::Builtin(object) => Ty::new(self.db, TyKind::Builtin(*object)),
+            Resolution::This(def) => match TypeDefId::try_from(*def) {
                 Ok(id) if id.is_contract_like() => Ty::new(self.db, TyKind::TypeDef(id)),
                 _ => self.fail(
                     DiagnosticAnchor::Expr(expr),
@@ -242,7 +249,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 ),
             },
             Resolution::Super(def) => match def {
-                DefId::Contract(id) => Ty::new(self.db, TyKind::Super(id)),
+                DefId::Contract(id) => Ty::new(self.db, TyKind::Super(*id)),
                 _ => self.fail(
                     DiagnosticAnchor::Expr(expr),
                     "super resolution is not a contract",
@@ -250,10 +257,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 ),
             },
             Resolution::Literal(literal) => literal.ty(self.db),
-            Resolution::Variant(variant) => Ty::new(self.db, TyKind::TypeDef(variant.enum_id.into())),
+            Resolution::Variant(variant) => {
+                Ty::new(self.db, TyKind::TypeDef(variant.enum_id.into()))
+            }
             Resolution::Field(field) => match field {
                 ResolvedField::Builtin(builtin) => builtin.ty(self.db).ty(),
                 ResolvedField::Struct(owner, field_id) => {
+                    let (owner, field_id) = (*owner, *field_id);
                     let field_ty = if self.is_owner(owner) {
                         let fields = self.input.fields.expect("a struct owner has a field arena");
                         self.lower_type(fields[field_id].ty_ref, false)
@@ -266,10 +276,35 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
     }
 
-    /// A variable's declaration checks: initializer assignability, `constant`
-    /// folding, and the uninitialized-`constant` error. Returns the declared type.
+    /// A variable's declaration checks: the constant-type rule, initializer assignability,
+    /// `constant` folding, and the uninitialized-`constant` error.
     fn check_var_declaration(&mut self, var_def: DefId, data: &VarData) -> Type {
-        let declared = self.lower_type(data.ty_ref, false);
+        // The initializer is checked against the type the variable *binds* — a state variable's
+        // slot, so an array initializer is a copy into storage.
+        let declared = self
+            .lower_type(data.ty_ref, false)
+            .upcast_from_kind(self.db, data.kind);
+        // solc's constant-type rule (9259) is terminal: it replaces the initializer and
+        // uninitialized checks.
+        if data.kind == VariableKind::Const
+            && !declared.is_invalid(self.db)
+            && !declared.peel_loc(self.db).kind(self.db).is_constant_type()
+        {
+            return self.fail(
+                DiagnosticAnchor::Def(var_def),
+                "Only constants of value type and byte array type are implemented.",
+                declared,
+            );
+        }
+        // An interface declares no variables, constants included. The def map drops the name, so
+        // nothing downstream resolves it; this is the declaration's only error.
+        if let Some(DefId::Interface(_)) = self.db.owner(var_def) {
+            return self.fail(
+                DiagnosticAnchor::Def(var_def),
+                "Variables cannot be declared in interfaces.",
+                declared,
+            );
+        }
         match data.init {
             Some(init) => {
                 let init_ty = self.expect_assignable(init, declared);
@@ -317,16 +352,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn infer_expr_uncached(&mut self, expr: ExprId) -> Ty {
         match self.input.store.exprs[expr].clone() {
             Expr::Ident(name) => {
-                let scope = self
-                    .input
-                    .expr_scopes
+                let scope = self.input.expr_scopes
                     .and_then(|map| map.get(expr).copied());
-                let order = self
-                    .input
-                    .expr_orders
+                let order = self.input.expr_orders
                     .and_then(|map| map.get(expr).copied())
                     .unwrap_or_default();
-                let is_self_name = self.input.store.own_name_expr == Some(expr);
+                let is_self_name = self.input.store.name_expr == Some(expr);
                 let resolved = self
                     .resolver
                     .resolve_name_at(&name, scope, order, expr, is_self_name);
@@ -338,12 +369,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Expr::Literal(literal) => self.infer_resolution(expr, Resolution::Literal(literal)),
             Expr::Binary { op, left, right } => {
                 let left_type = return_invalid!(self.infer_expr(left), self.db);
-                return_invalid!(self.infer_expr(right), self.db);
+                let right_type = return_invalid!(self.infer_expr(right), self.db);
 
                 // solc rejects a constant zero divisor everywhere, not just in
                 // constant contexts; const eval reports the same failure and the
                 // sink dedups it.
+                // solc rejects a literal zero divisor (2271) but accepts a typed zero, which reverts at
+                // runtime instead.
                 if matches!(op, BinaryOp::Div | BinaryOp::Mod)
+                    && Self::is_literal(self.db, right_type)
                     && self.eval_const(right).is_ok_and(|value| value.is_zero())
                 {
                     self.fail(
@@ -366,8 +400,39 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     | BinaryOp::Gt
                     | BinaryOp::Le
                     | BinaryOp::Ge => Ty::primitive(self.db, Primitive::Boolean),
-                    //@TODO arithmetic result type; the left operand stands in.
-                    _ => left_type,
+                    _ => match (
+                        Self::is_literal(self.db, left_type),
+                        Self::is_literal(self.db, right_type),
+                    ) {
+                        // Arithmetic over two literals folds to a literal kind, so the value's fitness decides the
+                        // conversion: `5 / 2` is `Rational`, `2 ** 256` needs 257 bits.
+                        (true, true) => self
+                            .folded_literal(expr)
+                            .map(|kind| Ty::new(self.db, TyKind::Literal(kind)))
+                            .unwrap_or(left_type),
+                        // One literal, one typed operand: the typed side is the result. Shifts and `**` are the
+                        // exception — their result follows the left operand.
+                        (true, false)
+                            if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Pow) =>
+                        {
+                            let negative = matches!(
+                                left_type.kind(self.db),
+                                TyKind::Literal(LiteralKind::Int { neg: true, .. })
+                            );
+                            Ty::primitive(
+                                self.db,
+                                if negative {
+                                    Primitive::Int(256)
+                                } else {
+                                    Primitive::Uint(256)
+                                },
+                            )
+                        }
+                        (true, false) => right_type,
+                        //@TODO the common type for two typed operands; the left
+                        // operand stands in.
+                        _ => left_type,
+                    },
                 }
             }
             Expr::Ternary { cond, then, els } => {
@@ -391,9 +456,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 }
             }
             Expr::Unary { op, arg } => match op {
-                // `delete x` resets the place, so it is a write and nothing more.
+                // `delete x` resets the lvalue, so it is a write and nothing more.
                 UnaryOp::Delete => {
-                    self.check_lvalue(arg);
+                    self.check_lvalue(arg, None);
                     Ty::void(self.db)
                 }
                 UnaryOp::Not => {
@@ -414,14 +479,36 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     }
                 }
             },
-            Expr::Update { arg, .. } => self.check_lvalue(arg),
-            Expr::Assign { lhs, rhs, op: _ } => {
-                let lhs_ty = self.check_lvalue(lhs);
+            Expr::Update { arg, .. } => self.check_lvalue(arg, None),
+            Expr::Assign { lhs, rhs, op } => {
+                // The replacement is inferred first: its type is what the lhs
+                // is checked against, and a storage-pointer rebind needs it.
+                let rhs_ty = self.check_rvalue(rhs);
+                let lhs_ty = self.check_lvalue(lhs, op.is_none().then_some(rhs_ty));
+                // A shift takes any integer on the right — solc accepts
+                // `int256 x; x <<= uint256(3)`, where `x += uint256(3)` is 7366.
+                if matches!(op, Some(BinaryOp::Shl | BinaryOp::Shr)) {
+                    let wide = [
+                        Ty::primitive(self.db, Primitive::Uint(256)),
+                        Ty::primitive(self.db, Primitive::Int(256)),
+                    ];
+                    if wide
+                        .iter()
+                        .all(|target| rhs_ty.implicitly_converts_to(*target, self.db).is_none())
+                    {
+                        return self.fail(
+                            DiagnosticAnchor::Expr(rhs),
+                            "shift operand must be an integer",
+                            Ty::invalid(self.db),
+                        );
+                    }
+                    return lhs_ty;
+                }
                 return_invalid!(self.expect_assignable(rhs, lhs_ty), self.db);
                 lhs_ty
             }
             Expr::ArrayAccess { base, index } => {
-                let base_type = return_invalid!(self.infer_expr(base), self.db);
+                let base_type = return_invalid!(self.infer_in(base, self.base_context()), self.db);
                 match base_type.peel_loc(self.db).kind(self.db) {
                     // Array-type syntax in expression position, e.g. `uint256[]`, in `abi.decode(x, (uint256[]))`
                     TyKind::Type(elem) => {
@@ -559,14 +646,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 array.at_loc(self.db, Location::Memory).ty()
             }
             Expr::Member { obj, prop } => {
-                let obj_ty = self.infer_expr(obj);
+                let obj_ty = self.infer_in(obj, self.base_context());
                 let obj_ty = return_invalid!(obj_ty, self.db);
                 let resolution = self.resolver.lookup_member_at(obj_ty, &prop, expr);
                 let Some(resolution) = resolution else {
                     return Ty::invalid(self.db);
                 };
                 let ty = self.infer_resolution(expr, resolution);
-                self.check_msg_value(expr, obj_ty, prop.as_str());
                 match self.tables.expr_resolution(expr) {
                     Some(Resolution::Field(ResolvedField::Struct(..))) => {
                         let Some(loc) = obj_ty.loc(self.db) else {
@@ -614,9 +700,16 @@ impl<'db, 'store> Inferer<'db, 'store> {
             }
             Expr::Tuple(elems) => {
                 let mut components: Vec<Option<Ty>> = Vec::with_capacity(elems.len());
-                for elem in elems.iter().copied() {
+                for (index, elem) in elems.iter().copied().enumerate() {
                     if let Some(elem) = elem {
-                        let elem_ty = self.infer_expr(elem);
+                        // Each component of a destructuring target is its own lvalue.
+                        let context = match self.context {
+                            UsageContext::Lvalue(value) => {
+                                UsageContext::Lvalue(self.tuple_component(value, index))
+                            }
+                            other => other,
+                        };
+                        let elem_ty = self.infer_in(elem, context);
                         match elem_ty.kind(self.db) {
                             TyKind::Invalid => return Ty::invalid(self.db),
                             TyKind::Void => {

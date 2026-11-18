@@ -1,7 +1,6 @@
 use la_arena::ArenaMap;
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 
-use crate::ast::UdvtId;
 use crate::hir::body_map::ScopeId;
 use crate::hir::builtins::BuiltinFn;
 use crate::hir::types::VariableKind;
@@ -10,14 +9,19 @@ use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, CallableOrigin, Resolution};
 use crate::hir::resolver::Resolver;
 use crate::hir::diagnostics::DiagnosticAnchor;
-use crate::hir::types::{Primitive, TyKind, Type};
-use crate::ir::def_map::{DefId, DefNamespace, ScopeData, TypeDefId};
+use crate::hir::types::{LiteralKind, Primitive, Ty, TyKind, Type};
+use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::hir_db::def_name;
 use crate::salsa::{FileId, HirDb};
 
 use super::Inferer;
 
 // ── Values ───────────────────────────────────────────────────────────────
+
+/// Largest `**` exponent this evaluator builds: past it nothing fits 256 bits.
+const POW_LIMIT: u32 = 4096;
+
+const BIGINT_BITS: u64 = 1 << 20;
 
 /// A folded compile-time value. Integer and rational arithmetic is exact;
 /// an integer is a rational with `den == 1`.
@@ -34,8 +38,11 @@ pub(super) enum ConstValue {
     String(Box<str>),
     /// A legal constant whose value this evaluator does not compute —
     /// we do not compute hash/math builtins, `type(I).interfaceId`,
-    /// `type(C).*Code`. It is a verdict ("valid in a constant context").
+    /// `type(C).*Code`.
     Opaque,
+    /// A value too wide to build. Its literal kind is still exact, so a
+    /// conversion rejects it on width without the value ever existing.
+    Wide(LiteralKind),
 }
 
 impl ConstValue {
@@ -43,11 +50,27 @@ impl ConstValue {
         Self::Rational(value.into(), BigInt::from(1u8))
     }
 
+    /// No value is available — unknown, or too wide to build.
+    fn is_opaque(&self) -> bool {
+        matches!(self, Self::Opaque | Self::Wide(_))
+    }
+
+    /// The literal fitness this value denotes, when folding fixed it exactly.
+    fn literal_kind(&self) -> Option<LiteralKind> {
+        match self {
+            Self::Rational(num, den) => {
+                Some(LiteralKind::from_rational(num.clone(), den.clone(), None))
+            }
+            Self::Wide(kind) => Some(*kind),
+            _ => None,
+        }
+    }
+
     pub(super) fn is_zero(&self) -> bool {
         matches!(self, Self::Rational(n, _) if *n == BigInt::from(0u8))
     }
 
-    fn rational(&self) -> Option<(BigInt, BigInt)> {
+    pub(super) fn rational(&self) -> Option<(BigInt, BigInt)> {
         match self {
             Self::Rational(num, den) => Some((num.clone(), den.clone())),
             _ => None,
@@ -55,7 +78,7 @@ impl ConstValue {
     }
 
     /// The exact integer value — `None` for non-integral or non-numeric values.
-    fn as_int(&self) -> Option<BigInt> {
+    pub(super) fn as_int(&self) -> Option<BigInt> {
         match self {
             Self::Rational(num, den) if num % den == BigInt::from(0u8) => Some(num / den),
             _ => None,
@@ -114,6 +137,29 @@ fn to_be_bytes(value: &BigInt, width: usize) -> Box<[u8]> {
     out.into_boxed_slice()
 }
 
+/// The kind `num / den ** exponent` denotes past [`POW_LIMIT`]: only `0`, `1` and `-1` stay
+/// representable, a fractional base or negative exponent stays fractional, and 257 bits says
+/// "wider than any type" without building the value.
+fn saturated_kind(num: &BigInt, den: &BigInt, exponent: i64) -> LiteralKind {
+    let one = BigInt::from(1u8);
+    if *den != one || exponent < 0 {
+        return LiteralKind::Rational;
+    }
+    if *num == BigInt::from(0u8) {
+        return LiteralKind::from_rational(BigInt::from(0u8), one, None);
+    }
+    let negative = num.sign() == Sign::Minus && exponent % 2 != 0;
+    if num.magnitude() == &1u32.into() {
+        let value = if negative { -one.clone() } else { one };
+        return LiteralKind::from_rational(value, BigInt::from(1u8), None);
+    }
+    LiteralKind::Int {
+        neg: negative,
+        min_bits: 257,
+        exact_bytes: None,
+    }
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────
 
 /// Why an expression does not fold to a [`ConstValue`]. `range` always
@@ -169,7 +215,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 Some(size) => Some(size),
                 // An opaque constant can't size the array — the type
                 // lowers without one, but it is not an error.
-                None if matches!(value, ConstValue::Opaque) => None,
+                None if value.is_opaque() => None,
                 None => self.fail(DiagnosticAnchor::Expr(expr), "invalid array length", None),
             },
             Err(error) => {
@@ -177,6 +223,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 None
             }
         }
+    }
+
+    /// The literal kind a folded expression denotes; `None` when it cannot be folded. A `**`
+    /// too wide to build still folds to an exact kind, so the conversion rejects it on width.
+    pub(super) fn folded_literal(&self, expr: ExprId) -> Option<LiteralKind> {
+        self.eval_const(expr).ok()?.literal_kind()
     }
 
     /// Reports a `ConstError` at the site `error` names — `not_constant` is
@@ -252,7 +304,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             .expr_orders
             .and_then(|map| map.get(expr).copied())
             .unwrap_or_default();
-        let is_self_name = self.store.own_name_expr == Some(expr);
+        let is_self_name = self.store.name_expr == Some(expr);
         self.resolver.resolve_name_in(name, scope, order, is_self_name)
     }
 
@@ -271,7 +323,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 let value = self.eval(arg)?;
                 // An opaque operand yields an opaque result — still a legal
                 // constant, just unevaluated.
-                if matches!(value, ConstValue::Opaque) && !matches!(op, UnaryOp::Delete) {
+                if value.is_opaque() && !matches!(op, UnaryOp::Delete) {
                     return Ok(ConstValue::Opaque);
                 }
                 match op {
@@ -295,7 +347,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 match cond.as_bool() {
                     Some(true) => self.eval(then),
                     Some(false) => self.eval(els),
-                    _ if matches!(cond, ConstValue::Opaque) => {
+                    _ if cond.is_opaque() => {
                         // No branch is selectable, but both still must be
                         // legal constants — evaluate for diagnostics.
                         self.eval(then)?;
@@ -362,7 +414,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         }
         // An opaque operand yields an opaque result — still a legal
         // constant, just unevaluated.
-        if matches!(left, ConstValue::Opaque) || matches!(right, ConstValue::Opaque) {
+        if left.is_opaque() || right.is_opaque() {
             return Ok(ConstValue::Opaque);
         }
         match op {
@@ -413,6 +465,14 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     .map_err(|_| self.eval_error(expr, "exponent too large"))?;
                 let unsigned = u32::try_from(exponent.unsigned_abs())
                     .map_err(|_| self.eval_error(expr, "exponent too large"))?;
+                // Not built: `(2 ** 4096) ** 4096` is two megabytes, so the result's width is
+                // capped first. Its kind stays exact, so the conversion rejects it on width.
+                let too_wide = |base: &BigInt| {
+                    base.bits().saturating_mul(u64::from(unsigned)) > BIGINT_BITS
+                };
+                if unsigned > POW_LIMIT || too_wide(&num) || too_wide(&den) {
+                    return Ok(ConstValue::Wide(saturated_kind(&num, &den, exponent)));
+                }
                 if exponent >= 0 {
                     Ok(rat(num.pow(unsigned), den.pow(unsigned)))
                 } else if num == BigInt::from(0u8) {
@@ -427,15 +487,19 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             BinaryOp::Shl | BinaryOp::Shr => {
                 let value = left.as_int().ok_or_else(|| self.not_constant(expr))?;
                 let shift = right.as_int().ok_or_else(|| self.not_constant(expr))?;
-                let shift = u32::try_from(&shift).ok().map(|shift| {
-                    match op {
-                        BinaryOp::Shl => value << shift,
-                        _ => value >> shift,
-                    }
-                });
-                shift
-                    .map(ConstValue::int)
-                    .ok_or_else(|| self.eval_error(expr, "invalid shift amount"))
+                let shift = u32::try_from(&shift)
+                    .map_err(|_| self.eval_error(expr, "invalid shift amount"))?;
+                // `1 << 4_000_000_000` would allocate half a gigabyte; past the width cap the
+                // value is left uncomputed, as for a wide `**`.
+                if matches!(op, BinaryOp::Shl)
+                    && value.bits().saturating_add(u64::from(shift)) > BIGINT_BITS
+                {
+                    return Ok(ConstValue::Opaque);
+                }
+                Ok(ConstValue::int(match op {
+                    BinaryOp::Shl => value << shift,
+                    _ => value >> shift,
+                }))
             }
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
                 let left = left.as_int().ok_or_else(|| self.not_constant(expr))?;
@@ -471,14 +535,14 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         if let Expr::MetaType(inner) = self.store.exprs[obj] {
             return self.eval_meta(expr, inner, prop);
         }
-        match self.namespace_ref(obj) {
+        match self.resolve_const_expr(obj) {
             Some(Resolution::Type(ty)) => self.type_member(expr, &ty, prop),
             Some(Resolution::Module(file)) => self.file_member(expr, file, prop),
             // `.length` is the only value member solc folds — and only on
             // `bytes`, never `string`.
             _ if prop == "length" => match self.eval(obj)? {
                 ConstValue::Bytes(bytes) => Ok(ConstValue::int(bytes.len())),
-                ConstValue::Opaque => Ok(ConstValue::Opaque),
+                value if value.is_opaque() => Ok(ConstValue::Opaque),
                 _ => Err(self.not_constant(expr)),
             },
             _ => Err(self.not_constant(expr)),
@@ -495,7 +559,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         callee: ExprId,
         args: &[ExprId],
     ) -> Result<ConstValue, ConstError> {
-        match self.namespace_ref(callee) {
+        match self.resolve_const_expr(callee) {
             Some(Resolution::Type(ty)) => {
                 let [arg] = args else {
                     return Err(self.not_constant(expr));
@@ -524,6 +588,16 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     CallableOrigin::Builtin(builtin) if builtin.is_const() => {
                         Ok(ConstValue::Opaque)
                     }
+                    // `new bytes(n)` / `new string(n)`
+                    CallableOrigin::Allocation(ty)
+                        if values.len() == 1
+                            && matches!(
+                                ty.peel_loc(self.db).kind(self.db),
+                                TyKind::Primitive(Primitive::Bytes | Primitive::String)
+                            ) =>
+                    {
+                        Ok(ConstValue::Opaque)
+                    }
                     _ => Err(self.not_constant(expr)),
                 }
             }
@@ -540,7 +614,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
     ) -> Result<ConstValue, ConstError> {
         let value = self.eval(base)?;
         let index = self.eval(index)?;
-        if matches!(value, ConstValue::Opaque) || matches!(index, ConstValue::Opaque) {
+        if value.is_opaque() || index.is_opaque() {
             return Ok(ConstValue::Opaque);
         }
         let index = index.as_usize().ok_or_else(|| self.not_constant(expr))?;
@@ -562,7 +636,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         inner: ExprId,
         prop: &Name,
     ) -> Result<ConstValue, ConstError> {
-        let Some(Resolution::Type(ty)) = self.namespace_ref(inner) else {
+        let Some(Resolution::Type(ty)) = self.resolve_const_expr(inner) else {
             return Err(self.not_constant(expr));
         };
         let bits = |width: u16| -> BigInt { two_pow(u32::from(width)) };
@@ -617,19 +691,9 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     .map(ConstValue::int)
                     .ok_or_else(|| self.not_constant(expr))
             }
-            kind => {
-                let Some(def) = kind.def_id().filter(|def| {
-                    matches!(
-                        *def,
-                        DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_)
-                    )
-                }) else {
-                    return Err(self.not_constant(expr));
-                };
-                match self.scope_member(&def, prop) {
-                    Some(Resolution::Var(def)) => self.eval_var(expr, def),
-                    _ => Err(self.not_constant(expr)),
-                }
+            _ => match self.type_member_ref(ty, prop) {
+                Some(Resolution::Var(def)) => self.eval_var(expr, def),
+                _ => Err(self.not_constant(expr)),
             }
         }
     }
@@ -642,65 +706,57 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         file: FileId,
         prop: &Name,
     ) -> Result<ConstValue, ConstError> {
-        match self.file_member_ref(file, prop) {
+        match self
+            .resolver
+            .member_named(Ty::new(self.db, TyKind::Module(file)), prop)
+            .effective_resolution()
+        {
             Some(Resolution::Var(def)) => self.eval_var(expr, def),
             _ => Err(self.not_constant(expr)),
         }
     }
 
-    /// Resolution of an expression used on the left of `.` — a bare name,
-    /// an import path, or a deeper member path (`C.E`). Consumers match the
-    /// subset of `Resolution` that can be a path prefix.
-    fn namespace_ref(&mut self, expr: ExprId) -> Option<Resolution> {
+    /// `prop` on a type name, through the one member-lookup module.
+    fn type_member_ref(&self, ty: &Type, prop: &Name) -> Option<Resolution> {
+        self.resolver
+            .member_named(Ty::new(self.db, TyKind::Type(*ty)), prop)
+            .effective_resolution()
+    }
+
+    /// Resolves exprs that are valid in a const context otherwise `None`.
+    //  It uses the resolver rather than the inference tables, because const-eval runs while
+    /// types are lowered, before those tables exist.
+    fn resolve_const_expr(&mut self, expr: ExprId) -> Option<Resolution> {
         match &self.store.exprs[expr] {
             Expr::Ident(name) => self.resolve_ident(expr, name),
+            // `new bytes(n)`/`new string(n)` is the one constant `new` form: it denotes an allocation,
+            // where contract creation is a call.
+            Expr::New { ty } => match self.resolve_const_expr(*ty)? {
+                Resolution::Type(name) => {
+                    let name = name.peel_loc(self.db);
+                    matches!(
+                        name.kind(self.db),
+                        TyKind::Primitive(Primitive::Bytes | Primitive::String)
+                    )
+                    .then(|| Resolution::Callable(Callable::new_allocation(name)))
+                }
+                _ => None,
+            },
             Expr::Path(path) => self
                 .db
                 .resolve_to_file(self.resolver.this().file(), path)
                 .map(Resolution::Module),
-            Expr::Member { obj, prop } => match self.namespace_ref(*obj)? {
-                Resolution::Type(ty) => match ty.def_id(self.db) {
-                    Some(def @ (DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_))) => {
-                        self.scope_member(&def, prop)
-                    }
-                    // A UDVT type name's only members are its two conversions.
-                    Some(DefId::Udvt(id)) => udvt_member(id, prop),
-                    _ => None,
-                },
-                Resolution::Module(file) => self.file_member_ref(file, prop),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// `name` in `def`'s own member scope — `Types` for namespace chains
-    /// (`C.E`), `Variables` for constant leaves (`C.K`).
-    fn scope_member(&self, def: &DefId, name: &Name) -> Option<Resolution> {
-        let defmap = self.resolver.def_map(def);
-        let scope = defmap.defs.get(def)?.child_scope?;
-        self.scope_resolution(defmap.scopes[scope].by_name.get(name)?)
-    }
-
-    fn file_member_ref(&self, file: FileId, name: &Name) -> Option<Resolution> {
-        self.resolver.file_scopes(file).find_map(|(defmap, scope)| {
-            defmap.scopes[scope]
-                .by_name
-                .get(name)
-                .and_then(|member| self.scope_resolution(member))
-        })
-    }
-
-    /// The `Resolution` a scope member denotes — types (`C.E` path segments)
-    /// and variables (`C.K` constant leaves); other namespaces are not
-    /// foldable.
-    fn scope_resolution(&self, member: &ScopeData) -> Option<Resolution> {
-        match member.namespace {
-            DefNamespace::Types => match Resolution::from_type(self.db, member.defs[0]) {
-                resolution @ Resolution::Type(_) => Some(resolution),
-                _ => None,
-            },
-            DefNamespace::Variables => Some(Resolution::Var(member.defs[0])),
+            // A member is answered by the member-lookup module given the receiver's type: declared-only,
+            // builtin, or a builtin object's member.
+            Expr::Member { obj, prop } => {
+                let receiver = match self.resolve_const_expr(*obj)? {
+                    Resolution::Type(ty) => Ty::new(self.db, TyKind::Type(ty)),
+                    Resolution::Module(file) => Ty::new(self.db, TyKind::Module(file)),
+                    Resolution::Builtin(object) => Ty::new(self.db, TyKind::Builtin(object)),
+                    _ => return None,
+                };
+                self.resolver.member_named(receiver, prop).effective_resolution()
+            }
             _ => None,
         }
     }
@@ -754,7 +810,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
 
     /// `T(x)` — evaluates `x` to a `ConstValue`, then applies the target
     /// type's wrap/pad semantics. Conversions the type level rejects still
-    /// fail here — solc folds only legal conversions.
+    /// fail here 
     fn convert(
         &self,
         expr: ExprId,
@@ -762,7 +818,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         value: ConstValue,
     ) -> Result<ConstValue, ConstError> {
         // `uint256(keccak256(x))` is a legal constant of unknown value.
-        if matches!(value, ConstValue::Opaque) {
+        if value.is_opaque() {
             return Ok(ConstValue::Opaque);
         }
         match ty.peel_loc(self.db).kind(self.db) {
@@ -780,6 +836,11 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             }
             TyKind::TypeDef(TypeDefId::Udvt(id)) => {
                 self.convert_primitive(expr, self.db.udvt_data(id).underlying, value)
+            }
+            // A contract or interface value is an address, so `D(address(0))` is a constant of the
+            // contract type; whether the conversion is legal is the call checker's question.
+            TyKind::TypeDef(TypeDefId::Contract(_) | TypeDefId::Interface(_)) => {
+                self.convert_primitive(expr, Primitive::Address, value)
             }
             _ => Err(self.not_constant(expr)),
         }
@@ -850,13 +911,4 @@ impl<'a, 'db> ConstEval<'a, 'db> {
     }
 }
 
-/// `T.wrap` / `T.unwrap` — the only members a UDVT type name has, and both are
-/// the identity on the value they convert.
-fn udvt_member(id: UdvtId, name: &Name) -> Option<Resolution> {
-    let builtin = match name.as_str() {
-        "wrap" => BuiltinFn::Wrap(id),
-        "unwrap" => BuiltinFn::Unwrap(id),
-        _ => return None,
-    };
-    Some(Resolution::Callable(Callable::new_builtin(builtin)))
-}
+

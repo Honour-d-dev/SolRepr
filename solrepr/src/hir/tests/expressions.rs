@@ -520,7 +520,7 @@ fn string_literal_escapes_fit_bytes_n_by_their_decoded_length() {
     );
 }
 
-/// A conditional expression is not a place.
+/// A conditional expression is not an lvalue.
 #[test]
 fn ternary_is_not_an_lvalue() {
     let (db, file) = make_test_db(
@@ -712,10 +712,10 @@ fn calldata_slices_type_and_convert_through_the_base() {
 }
 
 /// A slice is its own type, not the array: it has no members (`b[1:2].length`
-/// is unresolved, exactly like solc), it is never a place, and its bounds are
+/// is unresolved, exactly like solc), it is never an lvalue, and its bounds are
 /// `uint256` values.
 #[test]
-fn a_slice_has_no_members_and_is_no_place() {
+fn a_slice_has_no_members_and_is_no_lvalue() {
     let (db, file) = make_test_db(
         r#"
             contract C {
@@ -935,7 +935,7 @@ fn assert_requires(source: &str, function: &str, expected: &[Mutability]) {
 
 /// Every shape of state write: a bare variable, a member, an index, and a
 /// tuple component. `view` and `pure` both refuse them, and the write is
-/// reported as a write — not as the read of the place it targets.
+/// reported as a write — not as the read of the lvalue it targets.
 #[test]
 fn state_writes_are_rejected_in_view_and_pure() {
     let source = r#"
@@ -997,7 +997,24 @@ fn a_memory_write_still_reads_its_index() {
     assert_requires(memory, "field", &[]);
 }
 
-/// A `storage` pointer is a place in storage, so writing through it is a state
+/// A mapping-typed field lowers to `Storage(Reference)` like a state variable
+/// does, so the write has to be charged once — at the base `s`, not also at
+/// `s.m`. A `view` function with one mapping write is one diagnostic.
+#[test]
+fn a_mapping_field_charges_one_write() {
+    let source = r#"
+        struct S { mapping(uint => uint) m; }
+        contract C {
+            S s;
+            function write() public view { s.m[0] = 1; }
+            function writeOk() public { s.m[0] = 1; }
+        }
+    "#;
+    assert_requires(source, "write", &[Mutability::NonPayable]);
+    assert_requires(source, "writeOk", &[]);
+}
+
+/// A `storage` pointer refers into storage, so writing through it is a state
 /// write and reading through it is a state read.
 #[test]
 fn writes_through_a_storage_pointer_are_state_writes() {
@@ -1424,4 +1441,232 @@ fn a_bare_overload_set_cannot_be_returned() {
         codes(&g),
     );
     assert_eq!(g.diagnostics.len(), 1, "{:?}", codes(&g));
+}
+
+/// The conditional operator is right-associative: `a ? b : c ? d : e` is
+/// `a ? b : (c ? d : e)`, so the outer conditional's false branch is a
+/// conditional of its own — not a condition.
+#[test]
+fn ternary_chains_associate_to_the_right() {
+    let (db, file) = make_test_db(
+        "contract C { function f(bool a, uint256 b, bool c, uint256 d, uint256 e) \
+         external pure returns (uint256) { return a ? b : c ? d : e; } }",
+    );
+    let DefId::Function(id) = find_function(&db, file, "f") else {
+        panic!("fixture declares function f")
+    };
+    let body = db.body_map(BodyOwnerId::Function(id));
+    let inference = db.inference(DefId::Function(id));
+
+    let nested = body
+        .syntax_store
+        .exprs
+        .iter()
+        .filter(|(_, expr)| {
+            matches!(expr, Expr::Ternary { els, .. }
+                if matches!(body.syntax_store.exprs[*els], Expr::Ternary { .. }))
+        })
+        .count();
+    assert_eq!(nested, 1, "exactly one conditional ends in the next one");
+    assert!(
+        inference.diagnostics.is_empty(),
+        "{:?}",
+        codes(&inference)
+    );
+}
+
+/// Assigning a storage *pointer* rebinds the reference — no storage is written,
+/// so `view` is enough. Writing through the pointer is still a write.
+#[test]
+fn assigning_a_storage_pointer_rebinds_it() {
+    let source = r#"
+        library Position {
+            struct State { uint256 liquidity; }
+            function get(mapping(bytes32 => State) storage self, bytes32 key)
+                internal view returns (State storage position)
+            {
+                position = self[key];
+            }
+            function write(State storage self) internal view {
+                self.liquidity = 1;
+            }
+        }
+    "#;
+    assert_requires(source, "get", &[]);
+    assert_requires(source, "write", &[Mutability::NonPayable]);
+}
+
+/// The rebind rule is a property of the reference, not the element type: a
+/// struct, `string`, `bytes` and array pointer all rebind without a write. The
+/// same shapes written *through* are writes, and so is a copy into a state
+/// variable — a bound reference, not a handle.
+#[test]
+fn storage_pointer_rebinds_cover_every_reference_type() {
+    let source = r#"
+        contract C {
+            struct S { uint x; }
+            S stored;
+            uint[] storedArr;
+            function structRebind(S storage a, S storage b) internal view { a = b; }
+            function stringRebind(string storage a, string storage b) internal view { a = b; }
+            function bytesRebind(bytes storage a, bytes storage b) internal view { a = b; }
+            function arrayRebind(uint[] storage a, uint[] storage b) internal view { a = b; }
+            function fromState() internal view { S storage p = stored; p = stored; }
+            function memberWrite(S storage p) internal view { p.x = 1; }
+            function indexWrite(uint[] storage p) internal view { p[0] = 1; }
+            function stateCopy(S storage p) internal view { stored = p; }
+        }
+    "#;
+    for name in [
+        "structRebind",
+        "stringRebind",
+        "bytesRebind",
+        "arrayRebind",
+        "fromState",
+    ] {
+        assert_requires(source, name, &[]);
+    }
+    for name in ["memberWrite", "indexWrite", "stateCopy"] {
+        assert_requires(source, name, &[Mutability::NonPayable]);
+    }
+}
+
+/// A destructuring target's components are each their own lvalue, so each one
+/// rebinds on its own replacement — `(p, q) = (a, b)` in `view` is two
+/// rebinds, not two writes.
+#[test]
+fn tuple_components_rebind_their_own_pointer() {
+    let source = r#"
+        contract C {
+            struct S { uint x; }
+            function rebind(S storage a, S storage b) internal view { (a, b) = (b, a); }
+            function mixed(S storage a) internal view { uint x; (a, x) = (a, 1); }
+            function writeThrough(S storage a) internal view { uint x; (a.x, x) = (1, 2); }
+        }
+    "#;
+    assert_requires(source, "rebind", &[]);
+    assert_requires(source, "mixed", &[]);
+    assert_requires(source, "writeThrough", &[Mutability::NonPayable]);
+}
+
+/// The pointer rule applies to the lvalue itself, never to a pointer used
+/// *inside* it: an index and a mapping key are inferred as rvalues, so
+/// `arr[q.length] = p.x` reads two pointers and writes a slot.
+#[test]
+fn a_pointer_inside_the_lhs_is_not_the_lvalue() {
+    let source = r#"
+        contract C {
+            struct S { uint x; }
+            uint[] arr;
+            mapping(uint => uint) m;
+            function index(S storage p, uint[] storage q) internal {
+                arr[q.length] = p.x;
+                m[q.length] = p.x;
+            }
+        }
+    "#;
+    let (db, file) = make_test_db(source);
+    let inference = named_function_inference(&db, file, "index");
+    assert!(
+        inference.diagnostics.is_empty(),
+        "{:?}",
+        codes(&inference)
+    );
+}
+
+/// A storage pointer is a handle, not an lvalue: `delete`, `++`/`--` and a
+/// compound assignment write *through* it, which has no meaning. The write is
+/// rejected at the operand rather than charged as a state write.
+#[test]
+fn a_storage_pointer_is_not_a_writable_place() {
+    let source = r#"
+        contract C {
+            struct S { uint x; }
+            uint[] arr;
+            function remove(S storage p) internal { delete p; }
+            function increment(uint[] storage p) internal { ++p; }
+            function decrement(uint[] storage p) internal { --p; }
+            function add(S storage p) internal { p += 1; }
+            function removeIndex(S storage p) internal view { delete p.x; }
+        }
+    "#;
+    let (db, file) = make_test_db(source);
+    for name in ["remove", "increment", "decrement", "add"] {
+        let inference = named_function_inference(&db, file, name);
+        assert!(
+            failure_messages(&inference)
+                .iter()
+                .any(|message| message.contains("storage pointer")),
+            "{name}: {:?}",
+            codes(&inference)
+        );
+    }
+    // Writing through the pointer is a real lvalue, so it stays a write.
+    assert_requires(source, "removeIndex", &[Mutability::NonPayable]);
+}
+
+/// `return f();` in a function that returns nothing is legal when `f()` returns nothing —
+/// solc treats the statement as a call, not as returning a value. Verified against solc
+/// 0.8.33. A real value in that position is still an arity error.
+#[test]
+fn a_void_call_may_be_returned_from_a_void_function() {
+    let (db, file) = make_test_db(
+        r#"
+            contract C {
+                function h() internal {}
+                function ok() public { return h(); }
+                function bad() public { return 1; }
+            }
+            "#,
+    );
+
+    let ok = named_function_inference(&db, file, "ok");
+    assert!(ok.diagnostics.is_empty(), "{:?}", codes(&ok));
+
+    let bad = named_function_inference(&db, file, "bad");
+    assert!(!bad.diagnostics.is_empty(), "`return 1;` in a void function should report");
+}
+
+/// A fallback's return parameters are a `return_type_definition` child, like a function's.
+/// The grammar used to write them as a bare parameter list, which made them indistinguishable
+/// from the arguments: `return` inside a fallback was reported as an arity mismatch, and the
+/// fallback's signature counted its return parameter as an argument.
+#[test]
+fn a_fallback_declares_its_return_parameters() {
+    let (db, file) = make_test_db(
+        r#"
+            contract One {
+                function _fb() internal returns (bytes memory) { return ""; }
+                fallback(bytes calldata d) external returns (bytes memory) { return _fb(); }
+            }
+            contract Two {
+                fallback() external returns (uint) { return 1; }
+            }
+            contract Three {
+                fallback() external returns (uint, uint) { return (1, 2); }
+            }
+            "#,
+    );
+    let messages: Vec<_> = collect_diagnostics(&db, file)
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect();
+    assert!(messages.is_empty(), "{messages:?}");
+
+    // The declared return type is still enforced.
+    let (db, file) = make_test_db(
+        r#"
+            contract Wrong {
+                fallback() external returns (uint) { return true; }
+            }
+            "#,
+    );
+    let codes: Vec<_> = collect_diagnostics(&db, file)
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect();
+    assert!(
+        codes.contains(&DiagnosticCode::TypeMismatch),
+        "{codes:?}",
+    );
 }

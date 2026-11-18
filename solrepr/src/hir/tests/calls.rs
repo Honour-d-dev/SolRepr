@@ -116,6 +116,12 @@ fn encode_call_accepts_only_external_targets() {
          function f(bytes memory m) external { abi.encodeCall(this.p, (m)); } }",
         "contract C { function f(function(bytes memory) external p, bytes memory m) external { \
              abi.encodeCall(p, (m)); } }",
+        // a public function reached through *another* contract's type name is an external
+        // function type — solc accepts it whatever its mutability
+        "contract Other { function p() public view returns (uint) { return 1; } } \
+         contract C { function f() external { abi.encodeCall(Other.p, ()); } }",
+        "contract Other { function p() public returns (uint) { return 1; } } \
+         contract C { function f() external { abi.encodeCall(Other.p, ()); } }",
     ];
     for source in accepted {
         let (db, file) = make_test_db(source);
@@ -128,9 +134,14 @@ fn encode_call_accepts_only_external_targets() {
     }
 
     let rejected = [
-        // an internal *reference* to a public function is not an external view
+        // an internal *reference* to a public function is not an external view — the
+        // own-contract, base and `super` qualified forms all stay rejected
         "contract C { function p() public {} \
          function f() external { abi.encodeCall(C.p, ()); } }",
+        "contract B { function p() public view returns (uint) { return 1; } } \
+         contract C is B { function f() external { abi.encodeCall(B.p, ()); } }",
+        "contract B { function p() public view returns (uint) { return 1; } } \
+         contract C is B { function f() external { abi.encodeCall(super.p, ()); } }",
         "contract C { function p() public {} \
          function f() external { abi.encodeCall(p, ()); } }",
         "contract C { function q() internal {} \
@@ -1244,26 +1255,64 @@ fn pure_rejects_state_and_environment_reads() {
 /// `msg.value` reads the call's attached value, so only a `payable` function
 /// may observe it.
 #[test]
-fn msg_value_requires_a_payable_function() {
+fn msg_value_is_readable_outside_pure() {
+    // `msg.value` is simply zero for a non-payable call; solc reads it in any
+    // function that is not `pure`. Verified against solc 0.8.33.
     let (db, file) = make_test_db(
         r#"
         contract C {
-            function ok() public payable returns (uint) { return msg.value; }
-            function bad() public returns (uint) { return msg.value; }
-            function viewBad() public view returns (uint) { return msg.value; }
+            function payableFn() public payable returns (uint) { return msg.value; }
+            function plain() public returns (uint) { return msg.value; }
+            function viewFn() public view returns (uint) { return msg.value; }
+            function pureFn() public pure returns (uint) { return msg.value; }
         }
         "#,
     );
-    let ok = named_function_inference(&db, file, "ok");
-    assert!(ok.diagnostics.is_empty(), "{:?}", codes(&ok));
-    for name in ["bad", "viewBad"] {
+    for name in ["payableFn", "plain", "viewFn"] {
+        let inference = named_function_inference(&db, file, name);
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
+    }
+    let pure = named_function_inference(&db, file, "pureFn");
+    assert!(
+        pure.diagnostics
+            .iter()
+            .any(|d| matches!(d, SemanticDiagnostic::StateMutability { .. })),
+        "{:?}",
+        codes(&pure)
+    );
+}
+
+/// `pure` may read the call's own calldata — `msg.data`, `msg.sig` — but not the caller's
+/// context. Verified against solc 0.8.33: `msg.data`/`msg.sig` compile in a `pure`
+/// function, `msg.sender`/`msg.value` are 2527.
+#[test]
+fn pure_may_read_calldata_but_not_the_caller() {
+    let (db, file) = make_test_db(
+        r#"
+        contract C {
+            function calldataOk() public pure returns (bytes memory, bytes4) {
+                return (msg.data, msg.sig);
+            }
+            function senderBad() public pure returns (address) { return msg.sender; }
+            function valueBad() public pure returns (uint) { return msg.value; }
+            function viewOk() public view returns (address) { return msg.sender; }
+        }
+        "#,
+    );
+
+    for name in ["calldataOk", "viewOk"] {
+        let inference = named_function_inference(&db, file, name);
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
+    }
+    for name in ["senderBad", "valueBad"] {
         let inference = named_function_inference(&db, file, name);
         assert!(
-            inference.diagnostics.iter().any(|d| matches!(d,
-                SemanticDiagnostic::InferenceFailure { message, .. }
-                    if message.contains("msg.value"))),
+            inference
+                .diagnostics
+                .iter()
+                .any(|d| matches!(d, SemanticDiagnostic::StateMutability { .. })),
             "{name}: {:?}",
-            codes(&inference)
+            codes(&inference),
         );
     }
 }
@@ -1856,8 +1905,58 @@ fn bare_new_array_is_a_special_function() {
         run_alloc("function (uint256) pure returns (uint256[] memory) f = new uint[];")
             .contains(&DiagnosticCode::TypeMismatch)
     );
+    // `new_expression` is deliberately not a `_postfix_expression` so that a `.` after
+    // `new` continues the type name instead of starting a member access. The parenthesised
+    // form is the one the grammar can still express, and the allocation is the same value.
     assert!(
-        run_alloc("bytes4 s = new uint[].selector;").contains(&DiagnosticCode::UnresolvedMember)
+        run_alloc("bytes4 s = (new uint[]).selector;").contains(&DiagnosticCode::UnresolvedMember)
+    );
+}
+
+/// A qualified type after `new` is a *type*, not a member access on the
+/// construction: `new C.S[](n)` allocates an array of the nested struct, and
+/// `new C.S()` reaches the constructibility check. Before the grammar fix both
+/// parsed as `(new C).S…` and reported an unresolved member on `C`.
+#[test]
+fn new_accepts_a_qualified_type() {
+    let (db, file) = make_test_db(
+        r#"
+            contract C {
+                struct S { uint a; }
+                function f() external {}
+            }
+            contract User {
+                function qualified_array(uint n) external {
+                    C.S[] memory xs = new C.S[](n);
+                    xs;
+                }
+                function qualified_struct() external { new C.S(); }
+            }
+            "#,
+    );
+
+    let ok = named_function_inference(&db, file, "qualified_array");
+    assert!(
+        ok.diagnostics.is_empty(),
+        "`new C.S[](n)` should resolve: {:?}",
+        ok.diagnostics
+            .iter()
+            .map(SemanticDiagnostic::code)
+            .collect::<Vec<_>>(),
+    );
+
+    let bad = named_function_inference(&db, file, "qualified_struct");
+    let codes: Vec<_> = bad.diagnostics.iter().map(SemanticDiagnostic::code).collect();
+    assert!(
+        !codes.contains(&DiagnosticCode::UnresolvedMember),
+        "`new C.S()` is a type error, not a member lookup: {codes:?}",
+    );
+    let messages = failure_messages(&bad);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Identifier is not a contract")),
+        "`new C.S()` should report the constructibility error: {messages:?}",
     );
 }
 
@@ -1999,5 +2098,238 @@ fn specifier_base_constructor_reports_one_name_diagnostic() {
             codes(&inf)
         );
         assert_eq!(inf.diagnostics.len(), 1, "{name}: {:?}", codes(&inf));
+    }
+}
+/// A call used as a callee is a **value**, not the callable it invoked. The
+/// call's resolution names `cast` for hover and goto, but `cast(_impl)(payload)`
+/// passes `payload` to the *returned* function pointer — checking it against
+/// `cast`'s own parameter reported `bytes memory` where a function type was
+/// expected. forge-std's console relies on this shape to launder mutability.
+#[test]
+fn a_chained_call_uses_the_returned_function_type() {
+    let (db, file) = make_test_db(
+        r#"
+            contract C {
+                function _impl(bytes memory payload) internal pure {}
+
+                function cast(function(bytes memory) internal pure fnIn)
+                    internal
+                    pure
+                    returns (function(bytes memory) internal pure fnOut)
+                {
+                    return fnIn;
+                }
+
+                function use(bytes memory payload) internal pure {
+                    cast(_impl)(payload);
+                }
+            }
+            "#,
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    // The argument is still checked against the returned pointer's parameter.
+    let (db, file) = make_test_db(
+        r#"
+            contract C {
+                function _impl(bytes memory payload) internal pure {}
+
+                function cast(function(bytes memory) internal pure fnIn)
+                    internal
+                    pure
+                    returns (function(bytes memory) internal pure fnOut)
+                {
+                    return fnIn;
+                }
+
+                function use(uint256 wrong) internal pure {
+                    cast(_impl)(wrong);
+                }
+            }
+            "#,
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("type mismatch")),
+        "{diagnostics:?}"
+    );
+}
+
+/// An event name may be overloaded on its parameter types: solc compiles
+/// `event e(uint); event e(address);` and `emit` selects on the argument.
+/// The declaration's own name is not a value reference, so it must not be
+/// checked as one — it used to report "no matching declaration found" on each
+/// declaration in the set (28 diagnostics in forge-std's `StdAssertions`).
+#[test]
+fn overloaded_events_resolve_and_select() {
+    let (db, file) = make_test_db(
+        "contract C { event e(uint a); event e(address b); function f() internal { emit e(1); emit e(address(0)); } }",
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    // Selection still discriminates, and a failed selection says so once.
+    let (db, file) = make_test_db(
+        "contract C { event e(uint a); event e(address b); function f() internal { emit e(true); } }",
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == crate::hir::diagnostics::DiagnosticCode::NoMatchingOverload)
+            .count(),
+        1,
+        "{diagnostics:?}"
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("not callable")),
+        "the failed selection must not cascade into a second diagnostic: {diagnostics:?}"
+    );
+}
+
+/// Errors do not overload: solc reports 2333 "Identifier already declared" for
+/// any second error of the same name in a scope, whatever its parameters.
+#[test]
+fn errors_do_not_overload() {
+    let (db, file) = make_test_db(
+        "contract C { error e(uint a); function f() internal { revert e(1); } }",
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    for source in [
+        "contract C { error e(uint a); error e(address b); }",
+        "contract C { error e(uint a); error e(uint b); }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert_eq!(diagnostics.len(), 1, "{source}: {diagnostics:?}");
+        assert!(
+            diagnostics[0].message.contains("already exists"),
+            "{source}: {diagnostics:?}"
+        );
+    }
+
+    // A wrong argument is one type mismatch, not a cascade.
+    let (db, file) = make_test_db(
+        "contract C { error e(uint a); function f() internal { revert e(true); } }",
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+}
+
+/// Two function values with one signature share a type. The type of a value carries
+/// the defining callee, so `common_ty` has to compare pointer signatures instead of
+/// identity — otherwise `cond ? a : b` over two identical `internal` functions is a
+/// spurious type mismatch.
+#[test]
+fn two_function_values_with_one_signature_share_a_type() {
+    let (db, file) = make_test_db(
+        r#"
+            contract C {
+                function a(uint x) internal pure returns (uint) { return x; }
+                function b(uint x) internal pure returns (uint) { return x; }
+                function wider(uint x) internal view returns (uint) { return x; }
+                function e1(uint x) external pure returns (uint) { return x; }
+                function e2(uint x) external pure returns (uint) { return x; }
+                function g(bool c) internal view {
+                    c ? a : b;
+                    c ? this.e1 : this.e2;
+                    function (uint) internal view returns (uint) f = c ? a : wider;
+                    f;
+                }
+                function different(uint x, bool y) internal pure returns (uint) { return y ? x : 0; }
+                function bad(bool c) internal pure { c ? a : different; }
+                function badKind(bool c) internal pure { c ? a : 1; }
+            }
+            "#,
+    );
+
+    let ok = named_function_inference(&db, file, "g");
+    assert!(
+        ok.diagnostics.is_empty(),
+        "identical signatures should share a type: {:?}",
+        codes(&ok),
+    );
+
+    for name in ["bad", "badKind"] {
+        let inference = named_function_inference(&db, file, name);
+        assert!(
+            codes(&inference).contains(&DiagnosticCode::TypeMismatch),
+            "`{name}` should still mismatch: {:?}",
+            codes(&inference),
+        );
+    }
+
+    // A function value is named by its signature, not by the defining declaration.
+    let messages: Vec<_> = collect_diagnostics(&db, file)
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect();
+    assert!(
+        messages.iter().any(|message| message
+            == "type mismatch: expected `function(uint256) internal pure returns (uint256)`, \
+                found `function(uint256, bool) internal pure returns (uint256)`"),
+        "{messages:?}",
+    );
+}
+
+/// `revert` has three forms: the builtin with an optional reason string, a named error with
+/// its arguments, and the bare `revert;` the grammar keeps parseable for this layer to reject.
+#[test]
+fn revert_forms_are_checked() {
+    for body in [
+        "revert();",
+        "revert(\"message\");",
+        "revert(m);",
+        "revert E(1);",
+    ] {
+        let src = format!(
+            r#"
+            contract C {{
+                error E(uint a);
+                function g(string memory m) public {{ {body} }}
+            }}
+            "#
+        );
+        let (db, file) = make_test_db(&src);
+        let inference = named_function_inference(&db, file, "g");
+        assert!(
+            inference.diagnostics.is_empty(),
+            "`{body}` should be accepted: {:?}",
+            codes(&inference),
+        );
+    }
+
+    for (body, expected) in [
+        // The grammar keeps this parseable; the analyzer rejects it.
+        ("revert;", "`revert` requires an error or a reason string"),
+        ("revert(1);", "type mismatch: expected `string memory`"),
+        ("revert(\"a\", \"b\");", "expected 1 argument(s), found 2"),
+        ("revert E();", "expected 1 argument(s), found 0"),
+    ] {
+        let src = format!(
+            r#"
+            contract C {{
+                error E(uint a);
+                function g(string memory m) public {{ {body} }}
+            }}
+            "#
+        );
+        let (db, file) = make_test_db(&src);
+        named_function_inference(&db, file, "g");
+        let messages: Vec<_> = collect_diagnostics(&db, file)
+            .iter()
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect();
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "`{body}` should report {expected:?}: {messages:?}",
+        );
     }
 }

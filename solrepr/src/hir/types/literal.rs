@@ -1,3 +1,5 @@
+use num_bigint::{BigInt, Sign};
+
 use crate::hir::types::kind::TyKind;
 use crate::hir::types::primitive::Primitive;
 use crate::hir::types::syntax::Location;
@@ -22,6 +24,24 @@ pub enum LiteralKind {
 }
 
 impl LiteralKind {
+    /// The kind of a numeric value — the one place a value becomes fitness facts: integral is
+    /// `Int`, anything else `Rational`, which converts to no type. `exact_bytes` is a hex literal's
+    /// written width, which only its spelling can supply.
+    pub fn from_rational(num: BigInt, den: BigInt, exact_bytes: Option<u8>) -> LiteralKind {
+        if den == BigInt::from(0u8) || &num % &den != BigInt::from(0u8) {
+            return LiteralKind::Rational;
+        }
+        let value = num / den;
+        let neg = value.sign() == Sign::Minus;
+        let magnitude = value.magnitude().clone();
+        let bits = if neg { magnitude - 1u8 } else { magnitude }.bits();
+        LiteralKind::Int {
+            neg,
+            min_bits: u16::try_from(bits).unwrap_or(u16::MAX),
+            exact_bytes,
+        }
+    }
+
     /// The smallest Solidity integer bit-width.
     fn int_width(bits: u16) -> Option<u16> {
         let width = bits.max(1).div_ceil(8) * 8;
@@ -90,6 +110,11 @@ impl LiteralKind {
                 Some(1)
             }
             TyKind::Primitive(Primitive::FixedBytes(_)) if zero => Some(1),
+            // An address literal reaches a contract type as an `address` does: allowed unless the
+            // contract has a payable fallback.
+            _ if self.implicitly_converts_to(&TyKind::Primitive(Primitive::Address)).is_some() => {
+                TyKind::Primitive(Primitive::Address).explicitly_converts_to(target, db)
+            }
             
             TyKind::TypeDef(TypeDefId::Enum(id)) if !neg => {
                 let members = db.enum_data(*id).variants.len() as u128;

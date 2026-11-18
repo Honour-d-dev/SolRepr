@@ -322,13 +322,33 @@ impl<'db> MemberBuilder<'db> {
                             match (visible, slot.candidates.iter().any(is_visible)) {
                                 (true, true) => {
                                     slot.effective = None;
-                                    self.sink.push(
-                                        SemanticDiagnostic::InheritedMemberConflict {
-                                            contract: self.container,
-                                            name,
-                                            declarations: defs.iter().filter(|d| is_visible(d)).copied().collect(),
-                                        },
-                                    );
+                                    // Two declarations in *this* contract are a duplicates
+                                    let previous = defs.iter().copied().find(|d| *d != def && is_visible(d));
+                                    let own = self.declarations.get(&def)
+                                        .is_some_and(|decl| decl.owner == self.container);
+                                    match previous {
+                                        Some(previous)
+                                            if own && self.declarations.get(&previous)
+                                                    .is_some_and(|decl| decl.owner == self.container) => {
+                                            self.sink.push(
+                                                SemanticDiagnostic::DuplicateMemberSlot {
+                                                    declaration: def,
+                                                    previous,
+                                                },
+                                            );
+                                        }
+                                        _ => self.sink.push(
+                                            SemanticDiagnostic::InheritedMemberConflict {
+                                                contract: self.container,
+                                                name,
+                                                declarations: defs
+                                                    .iter()
+                                                    .filter(|d| is_visible(d))
+                                                    .copied()
+                                                    .collect(),
+                                            },
+                                        ),
+                                    }
                                 }
                                 (true, false) => slot.effective = Some(def),
                                 (false, _) => {}

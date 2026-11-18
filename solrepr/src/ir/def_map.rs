@@ -235,11 +235,9 @@ pub enum DefNamespace {
 }
 
 impl DefNamespace {
+    
     pub fn is_overloadable(&self) -> bool {
-        !matches!(
-            self,
-            DefNamespace::Types | DefNamespace::Variables | DefNamespace::Modifiers
-        )
+        matches!(self, DefNamespace::Functions | DefNamespace::Events)
     }
 
     pub fn from(def: &DefId) -> DefNamespace {
@@ -591,22 +589,26 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
         name: Name,
     ) {
         let scope = self.collector.scopes.index_mut(scope_id);
+        let enters = !(matches!(id, DefId::Var(_))
+            && matches!(scope.owner, DefId::Interface(_)));
         let ns = DefNamespace::from(&id);
         let mut previous = None;
-        match scope.by_name.entry(name.clone()) {
-            Entry::Occupied(mut entry) => {
-                let e = entry.get_mut();
-                if e.namespace == ns && ns.is_overloadable() && !is_special_name(&name) {
-                    e.defs.push(id);
-                } else {
-                    previous = Some(e.defs[0]);
+        if enters {
+            match scope.by_name.entry(name.clone()) {
+                Entry::Occupied(mut entry) => {
+                    let e = entry.get_mut();
+                    if e.namespace == ns && ns.is_overloadable() && !is_special_name(&name) {
+                        e.defs.push(id);
+                    } else {
+                        previous = Some(e.defs[0]);
+                    }
                 }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(ScopeData {
-                    namespace: ns,
-                    defs: SmallVec::from([id]),
-                });
+                Entry::Vacant(entry) => {
+                    entry.insert(ScopeData {
+                        namespace: ns,
+                        defs: SmallVec::from([id]),
+                    });
+                }
             }
         }
         if let Some(previous) = previous {
@@ -750,6 +752,7 @@ impl<'db> Collector<'db> {
                         }
                         self.extend_scope(import_id, dep, self.root, &import.import_kind);
                     } else {
+                        self.extend_scope(import_id, dep, self.root, &import.import_kind);
                         resolver.merge(ImportResolver::Cycle(vec![dep]));
                     }
                 } else {

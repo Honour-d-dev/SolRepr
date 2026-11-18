@@ -282,14 +282,11 @@ impl Files {
     ) -> Option<FileId> {
         let source_root = *self.file_source_root.get(&from)?;
         let package = db.package_config(source_root);
-        let resolved_path = resolve_import(
-            from.path(db),
-            rel_path,
-            &package.remappings,
-        )
-        .ok()?;
-
-        self.file(&resolved_path)
+        // A non-relative import also resolves against the package root, the base path Foundry and
+        // solc compile with.
+        let rooted = (!rel_path.starts_with('.')).then(|| normalize_path(&package.root.join(rel_path)));
+        resolve_import(from.path(db), rel_path, &package.remappings).ok().into_iter().chain(rooted)
+            .find_map(|path| self.file(&path))
     }
 }
 

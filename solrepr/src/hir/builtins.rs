@@ -117,9 +117,9 @@ impl BuiltinTy {
         }
     }
 
-    /// `msg`/`block`/`tx` read the environment; `abi` is a pure namespace.
+    /// block`/`tx` read the environment; `abi` is a pure namespace, `msg` is based on member
     pub const fn reads_env(self) -> bool {
-        matches!(self, Self::Msg | Self::Block | Self::Tx)
+        matches!(self, Self::Block | Self::Tx)
     }
 
     /// The object's member table — `msg.sender`, `abi.encode`, …
@@ -242,10 +242,13 @@ impl BuiltinField {
         ty
     }
 
-    /// `a.balance`/`a.code`/`a.codehash` read the *account* — an environment
-    /// access independent of `a`'s own location.
+    /// `msg.sender`/`msg.value` and account reads are environment accesses — solc rejects them
+    /// in `pure` fns, while `msg.data`/`msg.sig` are accepted.
     pub const fn reads_env(self) -> bool {
-        matches!(self, Self::Balance | Self::Code | Self::Codehash)
+        matches!(
+            self,
+            Self::Balance | Self::Code | Self::Codehash | Self::MsgSender | Self::MsgValue
+        )
     }
 
     /// Hover docs — static for table fields, spelled from the payload for
@@ -315,6 +318,8 @@ pub enum BuiltinFn {
     // Free functions.
     Assert,
     Require,
+    /// `revert(...)` — the builtin form; `revert E(...)` names an error instead.
+    Revert,
     Keccak256,
     Sha256,
     Ripemd160,
@@ -365,6 +370,7 @@ impl BuiltinFn {
         match self {
             Self::Assert => fn_spec!("assert", &[Boolean], &[], Fixed, Static, Pure, "Throws if the condition is false"),
             Self::Require => fn_spec!("require", &[Boolean], &[], Intrinsic, Static, Pure, "Reverts if the condition is false with a string message or a custom error"),
+            Self::Revert => fn_spec!("revert", &[String], &[], Intrinsic, Static, Pure, "Reverts, optionally with a reason string"),
             Self::Keccak256 => fn_spec!("keccak256", &[Bytes], &[FixedBytes(32)], Fixed, Static, Pure, "Computes the Keccak-256 hash"),
             Self::Sha256 => fn_spec!("sha256", &[Bytes], &[FixedBytes(32)], Fixed, Static, Pure, "Computes the SHA-256 hash"),
             Self::Ripemd160 => fn_spec!("ripemd160", &[Bytes], &[FixedBytes(20)], Fixed, Static, Pure, "Computes the RIPEMD-160 hash"),
@@ -436,11 +442,23 @@ impl BuiltinFn {
         }
     }
 
-    /// The builtins solc folds in constant expressions.
+    /// Whether a call is a compile-time constant: the `abi` encoders and `concat`s are, `decode`
+    /// and `encodeCall` are not.
     pub const fn is_const(self) -> bool {
         matches!(
             self,
-            Self::Keccak256 | Self::Sha256 | Self::Ripemd160 | Self::Ecrecover | Self::Addmod | Self::Mulmod
+            Self::Keccak256
+                | Self::Sha256
+                | Self::Ripemd160
+                | Self::Ecrecover
+                | Self::Addmod
+                | Self::Mulmod
+                | Self::Encode
+                | Self::EncodePacked
+                | Self::EncodeWithSelector
+                | Self::EncodeWithSignature
+                | Self::BytesConcat
+                | Self::StringConcat
         )
     }
 
@@ -539,13 +557,14 @@ impl BuiltinFn {
 }
 
 // GLOBAL and BUILTIN OBJECTS/SYMBOLS
-static GLOBALS: [Builtin; 17] = [
+static GLOBALS: [Builtin; 18] = [
     Obj(BuiltinTy::Msg),
     Obj(BuiltinTy::Block),
     Obj(BuiltinTy::Abi),
     Obj(BuiltinTy::Tx),
     Fn(BuiltinFn::Assert),
     Fn(BuiltinFn::Require),
+    Fn(BuiltinFn::Revert),
     Fn(BuiltinFn::Keccak256),
     Fn(BuiltinFn::Sha256),
     Fn(BuiltinFn::Ripemd160),

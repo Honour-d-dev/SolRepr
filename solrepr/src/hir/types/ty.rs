@@ -169,6 +169,23 @@ impl Ty {
     /// solc's `Type::commonType` — the type two expression positions share:
     /// a ternary's branches, an inline array's elements.
     pub fn common_ty(db: &dyn HirDb, one: Ty, other: Ty, ) -> Option<Ty> {
+        // Tuples combine element-wise, the way branches and array elements do: a one-way conversion
+        // fails for two literal tuples that differ only in values.
+        if let (TyKind::Tuple(one), TyKind::Tuple(other)) = (one.kind(db), other.kind(db))
+            && one.elements.len() == other.elements.len()
+        {
+            let elements = one
+                .elements
+                .iter()
+                .zip(other.elements.iter())
+                .map(|(one, other)| match (one, other) {
+                    (Some(one), Some(other)) => Some(Self::common_ty(db, *one, *other)),
+                    (Some(one), None) | (None, Some(one)) => Some(Some(*one)),
+                    (None, None) => Some(None),
+                })
+                .collect::<Option<Box<[_]>>>()?;
+            return Some(Ty::tuple_from(db, elements));
+        }
         let mobile = one.mobile_ty(db);
         if other.implicitly_converts_to(mobile, db).is_some() {
             return Some(mobile);
@@ -316,7 +333,7 @@ impl Type {
     }
 
     /// Attach a location to a type, creating a reference if needed.
-    /// An existing reference location is replaced — the only place a `Ref` is
+    /// An existing reference location is replaced — the only site a `Ref` is
     /// constructed, so a type can never carry two.
     pub fn at_loc(self, db: &dyn HirDb, loc: Location) -> Type {
         match self.kind(db) {
@@ -345,6 +362,12 @@ impl Type {
     /// [`Self::at_loc`]
     pub fn upcast_from(self, db: &dyn HirDb, loc: Location) -> Type {
         self.at_loc(db, loc.as_reference())
+    }
+
+    /// [`Ty::upcast_from_kind`] on the declarable subset: a state variable
+    /// binds `storage`, everything else takes its default location.
+    pub fn upcast_from_kind(self, db: &dyn HirDb, kind: VariableKind) -> Type {
+        Type(self.0.upcast_from_kind(db, kind))
     }
 
     pub fn implicitly_converts_to(

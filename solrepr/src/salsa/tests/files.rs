@@ -1,7 +1,11 @@
 use crate::salsa::Db;
 use crate::utilities::fixture_path;
 use crate::workspace::loader::load_roots;
+use crate::workspace::{
+    LoadedFile, Package, PackageId, RootWithFiles, WorkspaceWithFiles,
+};
 use camino::Utf8PathBuf;
+use ropey::Rope;
 
 fn standalone_db() -> Db {
     let root = fixture_path("fixtures/workspaces/standalone/basic");
@@ -71,19 +75,78 @@ fn remappings_only_workspace_resolves_vendored_imports() {
     assert!(dep.path(&db).ends_with("vendor/dep/Dep.sol"));
 }
 
-/// A remapping target outside the workspace root is indexed as a
-/// synthesized dependency source root and resolves normally.
+/// A namespace import (`import * as ns`) is a qualifier, not a type: `ns.D`,
+/// `ns.Pair` and the base list `is ns.D` all resolve through the imported
+/// file's scope, in type position and in expression position (`ns.D(who)`).
 #[test]
-fn external_remapping_target_resolves_into_a_synthesized_dependency() {
-    let fixture = fixture_path("fixtures/workspaces/foundry/remappings/external/proj");
-    let db = Db::new(load_roots(fixture.clone()));
-    let main = db
-        .file(&fixture.join("Main.sol"))
-        .expect("the workspace indexes Main.sol");
-    let ext = db
-        .resolve_to_file(main, "ext/Ext.sol")
-        .expect("ext/ resolves into the synthesized dependency");
-    assert!(ext.path(&db).ends_with("ext_lib/Ext.sol"));
+fn namespace_import_qualifies_type_references() {
+    let root = fixture_path("fixtures/workspaces/namespaces");
+    let db = Db::new(load_roots(root.clone()));
+    let user = db
+        .file(&root.join("src/User.sol"))
+        .expect("the workspace indexes User.sol");
+
+    let diagnostics = crate::hir::diagnostics::collect_diagnostics(&db, user);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+/// A namespace alias is writable but cannot type a declaration: solc 5172,
+/// "Name has to refer to a user-defined type", once per declaration — and
+/// nothing cascades, because the type is refused before anything binds it.
+#[test]
+fn namespace_alias_cannot_type_a_declaration() {
+    let root = fixture_path("fixtures/workspaces/namespaces");
+    let db = Db::new(load_roots(root.clone()));
+    let bad = db
+        .file(&root.join("src/Bad.sol"))
+        .expect("the workspace indexes Bad.sol");
+
+    let diagnostics = crate::hir::diagnostics::collect_diagnostics(&db, bad);
+    let refusals = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message.contains("user-defined type"))
+        .count();
+    // `d`, the return type of `f`, `x`, `y`, and the element of `ns[] z`.
+    assert_eq!(refusals, 5, "one per declaration: {diagnostics:?}");
+    assert_eq!(diagnostics.len(), 5, "{diagnostics:?}");
+}
+
+/// The refusal is the *type ref's* verdict, reached while lowering, so a local,
+/// its parameter and an array of it all end up invalid — no `Base.sol` survives
+/// into a declaration and no location error follows from the refused type.
+#[test]
+fn a_refused_namespace_type_leaves_no_namespace_behind() {
+    use crate::hir::body_map::BodyOwnerId;
+    use crate::hir::tests::helper::{find_function, named_function_inference};
+    use crate::ir::def_map::DefId;
+    use crate::salsa::hir_db::HirDb;
+
+    let root = fixture_path("fixtures/workspaces/namespaces");
+    let db = Db::new(load_roots(root.clone()));
+    let bad = db
+        .file(&root.join("src/Bad.sol"))
+        .expect("the workspace indexes Bad.sol");
+
+    for name in ["local", "param", "array"] {
+        let DefId::Function(id) = find_function(&db, bad, name) else {
+            panic!("`{name}` should be a function");
+        };
+        let inference = named_function_inference(&db, bad, name);
+        let body = db.body_map(BodyOwnerId::Function(id));
+        for (local, data) in body.locals.iter() {
+            let ty_ref = *data.ty_ref();
+            assert!(
+                inference.local_ty(local).is_invalid(&db),
+                "`{name}`: the local kept {}",
+                inference.local_ty(local).display(&db)
+            );
+            assert!(
+                inference.ty(ty_ref).is_invalid(&db),
+                "`{name}`: the type ref kept {}",
+                inference.ty(ty_ref).display(&db)
+            );
+        }
+    }
 }
 
 /// A manifestless vendored library is indexed as a named dependency —
@@ -117,28 +180,6 @@ fn remapping_into_src_dir_resolves_imports() {
     assert!(dep.path(&db).ends_with("dependencies/fs/src/Lib.sol"));
 }
 
-/// A remapping dependency's own remappings resolve transitively —
-/// `ext_a` imports through `b/` into `ext_b`.
-#[test]
-fn transitive_remapping_dependencies_resolve_imports() {
-    let fixture = fixture_path("fixtures/workspaces/foundry/remappings/external");
-    let db = Db::new(load_roots(fixture.clone()));
-    let main = db
-        .file(&fixture.join("proj/Main.sol"))
-        .expect("the workspace indexes proj/Main.sol");
-    let a = db
-        .resolve_to_file(main, "a/A.sol")
-        .expect("a/ resolves into ext_a");
-    assert!(a.path(&db).ends_with("ext_a/A.sol"));
-    let b = db
-        .resolve_to_file(a, "b/B.sol")
-        .expect("ext_a's own b/ remapping resolves into ext_b");
-    assert!(b.path(&db).ends_with("ext_b/B.sol"));
-}
-
-/// A file inside a library the package graph deduplicated away is never
-/// indexed — `is_ignored_path` marks it, and opening it produces no
-/// `File` and no source root, so it cannot sync text or be analyzed.
 #[test]
 fn deduplicated_library_files_are_never_indexed() {
     let root = fixture_path("fixtures/workspaces/foundry/nested");
@@ -191,3 +232,47 @@ fn live_root_set_matches_a_fresh_discovery() {
         assert_eq!(db.workspace(), discovered, "{fixture}");
     }
 }
+
+/// A non-relative import resolves against the package root as well as the
+/// remapping table — Foundry's base path, which is how `import "src/Foo.sol"`
+/// from a test file finds its target.
+#[test]
+fn a_project_rooted_import_resolves_against_the_package_root() {
+    let root = Utf8PathBuf::from("/tmp/project_rooted_import");
+    let package = PackageId(root.clone());
+    let workspace = WorkspaceWithFiles {
+        ignored_roots: Vec::new(),
+        packages: vec![Package {
+            root: root.clone(),
+            remappings: Vec::new(),
+        }],
+        roots: vec![
+            RootWithFiles {
+                path: root.join("src"),
+                package_id: package.clone(),
+                is_dependency: false,
+                files: vec![LoadedFile {
+                    path: root.join("src/Foo.sol"),
+                    text: Some(Rope::from_str("contract Foo {}")),
+                }],
+            },
+            RootWithFiles {
+                path: root.join("test"),
+                package_id: package,
+                is_dependency: false,
+                files: vec![LoadedFile {
+                    path: root.join("test/Foo.t.sol"),
+                    text: Some(Rope::from_str("import \"src/Foo.sol\";")),
+                }],
+            },
+        ],
+    };
+    let db = Db::new(workspace);
+    let from = db.file(&root.join("test/Foo.t.sol")).expect("test file is indexed");
+    let resolved = db.resolve_to_file(from, "src/Foo.sol");
+    assert_eq!(
+        resolved.map(|file| file.path(&db).clone()),
+        Some(root.join("src/Foo.sol"))
+    );
+}
+

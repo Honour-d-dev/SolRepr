@@ -596,7 +596,9 @@ fn library_internal_members_reach_any_caller() {
 /// the payable gate does not apply. A contract's non-payable function still
 /// errors.
 #[test]
-fn msg_value_is_allowed_in_library_functions() {
+fn msg_value_is_readable_in_library_functions_too() {
+    // A library runs via delegatecall and sees the caller's value; a contract
+    // function sees its own. Both are legal outside `pure`.
     let (db, file) = make_test_db(
         r#"
             library L {
@@ -607,17 +609,10 @@ fn msg_value_is_allowed_in_library_functions() {
             }
             "#,
     );
-    let library = named_function_inference(&db, file, "check");
-    assert!(
-        library.diagnostics.is_empty(),
-        "library functions observe the caller's msg.value: {:?}",
-        codes(&library)
-    );
-    let contract = named_function_inference(&db, file, "f");
-    assert!(contract.diagnostics.iter().any(|diagnostic| {
-        matches!(diagnostic, SemanticDiagnostic::InferenceFailure { message, .. }
-            if message.contains("payable"))
-    }));
+    for name in ["check", "f"] {
+        let inference = named_function_inference(&db, file, name);
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
+    }
 }
 
 /// A getter and a bare-call address member both convert to their external
@@ -660,7 +655,7 @@ fn members_convert_to_external_function_pointers() {
 /// `bytesN` implicitly converts to `bytes` — `keccak256` returns `bytes32`,
 /// which is a valid `bytes.concat` argument.
 #[test]
-fn fixed_bytes_implicitly_converts_to_bytes() {
+fn bytes_concat_accepts_a_fixed_bytes_argument() {
     let (db, file) = make_test_db(
         r#"
             contract C {
@@ -1530,9 +1525,10 @@ fn explicit_conversions_match_solc() {
         ("bytes(s)", true),
         ("bytes32(bs)", true),
         ("bytes32(s)", false),
-        // `bytesN` converts to `bytes` implicitly — the cast also compiles.
-        ("bytes(b32)", true),
-        ("bytes(b1)", true),
+        // Nothing converts *to* `bytes` from a fixed-size array — not even
+        // explicitly (`bytes(bytes32(0))` is rejected by solc 0.8.33).
+        ("bytes(b32)", false),
+        ("bytes(b1)", false),
         // `ContractType`/`AddressType`: contract payability gates conversions
         // to and from `address payable`, but not `address`.
         ("address(c)", true),
@@ -1740,4 +1736,449 @@ fn udvt_conversion_keeps_the_argument_constness_rule() {
             .any(|diagnostic| diagnostic.message.contains("compile-time constant")),
         "{diagnostics:?}"
     );
+}
+
+/// `new bytes(n)` / `new string(n)` is a constant when its length is: solc
+/// accepts a zero-filled byte array of a constant length. An allocated *array*
+/// is not (`uint[] constant` is rejected outright, 9259), contract creation is
+/// not, and a non-constant length keeps the initializer non-constant.
+#[test]
+fn byte_array_allocation_is_a_constant() {
+    for source in [
+        "contract C { bytes constant Z = new bytes(0); }",
+        "contract C { bytes constant Z = new bytes(1); }",
+        "contract C { string constant S = new string(0); }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+    }
+
+    for source in [
+        // An immutable is not a compile-time constant, so neither is a length
+        // read from one.
+        "contract C { uint immutable I = 4; bytes constant Z = new bytes(I); }",
+        // An array allocation is not a constant. Note that `uint[] constant`
+        // is rejected earlier and for a different reason — the constant-type
+        // rule — which `a_constant_must_be_a_value_type_or_a_byte_array` pins.
+        // Contract creation is never a constant.
+        "contract B {} contract C { B constant b = new B(); }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("compile-time constant")),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+/// solc's constant-type rule (9259): a `constant` must be a value type or a
+/// byte array. It is terminal — reported *instead of* the initializer and
+/// uninitialized checks, so `uint[] constant a;` names the type, not the
+/// missing value.
+#[test]
+fn a_constant_must_be_a_value_type_or_a_byte_array() {
+    for source in [
+        "contract C { uint constant a = 1; }",
+        "contract C { address constant b = address(0); }",
+        "contract C { address payable constant c = payable(address(0)); }",
+        "contract C { bool constant d = true; }",
+        "contract C { bytes32 constant e = bytes32(0); }",
+        "contract C { bytes constant f = hex\"00\"; }",
+        "contract C { string constant g = \"x\"; }",
+        "contract C { enum E { A } E constant h = E.A; }",
+        "contract D {} contract C { D constant i = D(address(0)); }",
+        "interface I {} contract C { I constant j = I(address(0)); }",
+        "type U is uint8; contract C { U constant k = U.wrap(1); }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+    }
+
+    for source in [
+        "contract C { uint[] constant a = new uint[](0); }",
+        "contract C { uint[] constant a; }",
+        "contract C { struct S { uint x; } S constant s = S(1); }",
+        "contract C { mapping(uint => uint) constant m; }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("value type and byte array")),
+            "{source}: {diagnostics:?}"
+        );
+        // The type rule is the whole verdict: neither the initializer's
+        // constness nor the missing value is reported alongside it.
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("compile-time constant")
+                    || diagnostic.message.contains("Uninitialized")),
+            "{source}: {diagnostics:?}"
+        );
+    }
+
+    // A function type is a value type, so the rule does not fire — solc
+    // rejects this one later, on the conversion (7407).
+    let (db, file) = make_test_db(
+        "contract C { function() external constant fp = C.g; function g() external {} }",
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("value type and byte array")),
+        "{diagnostics:?}"
+    );
+}
+
+/// Arithmetic over two literals folds into a literal kind, so the value's
+/// fitness — not the left operand's — decides the conversion. Verified against
+/// solc 0.8.33: a rational is not an integer, and a 257-bit value is not a
+/// `uint256`.
+#[test]
+fn literal_arithmetic_folds_into_its_fitness() {
+    for source in [
+        // Integral results, at every size the target can hold.
+        "contract C { uint constant A = 1 / 2 * 4; }",
+        "contract C { uint constant A = 1 days + 1 hours; }",
+        "contract C { uint constant A = 2 ** 8; }",
+        "contract C { uint[2 ** 8] a; }",
+        "contract C { uint16 constant A = 2 ** 8; }",
+        "contract C { function f() internal pure returns (uint) { return 2 ** 8; } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+    }
+
+    for (source, needle) in [
+        // `5 / 2` is a rational: it converts to no integer type.
+        ("contract C { uint constant A = 5 / 2; }", "uint256"),
+        ("contract C { function f() internal { uint x = 5 / 2; } }", "uint256"),
+        // `2 ** 256` needs 257 bits.
+        ("contract C { uint constant A = 2 ** 256; }", "uint256"),
+        ("contract C { function f() internal { uint x = 2 ** 256; } }", "uint256"),
+        ("contract C { function f(uint8 y) internal { y = 2 ** 8; } }", "uint8"),
+        // A fractional array length.
+        ("contract C { uint[5 / 2] a; }", "array length"),
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(needle)),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+/// A variable in an interface is a rejected declaration, and it is not a member
+/// of the interface *type* either — solc: `I.K` is 9582 "not found". The name
+/// still exists in the interface's scope, which is what lets a derived contract
+/// resolve the inherited `x`.
+/// A variable declared in an interface is dropped by the def map: the declaration is the only
+/// error, and nothing downstream can resolve the name — not the inherited `x`, not `I.K`, not
+/// the instance member `i.x`. The follow-on diagnostics are deliberate: silence would read as
+/// "this is fine".
+#[test]
+fn an_interface_variable_is_dropped_entirely() {
+    let (db, file) = make_test_db(
+        r#"
+            interface I { uint x; uint constant K = 1; }
+            contract C is I {
+                uint constant A = I.K;
+                function inherited() external view returns (uint) { return x; }
+                function getter(I i) external view returns (uint) { return i.x(); }
+            }
+            "#,
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    let count = |needle: &str| {
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains(needle))
+            .count()
+    };
+
+    // The declarations themselves, one each.
+    assert_eq!(count("Variables cannot be declared"), 2, "{diagnostics:?}");
+    // Every use fails to resolve — the name is not in any scope or member table.
+    assert_eq!(count("unresolved name `x`"), 1, "{diagnostics:?}");
+    assert_eq!(count("unresolved member `x`"), 1, "{diagnostics:?}");
+    assert_eq!(count("unresolved member `K`"), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics.len(), 5, "{diagnostics:?}");
+}
+
+/// A `**` past `POW_LIMIT` is not evaluated — it cannot fit any type — but its
+/// kind is still exact: `0`, `1` and `-1` stay representable, every other
+/// integral base is rejected on width without building the value. solc 0.8.33
+/// agrees on all seven (the first three compile).
+#[test]
+fn huge_exponents_are_rejected_without_being_computed() {
+    for source in [
+        "contract C { uint constant A = 1 ** 4000000000; }",
+        "contract C { uint constant A = 0 ** 4000000000; }",
+        "contract C { int constant A = (-1) ** 4000000001; }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+    }
+
+    for source in [
+        "contract C { uint constant A = 2 ** 4000000000; }",
+        "contract C { uint x = 2 ** 5000; }",
+        "contract C { uint constant A = 2 ** 300; }",
+        // A negative exponent on a literal base is an operator error in solc;
+        // the value is fractional either way.
+        "contract C { uint constant A = 2 ** -4000000000; }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(!diagnostics.is_empty(), "{source}: accepted");
+    }
+}
+
+/// A storage slot takes a copy, so the conversion needs the *target's* location
+/// — the one place the lattice cannot compare peeled kinds. Every row is
+/// verified against solc 0.8.33.
+#[test]
+fn a_storage_array_takes_a_fitting_copy() {
+    for source in [
+        // A fixed source that fits, in either direction of dynamism.
+        "contract C { uint[2] s; function f(uint[1] memory m) internal { s = m; } }",
+        "contract C { uint[] s; function f(uint[1] memory m) internal { s = m; } }",
+        "contract C { uint[] s; function f(uint[] memory m) internal { s = m; } }",
+        // Calldata and a storage slot are sources too.
+        "contract C { uint[2] s; function f(uint[1] calldata m) internal { s = m; } }",
+        "contract C { uint[2] a; uint[1] b; function f() internal { a = b; } }",
+        // Elements convert implicitly — `uint8` widens into `uint256` storage.
+        "contract C { uint[] s; function f(uint8[1] memory m) internal { s = m; } }",
+        // An initializer is a copy as well, so this is not statement-only.
+        "contract C { uint[2] s = [1]; }",
+        "contract C { uint[] s = [1]; }",
+        // The rule nests: an inner array copies with the same fit rule.
+        "contract C { uint[2][] s; function f(uint[1][] memory m) internal { s = m; } }",
+        "contract C { uint[2][2] s; function f(uint[1][2] memory m) internal { s = m; } }",
+        // A storage pointer is a copy source — the copy reads through it.
+        "contract C { uint[2] s; function f(uint[2] storage p) internal { s = p; } }",
+        "contract C { uint[2] s; function f(uint[1] storage p) internal { s = p; } }",
+        // A non-array slot falls back to the ordinary conversion.
+        "contract C { bytes s; function f(bytes memory m) internal { s = m; } }",
+        "contract C { string s; function f(string memory m) internal { s = m; } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+    }
+
+    for source in [
+        // A longer source does not fit.
+        "contract C { uint[2] s; function f(uint[3] memory m) internal { s = m; } }",
+        "contract C { uint[2] s; function f(uint[3] calldata m) internal { s = m; } }",
+        // A dynamic source has no length to check against a fixed target.
+        "contract C { uint[2] s; function f(uint[] memory m) internal { s = m; } }",
+        "contract C { uint[2] a; uint[] b; function f() internal { a = b; } }",
+        "contract C { uint[2] s = new uint[](1); }",
+        // A memory target is a conversion, not a copy.
+        "contract C { function f(uint[2] memory a, uint[1] memory b) internal { a = b; } }",
+        // A pointer is a handle, not a slot (bug 18).
+        "contract C { function f(uint[2] storage p, uint[1] memory m) internal { p = m; } }",
+        "contract C { function f(uint[2] storage p, uint[1] storage q) internal { p = q; } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| format!("{:?}", diagnostic.code) == "TypeMismatch"),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+/// Shifts and exponentiation take their result type from the **left** operand,
+/// and a literal left widens to its mobile type. solc 0.8.33: `bytes32(1 << x)`
+/// and `bytes32(2 ** x)` compile, while `bytes32(1)`, `bytes32(x << 1)` and
+/// `bytes32(1 + x)` are all 9640 — arithmetic follows the common type, a shift
+/// does not.
+#[test]
+fn shift_and_power_results_follow_the_left_operand() {
+    for source in [
+        "contract C { function f(uint8 x) internal pure returns (bytes32) { return bytes32(1 << x); } }",
+        "contract C { function f(uint8 x) internal pure returns (bytes32) { return bytes32(2 ** x); } }",
+        "contract C { function f(uint8 x) internal pure returns (uint256) { return 1 >> x; } }",
+        // A negative literal's mobile type is `int256`, not `uint256`.
+        "contract C { function f(uint8 x) internal pure returns (bytes32) { return bytes32(uint256(-1 << x)); } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+    }
+
+    for source in [
+        // A typed left operand keeps its own type.
+        "contract C { function f(uint8 x) internal pure returns (bytes32) { return bytes32(x << 1); } }",
+        "contract C { function f(uint8 x) internal pure returns (bytes32) { return bytes32(x ** 2); } }",
+        // Arithmetic takes the common type.
+        "contract C { function f(uint8 x) internal pure returns (bytes32) { return bytes32(1 + x); } }",
+        // Two literals fold: `1 << 2` is `int_const 4`, which reaches no bytes type.
+        "contract C { function f() internal pure returns (bytes32) { return bytes32(1 << 2); } }",
+        // The mobile type is `uint256`, so it does not narrow back.
+        "contract C { function f(uint8 x) internal pure returns (uint8) { return 1 << x; } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("not allowed")
+                || diagnostic.message.contains("type mismatch")),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+/// A shift assignment takes any integer on the right, unlike the arithmetic
+/// compounds. solc 0.8.33: `int256 x; x <<= uint256(3)` compiles, `x +=
+/// uint256(3)` is 7366, and `x <<= bytes32(0)` is not compatible either.
+#[test]
+fn shift_assignment_takes_any_integer() {
+    for source in [
+        "contract C { function f(int256 x) internal pure { x <<= uint256(3); } }",
+        "contract C { function f(int256 x) internal pure { x >>= uint8(3); } }",
+        "contract C { function f(uint8 x) internal pure { x <<= 3; } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+    }
+
+    for source in [
+        "contract C { function f(int256 x) internal pure { x += uint256(3); } }",
+        "contract C { function f(int256 x) internal pure { x <<= bytes32(0); } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(!diagnostics.is_empty(), "{source}: expected a diagnostic");
+    }
+}
+
+/// `payable(x)` accepts a contract type only when it can receive value: solc
+/// 0.8.33 rejects a plain contract and an interface without `receive`, and
+/// accepts one with `receive() external payable`. OpenZeppelin's
+/// `ICompoundTimelock` is the interface case.
+#[test]
+fn payable_conversion_needs_a_receive_function() {
+    let (db, file) = make_test_db(
+        "interface I { receive() external payable; } contract C { function f(I t) internal pure returns (address payable) { return payable(t); } }",
+    );
+    let diagnostics = collect_diagnostics(&db, file);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    for source in [
+        "interface I { function f() external; } contract C { function g(I t) internal pure returns (address payable) { return payable(t); } }",
+        "contract P { function f() external {} } contract C { function g(P t) internal pure returns (address payable) { return payable(t); } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("not allowed")),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+/// A zero divisor is only rejected when it is a **literal**: solc 0.8.33 makes
+/// `1 / 0` and `1 / (0)` 2271, but `1 / uint256(0)` and `1 / ZERO` (a constant)
+/// compile and revert at runtime — the division is not folded through the
+/// conversion.
+#[test]
+fn division_by_zero_needs_a_literal_divisor() {
+    for source in [
+        "contract C { function f() internal pure returns (uint) { return 1 / 0; } }",
+        "contract C { function f() internal pure returns (uint) { return 1 % 0; } }",
+        "contract C { function f() internal pure returns (uint) { return 1 / (0); } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("by zero")),
+            "{source}: {diagnostics:?}"
+        );
+    }
+
+    for source in [
+        "contract C { function f() internal pure returns (uint) { return 1 / uint256(0); } }",
+        "contract C { function f() internal pure returns (uint) { return 1 % uint256(0); } }",
+        "contract C { uint256 constant ZERO = 0; function f() internal pure returns (uint) { return 1 / ZERO; } }",
+    ] {
+        let (db, file) = make_test_db(source);
+        let diagnostics = collect_diagnostics(&db, file);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+    }
+
+    // Stricter than solc, deliberately: in a *constant initializer* solc folds
+    // through a named constant (1211 for `1 / ZERO`) but not through a
+    // conversion, so `1 / uint256(0)` is accepted there. Ours folds both, which
+    // reports a division that can only revert. Pathological either way; pinned
+    // here so the divergence is visible rather than accidental.
+    let (db, file) = make_test_db("contract C { uint256 constant A = 1 / uint256(0); }");
+    let diagnostics = collect_diagnostics(&db, file);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("by zero")),
+        "{diagnostics:?}"
+    );
+}
+
+/// A fold must not build a value larger than any type could hold: the exponent bound alone left
+/// `(2 ** 4096) ** 4096` (two megabytes) and one more level (gigabytes) reachable, and
+/// `1 << 4_000_000_000` allocated half a gigabyte. Values that still fit the cap fold and are
+/// rejected on width; only the genuinely enormous ones are left uncomputed.
+#[test]
+fn a_fold_does_not_build_an_oversized_integer() {
+    for body in [
+        "uint constant A = (2 ** 4096) ** 4096;",
+        "uint constant B = 1 << 100000;",
+        "uint constant C = ((2 ** 100) ** 100) ** 100;",
+    ] {
+        let src = format!("contract C {{ {body} }}");
+        let (db, file) = make_test_db(&src);
+        let codes: Vec<_> = collect_diagnostics(&db, file).iter().map(|d| d.code).collect();
+        assert!(!codes.is_empty(), "`{body}` should be rejected: {codes:?}");
+    }
+}
+
+/// A UDVT constant folds through `wrap`/`unwrap` in both directions: the value is the argument's,
+/// unchanged, and a constant variable resolves through its own initializer. The fixed-size array
+/// assignments pin the folded *value*, not just that it folded.
+#[test]
+fn udvt_constants_round_trip_through_wrap_and_unwrap() {
+    for (label, decls, body) in [
+        ("unwrap of const", "Price constant P = Price.wrap(5);", "uint[Price.unwrap(P)] memory a; uint[5] memory b = a;"),
+        ("unwrap then arith", "Price constant P = Price.wrap(5); uint constant A = Price.unwrap(P) + 1;", "uint[A] memory a; uint[6] memory b = a;"),
+        ("wrap(unwrap + 1)", "Price constant P = Price.wrap(5); Price constant Q = Price.wrap(Price.unwrap(P) + 1);", "uint[Price.unwrap(Q)] memory a; uint[6] memory b = a;"),
+        ("wrap of a const underlying", "uint128 constant N = 9; Price constant P = Price.wrap(N);", "uint[Price.unwrap(P)] memory a; uint[9] memory b = a;"),
+    ] {
+        let src = format!(
+            "type Price is uint128;\n{decls}\ncontract C {{ function f() public pure {{ {body} }} }}"
+        );
+        let (db, file) = make_test_db(&src);
+        let codes: Vec<_> = collect_diagnostics(&db, file).iter().map(|d| d.code).collect();
+        assert!(codes.is_empty(), "{label}: {codes:?}");
+    }
 }

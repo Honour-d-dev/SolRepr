@@ -342,7 +342,7 @@ fn type_and_value_names_are_kept_in_separate_member_namespaces() {
 }
 
 #[test]
-fn event_and_error_overloads_remain_distinct() {
+fn event_overloads_remain_distinct_and_errors_do_not() {
     let (members, diagnostics) = analyze(
         r#"
         contract A {
@@ -355,8 +355,11 @@ fn event_and_error_overloads_remain_distinct() {
         "A",
     );
     assert!(diagnostics.is_empty());
+    // Events overload on their parameter types; errors do not — solc rejects
+    // the second `Bad` with 2333, so the def map keeps only the first and the
+    // member map never sees two.
     assert_eq!(value_slots(&members, "E").len(), 2);
-    assert_eq!(value_slots(&members, "Bad").len(), 2);
+    assert_eq!(value_slots(&members, "Bad").len(), 1);
 }
 
 #[test]
@@ -474,6 +477,42 @@ fn body_only_edit_preserves_member_map_data() {
     let after = db.member_map(contract);
     let unchanged = before.data.as_ref() == after.data.as_ref();
     assert!(unchanged);
+}
+
+/// Two events of the same name *and* the same parameter types in one contract
+/// are a duplicate (solc 5883), not an inherited clash — the message must not
+/// claim inheritance, and the diagnostic anchors at the second declaration.
+/// Two *different* signatures are overloads and stay silent.
+#[test]
+fn duplicate_event_slot_is_a_duplicate_not_an_inherited_clash() {
+    let (members, diagnostics) = analyze(
+        r#"
+        contract A {
+            event e(uint256 a);
+            event e(uint256 b);
+        }
+        "#,
+        "A",
+    );
+    assert!(has_code(&diagnostics, DiagnosticCode::DuplicateMemberSlot));
+    assert!(!has_code(&diagnostics, DiagnosticCode::InheritedMemberConflict));
+    let [slot] = value_slots(&members, "e") else {
+        panic!("expected one duplicate slot");
+    };
+    assert_eq!(slot.effective(), None);
+    assert_eq!(slot.candidates.len(), 2);
+
+    let (members, diagnostics) = analyze(
+        r#"
+        contract A {
+            event e(uint256 a);
+            event e(address b);
+        }
+        "#,
+        "A",
+    );
+    assert!(diagnostics.is_empty(), "{:?}", diagnostics.len());
+    assert_eq!(value_slots(&members, "e").len(), 2, "distinct signatures overload");
 }
 
 #[test]

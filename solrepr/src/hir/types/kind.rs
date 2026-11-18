@@ -31,6 +31,8 @@ pub enum TyKind {
         key: Type,
         value: Type,
     },
+    /// The type of a file-module namespace reference — `import "…"`.
+    Module(FileId),
     Invalid,
     // --- E -------------------------------------------------
     Literal(LiteralKind),
@@ -42,8 +44,6 @@ pub enum TyKind {
     Type(Type),
     /// The `type(T)` metatype — `.name`/`.min`/`.interfaceId`/`.Code`
     Meta(Type),
-    /// The type of a file-module namespace reference — `import "…"`.
-    Module(FileId),
     Super(ContractId),
     Error(ErrorId),
     Event(EventId),
@@ -76,6 +76,9 @@ impl TyKind {
                 | TyKind::Ref(..)
                 | TyKind::Array { .. }
                 | TyKind::Mapping { .. }
+                // A namespace alias is writable (`ns`), so it is a `Type`; it
+                // simply cannot type a declaration — solc 5172.
+                | TyKind::Module(_)
                 | TyKind::Invalid
         )
     }
@@ -96,6 +99,22 @@ impl TyKind {
                 | TyKind::TypeDef(TypeDefId::Struct(_))
                 | TyKind::Array { .. }
                 | TyKind::Mapping { .. }
+        )
+    }
+
+    /// Whether a `constant` may declare this kind — solc 9259: every value type plus the two byte
+    /// arrays. Reference types are excluded, and so is a module, which is not a value.
+    pub fn is_constant_type(&self) -> bool {
+        matches!(
+            self,
+            TyKind::Primitive(_)
+                | TyKind::FnPtr(_)
+                | TyKind::TypeDef(
+                    TypeDefId::Enum(_)
+                        | TypeDefId::Contract(_)
+                        | TypeDefId::Interface(_)
+                        | TypeDefId::Udvt(_),
+                )
         )
     }
 
@@ -124,18 +143,25 @@ impl TyKind {
 
     /// Implicit-conversion cost: `None` means no conversion; `0` identical, higher = lossier.
     ///
-    /// **Only a nameable/declarable type — or a tuple — can be a conversion target.**
+    /// Each arm decides which targets it accepts — there is no blanket nameable rule. Values that
+    /// are not nameable still convert (`Void`, one function value to another).
     pub fn implicitly_converts_to(&self, target: &TyKind, db: &dyn HirDb) -> Option<u8> {
-        if !target.is_nameable() && !matches!(target, TyKind::Tuple(_)) {
-            return None;
-        }
         match (self, target) {
+            // Two statements share a type: `cond ? f() : g()` over two calls that
+            // return nothing is a legal expression statement.
+            (TyKind::Void, TyKind::Void) => Some(0),
             (TyKind::Invalid, _) | (_, TyKind::Invalid) => None,
+            // A module is a namespace, not a value: nothing converts to or
+            // from it, and it has no common type with anything.
+            (TyKind::Module(_), _) | (_, TyKind::Module(_)) => None,
             (TyKind::Literal(literal), TyKind::Ref(inner, loc)) => literal
                 .implicitly_converts_to(&inner.kind(db))
                 .filter(|_| loc.accepts(literal.default_loc())),
             (TyKind::Literal(literal), target) => literal.implicitly_converts_to(target),
             (TyKind::Primitive(a), TyKind::Primitive(b)) => a.implicitly_converts_to(b),
+            (TyKind::Ref(src, _), TyKind::Ref(target, Location::Storage(RefKind::Reference))) => {
+                Self::storage_conversion(src, target, db)
+            }
             (TyKind::Ref(a, from), TyKind::Ref(b, to)) if to.accepts(*from) => {
                 a.implicitly_converts_to(*b, db)
             }
@@ -145,7 +171,8 @@ impl TyKind {
             (TyKind::Slice(base), target) => (base.loc(db) == Some(Location::Calldata)
                 && base.peel_loc(db).kind(db).is_dynamically_sized())
             .then(|| base.kind(db).implicitly_converts_to(target, db)).flatten(),
-            // bytesN -> bytes
+            // A value with no location fills a located slot of the same kind — a builtin's `bytes`
+            // return reaches `bytes memory`. The inner conversion decides the kind.
             (from, TyKind::Ref(inner, loc))
                 if !matches!(from, TyKind::Ref(..)) && loc.accepts(Location::Stack) =>
             {
@@ -167,6 +194,11 @@ impl TyKind {
             (TyKind::FnPtr(a), TyKind::FnPtr(b)) => Self::fn_ptr_to_fn_ptr_conversion(a, b),
             (TyKind::Function { callee, kind }, TyKind::FnPtr(sig)) => {
                 Self::fn_to_fn_ptr_conversion(*callee, *kind, sig, db)
+            }
+            (TyKind::Function { callee: a, kind: ka}, TyKind::Function { callee: b, kind: kb}) => {
+                let a = Self::fn_pointer(*a, *ka, db)?;
+                let b = Self::fn_pointer(*b, *kb, db)?;
+                Self::fn_ptr_to_fn_ptr_conversion(&a, &b)
             }
 
             (a, b) if a.is_nameable() => match (a.def_id(), b.def_id()) {
@@ -190,6 +222,9 @@ impl TyKind {
     fn explicit_widening(&self, target: &TyKind, db: &dyn HirDb) -> Option<u8> {
         match (self, target) {
             (TyKind::Invalid, _) | (_, TyKind::Invalid) => None,
+            // A module is a namespace, not a value: nothing converts to or
+            // from it, and it has no common type with anything.
+            (TyKind::Module(_), _) | (_, TyKind::Module(_)) => None,
 
             (TyKind::Ref(inner, _), target) => inner.kind(db).explicit_widening(target, db),
             (from, TyKind::Ref(inner, _)) => from.explicit_widening(&inner.kind(db), db),
@@ -204,8 +239,15 @@ impl TyKind {
                 TyKind::TypeDef(TypeDefId::Enum(_)),
             ) => Some(1),
             (TyKind::TypeDef(TypeDefId::Enum(_)), TyKind::Primitive(Primitive::Uint(_))) => Some(1),
-            (TyKind::Primitive(Primitive::Address | Primitive::AddressPayable), target)
+            // A non-payable `address` cannot become a contract with a payable
+            // fallback; an `address payable` can become any contract.
+            (TyKind::Primitive(Primitive::Address), target)
                 if target.is_contract_like() && !target.is_payable(db) =>
+            {
+                Some(1)
+            }
+            (TyKind::Primitive(Primitive::AddressPayable), target)
+                if target.is_contract_like() =>
             {
                 Some(1)
             }
@@ -221,6 +263,23 @@ impl TyKind {
                 Some(1)
             }
             _ => None,
+        }
+    }
+
+    // The element half of a copy into storage, applied recursively: a fixed-size source that fits
+    // is accepted even when lengths differ, and the rule nests.
+    fn storage_conversion(src: &Type, target: &Type, db: &dyn HirDb) -> Option<u8> {
+        let fits = |t_len, s_len|  match (t_len, s_len) {
+            (None, _) => true,
+            (Some(target), Some(src)) => src <= target,
+            _ => false,
+        };
+        match (src.kind(db), target.kind(db)) {
+            (TyKind::Array { elem: src_elem, size: src_size, }, TyKind::Array { elem, size }) => 
+            fits(size, src_size).then(|| Self::storage_conversion(&src_elem, &elem, db)).flatten(),
+            // Not an array: the ordinary conversion already reads the location
+            // it needs from the types it is given.
+            _ => src.implicitly_converts_to(*target, db),
         }
     }
 
@@ -262,12 +321,9 @@ impl TyKind {
             .then_some(0)
     }
 
-    fn fn_to_fn_ptr_conversion(
-        callee: Callee,
-        kind: CallKind,
-        sig: &Fn<Type>,
-        db: &dyn HirDb,
-    ) -> Option<u8> {
+    /// The function-pointer signature a callable's value has, before comparison with a declared
+    /// `function (…)` type. `None` when the callee has no pointer form.
+    fn fn_pointer(callee: Callee, kind: CallKind, db: &dyn HirDb) -> Option<Fn<Type>> {
         let fnty = match callee {
             Callee::Fn(id) => {
                 if matches!(kind, CallKind::Base(_)) && !db.function_data(id).has_body {
@@ -280,7 +336,16 @@ impl TyKind {
             Callee::Builtin(id) => id.pointer_sig(db)?,
             Callee::Constructor(_) | Callee::Allocation(_) => return None,
         };
-        let pointer = fnty.apply_kind(kind, db)?;
+        fnty.apply_kind(kind, db)
+    }
+
+    fn fn_to_fn_ptr_conversion(
+        callee: Callee,
+        kind: CallKind,
+        sig: &Fn<Type>,
+        db: &dyn HirDb,
+    ) -> Option<u8> {
+        let pointer = Self::fn_pointer(callee, kind, db)?;
         Self::fn_ptr_to_fn_ptr_conversion(&pointer, sig)
     }
 
@@ -289,13 +354,19 @@ impl TyKind {
             TyKind::Primitive(p) => p.to_string(),
             TyKind::Literal(literal) => literal.display(),
             TyKind::TypeDef(id) => def_name(db, (*id).into()),
-            TyKind::Function { callee, .. } => match callee {
-                Callee::Fn(id) => db.function_data(*id).name.to_string(),
-                Callee::Getter(id) => db.var_data(*id).name.to_string(),
-                Callee::Constructor(id) => db.contract_data(*id).name.to_string(),
-                Callee::Allocation(ty) => ty.display(db),
-                Callee::Builtin(id) => id.name().to_string(),
-            },
+            // A function value is named by its pointer signature, the way solc names function types: the
+            // defining callee is identity, not part of the type.
+            TyKind::Function { callee, kind } => Self::fn_pointer(*callee, *kind, db)
+                .map(|pointer| pointer.display(db))
+                .unwrap_or_else(|| match callee {
+                    Callee::Constructor(id) => db.contract_data(*id).name.to_string(),
+                    Callee::Allocation(ty) => ty.display(db),
+                    // Every other callee has a pointer form, so this is unreachable
+                    // in practice; fall back to the name rather than panicking.
+                    Callee::Fn(id) => db.function_data(*id).name.to_string(),
+                    Callee::Getter(id) => db.var_data(*id).name.to_string(),
+                    Callee::Builtin(id) => id.name().to_string(),
+                }),
             TyKind::Error(id) => {
                 let data = db.error_data(*id);
                 format!(
@@ -355,6 +426,12 @@ impl TyKind {
         match self {
             TyKind::TypeDef(TypeDefId::Contract(id)) => db
                 .member_map(DefId::Contract(*id))
+                .data
+                .is_payable(db),
+            // An interface can declare `receive() external payable`, and solc
+            // then allows `payable(i)` — `ICompoundTimelock` is one.
+            TyKind::TypeDef(TypeDefId::Interface(id)) => db
+                .member_map(DefId::Interface(*id))
                 .data
                 .is_payable(db),
             _ => false,

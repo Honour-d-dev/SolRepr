@@ -244,7 +244,7 @@ impl BodyBuilder {
                     // The owner's own name at its declaration — an id, not a
                     // range, so the resolver never reads the source map.
                     if let Some(expr_id) = self.lower_expr(child) {
-                        self.syntax_store.own_name_expr = Some(expr_id);
+                        self.syntax_store.name_expr = Some(expr_id);
                     }
                 }
                 NodeKind::PARAMETER => {

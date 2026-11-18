@@ -4,9 +4,9 @@
 
 use crate::ast::{ContractId, FunctionKind};
 use crate::hir::body_map::Local as BodyLocal;
-use crate::hir::types::{Location, VariableKind};
-use crate::hir::builtins;
+use crate::hir::types::{Location, RefKind, VariableKind};
 use crate::hir::exprs::{Expr, ExprId};
+use crate::hir::builtins::BuiltinFn;
 use crate::hir::resolution::{CallableOrigin, Field as ResolvedField, Local, Resolution};
 use crate::hir::diagnostics::{DiagnosticAnchor, SemanticDiagnostic};
 use crate::hir::types::{Mutability, Ty, TyKind, Type};
@@ -19,9 +19,9 @@ use super::Inferer;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum UsageContext {
     Empty,
-    /// The expression is being written to — state reads underneath are
-    /// assignment bookkeeping, not `view` effects.
-    Lvalue,
+    /// The expression is being written to: the payload is the type written wholesale, `None` when
+    /// the write has no value side (`+=`, `delete`, `++`), or a base of the lvalue.
+    Lvalue(Option<Ty>),
     /// Inside `revert`/`require`'s error argument — error invocations are
     /// legal.
     Revert,
@@ -44,7 +44,24 @@ impl<'db, 'store> Inferer<'db, 'store> {
     }
 
     pub(super) fn in_lvalue(&self) -> bool {
-        self.context == UsageContext::Lvalue
+        matches!(self.context, UsageContext::Lvalue(_))
+    }
+
+    /// The context a base of the current lvalue inherits: a base is written *through*, so the
+    /// replacement type describes the lvalue and does not descend.
+    pub(super) fn base_context(&self) -> UsageContext {
+        match self.context {
+            UsageContext::Lvalue(_) => UsageContext::Lvalue(None),
+            other => other,
+        }
+    }
+
+    /// The replacement type of tuple component `index`, or `None`.
+    pub(super) fn tuple_component(&self, value: Option<Ty>, index: usize) -> Option<Ty> {
+        match value.map(|value| value.kind(self.db)) {
+            Some(TyKind::Tuple(tuple)) => tuple.elements.get(index).copied().flatten(),
+            _ => None,
+        }
     }
 
     pub(super) fn in_revert(&self) -> bool {
@@ -99,17 +116,25 @@ impl<'db, 'store> Inferer<'db, 'store> {
         ty
     }
 
-    /// Infers `expr` as a writable place and runs the lvalue verdict.
-    pub(super) fn check_lvalue(&mut self, expr: ExprId) -> Ty {
-        let ty = self.infer_in(expr, UsageContext::Lvalue);
-        if let Err(reason) = self.lvalue_verdict(expr) {
+    /// Infers `expr` as an lvalue, with `rhs` as the type being written.
+    /// `None` when it is a write through (`delete`, `++`, `+=`).
+    pub(super) fn check_lvalue(&mut self, expr: ExprId, rhs: Option<Ty>) -> Ty {
+        let ty = self.infer_in(expr, UsageContext::Lvalue(rhs));
+        // A storage pointer cannot be written through, so `delete p` is rejected.
+        if self.is_storage_pointer(ty) && rhs.is_none() {
+            self.fail(
+                DiagnosticAnchor::Expr(expr),
+                "a storage pointer cannot be written through; it can only be rebound",
+                (),
+            );
+        } else if let Err(reason) = self.lvalue_verdict(expr) {
             self.fail(DiagnosticAnchor::Expr(expr), reason, ());
         }
         ty
     }
 
-    /// Whether `expr` is a writable place — `Err` carries the diagnostic text.
-    /// Legality only: the write's *effect* is charged at resolution time.
+    /// Whether `expr` has the shape of an lvalue — `Err` carries the diagnostic. Legality only;
+    /// the write's effect is charged at resolution time.
     fn lvalue_verdict(&self, expr: ExprId) -> Result<(), &'static str> {
         match &self.input.store.exprs[expr] {
             // A name is writable exactly when it denotes a variable.
@@ -127,9 +152,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
             // such as `address.balance`, `array.length`) is not.
             Expr::Member { .. } => match self.tables.expr_resolution(expr) {
                 Some(Resolution::Field(ResolvedField::Struct(..))) => Ok(()),
-                _ => Err("expression is not a struct field and cannot be assigned to"),
+                _ => Err("expression cannot be assigned to"),
             },
-            // An element is writable exactly when its base is.
+            // An element is writable exactly when its base is; the base is a step towards the lvalue, so
+            // the pointer rule does not apply to it.
             Expr::ArrayAccess { base, .. } => self.lvalue_verdict(*base),
             // A destructuring target is writable when every present component
             // is; an omitted component is an ignored slot.
@@ -137,12 +163,16 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 .iter()
                 .flatten()
                 .try_for_each(|elem| self.lvalue_verdict(*elem)),
-            // An inline array materializes a fresh memory array — a writable
-            // place (`[1,2,3][0] = 5` compiles, however useless). A slice is
-            // never a place, so it stays with the default.
+            // An inline array materializes a fresh memory array and is an lvalue; a slice never is.
             Expr::InlineArray(_) => Ok(()),
             _ => Err("expression cannot be assigned to"),
         }
+    }
+
+    /// Whether `ty` is a storage *pointer* — a rebindable handle, as opposed to a bound storage
+    /// reference (a state variable, or `p.field`/`p[i]`).
+    fn is_storage_pointer(&self, ty: Ty) -> bool {
+        ty.loc(self.db) == Some(Location::Storage(RefKind::Pointer))
     }
 
     /// Infers a returned value: a value first, then a value of the right type.
@@ -158,6 +188,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
         let returns = match self.owner_returns() {
             None => return,
             Some(r) if r.is_empty() => {
+                // solc accepts `return f();` in a function returning nothing when `f()` returns nothing:
+                // the statement is a call, not a value.
+                if matches!(self.tables.expr_ty(expr).kind(self.db), TyKind::Void) {
+                    return;
+                }
                 let message = match self.owner {
                     DefId::Modifier(_) => "return arguments not allowed",
                     _ => {
@@ -221,10 +256,21 @@ impl<'db, 'store> Inferer<'db, 'store> {
         })
     }
 
-    /// Infers the callee of a `revert` and checks it denotes an error.
+    /// Infers the callee of a `revert` and checks it denotes an error — or the `revert`
+    /// builtin, for the reason-string form.
     pub(super) fn check_revert(&mut self, expr: ExprId) -> Ty {
+        // Bare `revert;` has no callee at all: lowering wraps the keyword rather than a call,
+        // which is the only place the missing arguments are still visible.
+        if !matches!(self.input.store.exprs[expr], Expr::Call { .. }) {
+            return self.fail(
+                DiagnosticAnchor::Expr(expr),
+                "`revert` requires an error or a reason string",
+                Ty::invalid(self.db),
+            );
+        }
         self.check_invocation(expr, UsageContext::Revert, "an error", |origin| {
             origin.is_error()
+                || matches!(origin, CallableOrigin::Builtin(BuiltinFn::Revert))
         })
     }
 
@@ -238,6 +284,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
         want: fn(&CallableOrigin) -> bool,
     ) -> Ty {
         let ty = self.infer_in(expr, context);
+        // A callee that already failed has reported here; a second "not callable" says it twice.
+        if ty.is_invalid(self.db) {
+            return ty;
+        }
         match self.tables.expr_resolution(expr) {
             Some(Resolution::Callable(callable)) if want(callable.origin()) => {}
             Some(Resolution::Callable(_)) => {
@@ -287,8 +337,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
     // ── State effects & payability ───────────────────────────────────────
 
     /// Records that the site `expr` needs at least `effect`, and reports it
-    /// when the owner declared less. This is the one place a body's effect is
-    /// widened and the one place it is compared against the declaration.
+    /// when the owner declared less. This is the one site a body's effect is
+    /// widened and the one site it is compared against the declaration.
     pub(super) fn require_effect(
         &mut self,
         expr: ExprId,
@@ -313,23 +363,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
     }
 
-    /// `msg.value` reads the call's attached value, which only a `payable`
-    /// function may observe. Libraries are exempt — via delegatecall they see
-    /// the *calling* function's value.
-    pub(super) fn check_msg_value(&mut self, expr: ExprId, obj_ty: Ty, prop: &str) {
-        if prop == "value"
-            && matches!(obj_ty.kind(self.db), TyKind::Builtin(builtins::BuiltinTy::Msg))
-            && !matches!(self.resolver.container(), DefId::Library(_))
-            && self.declared_mutability.is_some_and(|mutability| mutability != Mutability::Payable)
-        {
-            self.fail(
-                DiagnosticAnchor::Expr(expr),
-                "`msg.value` is only allowed in payable functions",
-                (),
-            );
-        }
-    }
-
     /// A resolved local may only index its own body's arena; a foreign `owner`
     /// is skipped rather than bounds-truncated.
     fn body_local(&self, local: Local) -> Option<&BodyLocal> {
@@ -339,42 +372,37 @@ impl<'db, 'store> Inferer<'db, 'store> {
         None
     }
 
-    /// A local's location lives in the body arena, not in its resolution or its
-    /// type, so the lookup goes through the owner being inferred — the only
-    /// body a resolved local can come from.
-    fn is_storage_local(&self, local: Local) -> bool {
-        self.body_local(local).is_some_and(|local| {
-            local.location(&self.input.store.types).is_some_and(Location::is_storage)
-        })
-    }
-
     /// A local's declared kind, looked up through [`Self::body_local`].
     fn local_kind(&self, local: Local) -> Option<VariableKind> {
         self.body_local(local).map(|local| local.kind())
     }
 
-    /// Whether writing through `resolution` mutates storage: a state variable or
-    /// a `storage` local. No parameter exemption — a write always counts.
-    fn writes_state(&self, resolution: &Resolution) -> bool {
+    /// Whether writing through `resolution` mutates storage.
+    fn writes_state(&self, resolution: &Resolution, ty: Ty) -> bool {
         match resolution {
             Resolution::Var(DefId::Var(id)) => {
                 self.db.var_data(*id).kind == VariableKind::StateVariable
             }
-            Resolution::Local(local) => self.is_storage_local(*local),
+            Resolution::Local(_) => {
+                self.is_storage_pointer(ty)
+                    && !matches!(self.context, UsageContext::Lvalue(Some(value))
+                        if value.loc(self.db).is_some_and(Location::is_storage)
+                    )
+            }
             _ => false,
         }
     }
 
     /// Whether reading through `resolution` reads state or the environment: a
-    /// state variable, a `storage` pointer, `this`, or `msg`/`block`/`tx`.
-    fn reads_state(&self, resolution: &Resolution) -> bool {
+    /// state variable, a `storage` local, `this`, or `msg`/`block`/`tx`.
+    fn reads_state(&self, resolution: &Resolution, ty: Ty) -> bool {
         match resolution {
             Resolution::Var(DefId::Var(id)) => {
                 self.db.var_data(*id).kind == VariableKind::StateVariable
             }
-            // A storage-pointer *parameter* does not count as a state read.
+            // A storage-pointer *parameter* is the caller's storage, so it is not a state read.
             Resolution::Local(local) => {
-                self.is_storage_local(*local)
+                matches!(ty.loc(self.db), Some(Location::Storage(_)))
                     && !matches!(self.local_kind(*local), Some(VariableKind::Parameter))
             }
             // `a.balance`/`a.code`/`a.codehash` read the *account* — an
@@ -385,20 +413,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
     }
 
-    /// Charges the state/environment effect a resolved name demands: a *write*
-    /// under an lvalue root (`s` in `s.x = 1`), a *read* otherwise. Index and
-    /// bound positions restore rvalue context first, so the resolution alone
-    /// decides the side.
-    pub(super) fn check_resolution_mutability(
-        &mut self,
-        expr: ExprId,
-        resolution: &Resolution,
-    ) {
+    /// Charges the state/environment effect a resolved name demands
+    pub(super) fn check_resolution_mutability(&mut self, expr: ExprId, resolution: &Resolution, ty: Ty) {
         match self.in_lvalue() {
-            true if self.writes_state(resolution) => {
+            true if self.writes_state(resolution, ty) => {
                 self.require_effect(expr, Mutability::NonPayable, None);
             }
-            false if self.reads_state(resolution) => {
+            false if self.reads_state(resolution, ty) => {
                 self.require_effect(expr, Mutability::View, None);
             }
             _ => {}

@@ -90,11 +90,6 @@ impl<'db> Resolver<'db> {
         &self.this
     }
 
-    /// The scope owner `this`'s contents resolve against — `this` itself for containers 
-    pub fn container(&self) -> &DefId {
-        &self.container
-    }
-
     pub fn db(&self) -> &dyn HirDb {
         self.db
     }
@@ -326,10 +321,11 @@ impl<'db> Resolver<'db> {
             return None;
         };
         for name in path.iter().skip(1) {
-            let Resolution::Type(ty) = resolution else {
-                return None;
+            resolution = match resolution {
+                Resolution::Type(ty) => self.lookup_type(&ty.def_id(self.db)?, name)?,
+                Resolution::Module(file) => self.lookup_type(&DefId::File(file), name)?,
+                _ => return None,
             };
-            resolution = self.lookup_type(&ty.def_id(self.db)?, name)?;
         }
         Some(resolution)
     }

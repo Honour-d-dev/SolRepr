@@ -49,9 +49,11 @@ fn primitive_implicit_conversions_match_solidity_directions() {
         Primitive::Int(8).implicitly_converts_to(&Primitive::Int(16)),
         Some(1)
     );
+    // A sign change costs more than a widening: solc prefers `uint256` over
+    // `int256` for an unsigned argument.
     assert_eq!(
         Primitive::Uint(8).implicitly_converts_to(&Primitive::Int(16)),
-        Some(1)
+        Some(2)
     );
     assert_eq!(
         Primitive::Int(8).implicitly_converts_to(&Primitive::Uint(16)),
@@ -77,10 +79,11 @@ fn primitive_implicit_conversions_match_solidity_directions() {
         Primitive::FixedBytes(20).implicitly_converts_to(&Primitive::Address),
         None
     );
-    // solc: fixed-size byte arrays implicitly convert to `bytes`.
+    // No fixed-size byte array converts to `bytes`, implicitly or explicitly
+    // (`bytes4` is not a `bytes` prefix; solc 0.8.33 rejects both).
     assert_eq!(
         Primitive::FixedBytes(4).implicitly_converts_to(&Primitive::Bytes),
-        Some(1)
+        None
     );
     assert_eq!(
         Primitive::String.implicitly_converts_to(&Primitive::Bytes),
@@ -135,7 +138,6 @@ fn non_assignable_types_are_never_conversion_targets() {
             &db,
             TyKind::Builtin(BuiltinTy::Msg),
         ),
-        Ty::new(&db, TyKind::Void),
         Ty::new(&db, TyKind::Literal(LiteralKind::Rational)),
     ];
 
@@ -160,7 +162,13 @@ fn non_assignable_types_are_never_conversion_targets() {
         );
     }
 
-    // A tuple is the one non-nameable conversion target: element-wise, with
+    // `Void` converts only to itself: `cond ? f() : g()` over two calls that
+    // return nothing shares their (empty) type.
+    let void = Ty::new(&db, TyKind::Void);
+    assert_eq!(byte.implicitly_converts_to(void, &db), None);
+    assert_eq!(void.implicitly_converts_to(void, &db), Some(0));
+
+    // A tuple is the other non-nameable conversion target: element-wise, with
     // matching arity, which is what makes destructuring assignment work.
     let bytes = byte.narrow(&db).unwrap();
     let pair = Ty::tuple(&db, Box::new([name, name])).unwrap();
@@ -346,11 +354,12 @@ fn primitive_explicit_conversions_match_solidity_directions() {
             .explicitly_converts_to(&Primitive::FixedBytes(32))
             .is_none()
     );
-    // `bytesN` reaches `bytes` implicitly — so explicitly too.
+    // Nothing converts *to* `bytes` from a fixed-size array — not even
+    // explicitly (`bytes(bytes32(0))` is rejected by solc).
     assert!(
         Primitive::FixedBytes(32)
             .explicitly_converts_to(&Primitive::Bytes)
-            .is_some()
+            .is_none()
     );
     // A bool is only itself.
     assert!(

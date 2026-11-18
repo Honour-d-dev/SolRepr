@@ -16,8 +16,7 @@ use crate::salsa::root_db::def_range;
 pub struct SyntaxStore {
     pub types: Arena<TyName>,
     pub exprs: Arena<Expr>,
-    /// The owner's own name occurrence at its declaration — an id, not a range.
-    pub own_name_expr: Option<ExprId>,
+    pub name_expr: Option<ExprId>,
 }
 
 impl Default for SyntaxStore {
@@ -25,7 +24,7 @@ impl Default for SyntaxStore {
         Self {
             types: Arena::new(),
             exprs: Arena::new(),
-            own_name_expr: None,
+            name_expr: None,
         }
     }
 }

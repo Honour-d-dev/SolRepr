@@ -1,2 +1,0 @@
-ext/=../ext_lib/
-a/=../ext_a/

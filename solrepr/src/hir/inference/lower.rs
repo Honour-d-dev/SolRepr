@@ -7,6 +7,14 @@ use crate::ir::def_map::DefId;
 
 use super::Inferer;
 
+/// Where a type name appears: a declaration's type, or the namespace prefix of a qualified path
+/// (`ns` in `ns.D`). Only the former may not denote a namespace.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TyRole {
+    Type,
+    Qualifier,
+}
+
 impl<'db, 'store> Inferer<'db, 'store> {
     pub(super) fn infer_local(&mut self, local: LocalId) -> Type {
         let Some(local_arena) = self.input.locals else {
@@ -48,10 +56,21 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     /// Memoized `TyNameId` lowering; `tables.types` is the memo.
     pub(super) fn lower_type(&mut self, ty_ref_id: TyNameId, located: bool) -> Type {
+        self.lower_type_in(ty_ref_id, located, TyRole::Type)
+    }
+
+    /// A path prefix (`ns` in `ns.D`) — a namespace is a legal prefix, never a declaration's type.
+    fn lower_qualifier(&mut self, ty_ref_id: TyNameId) -> Type {
+        self.lower_type_in(ty_ref_id, false, TyRole::Qualifier)
+    }
+
+    /// The memo is keyed by ref alone: a ref's role is fixed by its parent, so one ref is never
+    /// lowered as both.
+    fn lower_type_in(&mut self, ty_ref_id: TyNameId, located: bool, role: TyRole) -> Type {
         if let Some(cached) = self.tables.try_ty(ty_ref_id) {
             return cached;
         }
-        let ty = self.lower_ty_ref_uncached(ty_ref_id, located);
+        let ty = self.lower_ty_ref_uncached(ty_ref_id, located, role);
         
         let written = matches!(self.input.store.types[ty_ref_id], TyName::Located { .. });
         if located && !written && ty.default_loc(self.db).is_some() {
@@ -64,14 +83,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
         ty
     }
 
-    fn lower_ty_ref_uncached(&mut self, ty_ref_id: TyNameId, located: bool) -> Type {
+    fn lower_ty_ref_uncached(&mut self, ty_ref_id: TyNameId, located: bool, role: TyRole) -> Type {
         match &self.input.store.types[ty_ref_id] {
             TyName::Primitive(primitive) => Type::primitive(self.db, *primitive),
             TyName::UserDefined { base, name } => {
                 let base_ty = match base {
                     None => None,
                     Some(base) => {
-                        let ty = self.lower_type(*base, false);
+                        let ty = self.lower_qualifier(*base);
                         if ty.is_invalid(self.db) {
                             return Type::invalid(self.db);
                         }
@@ -95,6 +114,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 };
                 match resolution {
                     Resolution::Type(ty) => ty,
+                    Resolution::Module(_) if role == TyRole::Type => self.fail(
+                        DiagnosticAnchor::TyRef(ty_ref_id),
+                        "name has to refer to a user-defined type",
+                        Type::invalid(self.db),
+                    ),
+                    Resolution::Module(file) => {
+                        Type::new(self.db, TyKind::Module(file)).expect("a module is nameable")
+                    }
                     _ => self.fail(
                         DiagnosticAnchor::TyRef(ty_ref_id),
                         format!("`{name}` does not resolve to a type"),

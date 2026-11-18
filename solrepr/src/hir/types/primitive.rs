@@ -59,9 +59,8 @@ impl Primitive {
             (FixedBytes(m), Uint(n)) if *n == *m as u16 * 8 => Some(1),
             (FixedBytes(20), Address) => Some(1),
             (FixedBytes(_), FixedBytes(_)) => Some(1),
-            // A `bytes`/`string` pair converts in both directions, and `bytes`
-            // reaches any `bytesN` (solc checks the source kind, not the
-            // length).
+            // `bytes(string)`, `string(bytes)`, and `bytesN(bytes)` — never the
+            // reverse: nothing converts *to* `bytes` from a fixed-size array.
             (Bytes, String | FixedBytes(_)) | (String, Bytes) => Some(1),
             _ => None,
         }
@@ -74,10 +73,10 @@ impl Primitive {
             (a, b) if a == b => Some(0),
             (Primitive::Uint(n), Primitive::Uint(m)) if *m > *n => Some(1),
             (Primitive::Int(n), Primitive::Int(m)) if *m > *n => Some(1),
-            (Primitive::Uint(n), Primitive::Int(m)) if *m > *n => Some(1),
+            // A sign change costs more than a widening: solc prefers `uint256` over `int256`, and reports
+            // ambiguity only when the distances are equal.
+            (Primitive::Uint(n), Primitive::Int(m)) if *m > *n => Some(2),
             (Primitive::FixedBytes(n), Primitive::FixedBytes(m)) if *m > *n => Some(1),
-            // solc: fixed-size byte arrays implicitly convert to `bytes`.
-            (Primitive::FixedBytes(_), Primitive::Bytes) => Some(1),
             (Primitive::AddressPayable, Primitive::Address) => Some(1),
             _ => None,
         }

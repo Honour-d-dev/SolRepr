@@ -1,5 +1,5 @@
 use la_arena::Idx;
-use num_bigint::{BigInt, Sign};
+use num_bigint::BigInt;
 use smol_str::SmolStr;
 use tree_sitter::{Node, TreeCursor};
 
@@ -499,14 +499,15 @@ pub trait ExprBuilder {
                 Some(self.alloc_wrapper_expr(Expr::Emit(call), node))
             }
             NodeKind::REVERT_STATEMENT => {
-                let callee_node = named_expr_child(node, 0);
-                let callee = callee_node.and_then(|callee| self.lower_expr(callee));
+                // `revert E(...)` names an error, `revert(...)` the builtin, and bare `revert;` neither — kept
+                // parseable so this layer can reject it.
+                let error_node = named_expr_child(node, 0)
+                    .filter(|child| child.kind_id() != NodeKind::REVERT_ARGUMENTS);
 
                 let args_node = node
                     .named_children(&mut node.walk())
                     .find(|n| n.kind_id() == NodeKind::REVERT_ARGUMENTS);
 
-                let ident = callee_node.and_then(|callee| self.call_identifier(callee));
                 let args = args_node
                     .map(|args_node| {
                         args_node
@@ -521,6 +522,22 @@ pub trait ExprBuilder {
                             .collect::<Box<_>>()
                     })
                     .unwrap_or_default();
+
+                let (callee, ident) = match error_node {
+                    Some(error) => (self.lower_expr(error), self.call_identifier(error)),
+                    // `revert` is an anonymous token, so the name the resolver looks up is synthesised.
+                    None => {
+                        node.child(0)
+                        .filter(|r| self.text(r) == "revert")
+                        .map(|r| (self.alloc_expr(Expr::Ident("revert".into()), r), NodeRange::from(&r)))
+                        .unzip()
+                    }
+                };
+
+                // Bare `revert;` wraps the keyword alone, which `check_revert` reads as missing arguments.
+                if error_node.is_none() && args_node.is_none() {
+                    return Some(self.alloc_wrapper_expr(Expr::Revert(callee?), node));
+                }
 
                 let call = self.alloc_call_expr(
                     Expr::Call {
@@ -863,21 +880,8 @@ impl Literal {
                     .flatten()
             });
         match Self::parse_rational_value(text) {
-            Some((num, den)) if num.clone() % &den == BigInt::from(0u8) => {
-                Self::int_literal(num / den, exact_bytes)
-            }
-            _ => LiteralKind::Rational,
-        }
-    }
-
-    fn int_literal(value: BigInt, exact_bytes: Option<u8>) -> LiteralKind {
-        let neg = value.sign() == Sign::Minus;
-        let magnitude = value.magnitude().clone();
-        let bits = if neg { magnitude - 1u8 } else { magnitude }.bits();
-        LiteralKind::Int {
-            neg,
-            min_bits: u16::try_from(bits).unwrap_or(u16::MAX),
-            exact_bytes,
+            Some((num, den)) => LiteralKind::from_rational(num, den, exact_bytes),
+            None => LiteralKind::Rational,
         }
     }
 
@@ -893,11 +897,7 @@ impl Literal {
             UnaryOp::BitNot if integral => -(num + 1u8),
             _ => return None,
         };
-        Some(if integral {
-            Self::int_literal(value, None)
-        } else {
-            LiteralKind::Rational
-        })
+        Some(LiteralKind::from_rational(value, BigInt::from(1u8), None))
     }
 
     /// The literal's produced bytes — escape-decoded for strings, hex pairs

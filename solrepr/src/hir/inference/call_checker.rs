@@ -85,6 +85,25 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
     }
 
+    /// The conversion cost of `actual` filling `expected`, or `None`. `bytes.concat` is the one
+    /// exception: it takes a fixed `bytesN` where `bytes(bytes32(0))` is rejected.
+    fn argument_cost(&self, callable: &Callable, actual: Ty, expected: Ty) -> Option<u8> {
+        actual
+            .implicitly_converts_to(expected, self.db)
+            .or_else(|| {
+                (matches!(callable.origin(), CallableOrigin::Builtin(BuiltinFn::BytesConcat))
+                    && matches!(
+                        expected.peel_loc(self.db).kind(self.db),
+                        TyKind::Primitive(Primitive::Bytes)
+                    )
+                    && matches!(
+                        actual.peel_loc(self.db).kind(self.db),
+                        TyKind::Primitive(Primitive::FixedBytes(_))
+                    ))
+                .then_some(1)
+            })
+    }
+
     /// Every argument that fails to convert, in order.
     fn arguments_mismatch(
         &self,
@@ -101,7 +120,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             let Some(expected) = Self::param_for(callable, unbound, index) else {
                 continue;
             };
-            if actual.implicitly_converts_to(expected, self.db).is_none() {
+            if self.argument_cost(callable, *actual, expected).is_none() {
                 mismatches.push(ArgumentMismatch {
                     arg: *arg,
                     expected,
@@ -126,7 +145,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 let Some(parameter) = Self::param_for(candidate, unbound, index) else {
                     continue;
                 };
-                match arg.implicitly_converts_to(parameter, self.db) {
+                match self.argument_cost(candidate, *arg, parameter) {
                     Some(cost) => total_cost += cost as u32,
                     None => continue 'candidates,
                 }
@@ -430,7 +449,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
         arg_types: &[Ty],
     ) -> Ty {
         let callee_ty = self.tables.expr_ty(callee);
-        match self.tables.expr_resolution(callee).cloned() {
+        // A call's resolution names the callable, but as a callee its value is the result:
+        // `cast(_impl)(payload)` calls the returned pointer; `CallOptions` denotes the callee.
+        let resolution = match &self.input.store.exprs[callee] {
+            Expr::Call { .. } => None,
+            _ => self.tables.expr_resolution(callee).cloned(),
+        };
+        match resolution {
             Some(Resolution::Callable(callable)) => {
                 self.resolve_callable(expr, callable, args, arg_types)
             }
@@ -891,6 +916,28 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 return_invalid!(condition, self.db);
                 self.finish_require_call(args, message_ty)
             }
+            BuiltinFn::Revert => {
+                if let Some(invalid) = self.check_intrinsic_arity(call, args.len(), &[0, 1], 1) {
+                    return invalid;
+                }
+                if let [reason] = args {
+                    let actual = self.infer_in(*reason, UsageContext::Revert);
+                    let actual = return_invalid!(actual, self.db);
+                    let expected = Ty::primitive(self.db, Primitive::String);
+                    if actual.implicitly_converts_to(expected, self.db).is_none() {
+                        return self.report(
+                            SemanticDiagnostic::TypeMismatch {
+                                expr: *reason,
+                                expected,
+                                actual,
+                            },
+                            Ty::invalid(self.db),
+                        );
+                    }
+                }
+                // `revert` returns nothing — valueless, like `require` and `emit`.
+                Ty::new(self.db, TyKind::Void)
+            }
             BuiltinFn::Decode => {
                 if let Some(invalid) = self.check_intrinsic_arity(call, args.len(), &[2], 2) {
                     return invalid;
@@ -992,7 +1039,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
     }
 
     /// Turns a selection into the call's result and the diagnostic it implies —
-    /// the one place call failures are spelled.
+    /// the one site call failures are spelled.
     fn apply_call_outcome(&mut self, call: ExprId, outcome: CallOutcome<'_>) -> Ty {
         match outcome {
             CallOutcome::Selected(callable) => self.finish_call(call, callable),
@@ -1171,10 +1218,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     );
                 }
                 let sig = self.callable_sig(&target, call)?;
-                // "Expected regular external function type, or external view on
-                // public function": `this.f`/`c.f` are external views, `C.f` is
-                // the external function type only for an `external` declaration.
-                if !target.is_external() && sig.visibility != Visibility::External {
+                // "Expected regular external function type, or external view on public function": another
+                // contract's type name yields an external type; the own-contract, base and `super` forms do not.
+                let external = target.is_external()
+                    || sig.visibility == Visibility::External
+                    || matches!(target.kind(), CallKind::ViaType(ViaTypeKind::NonLibrary));
+                if !external {
                     return self.fail(
                         DiagnosticAnchor::Expr(call),
                         "Expected regular external function type, or external view on public function.",
