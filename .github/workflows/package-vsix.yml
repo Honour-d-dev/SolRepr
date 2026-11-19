@@ -45,11 +45,11 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Check out the release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.tag.outputs.tag }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -123,8 +123,10 @@ jobs:
           mkdir -p "$out"
 
           # Only a version with a prerelease suffix is packaged as a preview.
-          pre=()
-          if [[ "$version" == *-* ]]; then pre=(--pre-release); fi
+          # A scalar, not an array: macOS runners still ship bash 3.2, where
+          # `"${pre[@]}"` on an empty array is an unbound variable under `set -u`.
+          pre=""
+          if [[ "$version" == *-* ]]; then pre="--pre-release"; fi
 
           while IFS='|' read -r target triple binary_name; do
             archive="$GITHUB_WORKSPACE/dist/solrepr-${triple}.tar.xz"
@@ -143,7 +145,7 @@ jobs:
             cp -R out "$stage/out"
             cp "$binary" "$stage/bin/$target/$binary_name"
 
-            (cd "$stage" && npx vsce package --target "$target" "${pre[@]}" --no-dependencies --out "$out/solrepr-${version}-${target}.vsix")
+            (cd "$stage" && "$GITHUB_WORKSPACE/extensions/vscode/node_modules/.bin/vsce" package --target "$target" ${pre:+"$pre"} --no-dependencies --out "$out/solrepr-${version}-${target}.vsix")
             rm -rf "$work" "$(dirname "$stage")"
           done <<'TARGETS'
           linux-x64|x86_64-unknown-linux-gnu|solrepr
@@ -158,13 +160,13 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           out="$GITHUB_WORKSPACE/vsix"
-          pre=()
-          if [[ "$version" == *-* ]]; then pre=(--pre-release); fi
+          pre=""
+          if [[ "$version" == *-* ]]; then pre="--pre-release"; fi
           stage="$(mktemp -d)/extension"
           mkdir -p "$stage"
           cp package.json .vscodeignore LICENSE README.md icon.png "$stage/"
           cp -R out "$stage/out"
-          (cd "$stage" && npx vsce package "${pre[@]}" --no-dependencies --out "$out/solrepr-${version}-universal.vsix")
+          (cd "$stage" && "$GITHUB_WORKSPACE/extensions/vscode/node_modules/.bin/vsce" package ${pre:+"$pre"} --no-dependencies --out "$out/solrepr-${version}-universal.vsix")
           rm -rf "$(dirname "$stage")"
 
       - name: Upload VSIX files to the release
