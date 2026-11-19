@@ -11,6 +11,9 @@ on:
       tag:
         description: Release tag to package
         required: true
+      ref:
+        description: Ref to build from (defaults to the tag)
+        required: false
 
 permissions:
   contents: write
@@ -44,10 +47,10 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Check out the release tag
+      - name: Check out the packaging ref
         uses: actions/checkout@v7
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          ref: ${{ inputs.ref || steps.tag.outputs.tag }}
 
       - uses: actions/setup-node@v7
         with:
@@ -188,6 +191,10 @@ jobs:
           # this step idempotent instead of appending a second copy on a re-run. A release that
           # was not produced by the Release workflow has no manifest asset, so leave its body be.
           if gh release download "$tag" --pattern dist-manifest.json --dir "$work" --clobber; then
+            if [ ! -f scripts/release-notes.mjs ]; then
+              echo "no scripts/release-notes.mjs in this checkout; leaving the release body unchanged"
+              exit 0
+            fi
             node scripts/release-notes.mjs "$version" "$tag" "$work/dist-manifest.json" > "$work/notes.md"
             gh release edit "$tag" --notes-file "$work/notes.md"
           else
