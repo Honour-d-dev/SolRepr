@@ -185,7 +185,11 @@ jobs:
           version="$(node -p "require('./extensions/vscode/package.json').version")"
           work="$(mktemp -d)"
           # dist's own body is the canonical server section; rebuilding from the manifest keeps
-          # this step idempotent instead of appending a second copy on a re-run.
-          gh release download "$tag" --pattern dist-manifest.json --dir "$work" --clobber
-          node scripts/release-notes.mjs "$version" "$tag" "$work/dist-manifest.json" > "$work/notes.md"
-          gh release edit "$tag" --notes-file "$work/notes.md"
+          # this step idempotent instead of appending a second copy on a re-run. A release that
+          # was not produced by the Release workflow has no manifest asset, so leave its body be.
+          if gh release download "$tag" --pattern dist-manifest.json --dir "$work" --clobber; then
+            node scripts/release-notes.mjs "$version" "$tag" "$work/dist-manifest.json" > "$work/notes.md"
+            gh release edit "$tag" --notes-file "$work/notes.md"
+          else
+            echo "no dist-manifest.json asset on $tag; leaving the release body unchanged"
+          fi

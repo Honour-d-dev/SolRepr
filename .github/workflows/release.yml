@@ -278,6 +278,11 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+      - name: Upload the dist manifest
+        # `gh release create` does not always carry the manifest into the asset list; the
+        # VSIX packaging step reads it to rebuild the release body.
+        run: gh release upload "${{ needs.plan.outputs.tag }}" dist-manifest.json --clobber
+
   announce:
     needs:
       - plan
