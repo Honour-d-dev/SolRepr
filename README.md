@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<h1 align="center" style="margin-bottom: 0;">SolRepr</h1>
+<h1 align="center" style="margin-bottom: 0;">SolRepr.</h1>
 <p align="center" style="margin-top: 4px;">
   A language server for Solidity, built in Rust.
 </p>
@@ -20,19 +20,27 @@
 </p>
 
 <p align="center">
-  Solidity's semantic repr. analysis and inference engine, leveraging tree-sitter and salsa
+  Parsing, name resolution, semantic analysis and type inference.
 </p>
 
 ---
 
-#### Description
+## Why it's different
 
-- **Semantic, not syntactic.** Name resolution, overload selection, access and
-  override checks, builtin member lookup, and `using ... for` resolution.
-- **Incremental analysis.** Leverages salsa's incremental computation.
-- **Workspace-aware.** Supports Foundry, Hardhat, hybrid Foundry + Hardhat workspaces and even bare `.sol` folders.
-- **NatSpec that follows inheritance.** `@inheritdoc` expands against the matching base member, including overload selection and multi-level chains, so hover shows the documentation the author intended.
+SolRepr analyzes Solidity in-process: tree-sitter for syntax, its own HIR, name resolution, semantic analysis and
+type inference, memoized by Salsa. Compared with a language server that wraps the compiler, there is
+no extra process that runs — no `solc` process per keystroke, no project rebuild per change. That is what keeps
+hover, completion and diagnostics responsive and light, on files that have never been compiled and
+in projects `solc` was never configured for.
 
+`solc` is planned as a completeness layer for what the analyser deliberately leaves to the compiler
+— invoked on demand, never per edit.
+
+## Demos
+
+See [VS Code extension README](extensions/vscode/README.md#features).
+hover (including `@inheritdoc` and rendered NatSpec), go to definition,
+completion (members, builtins and named arguments), and diagnostics.
 
 ## Capabilities
 
@@ -43,20 +51,27 @@
 | Completion: members, inherited, builtins, `using for`, call options | Supported |
 | Diagnostics: push, real-time | Supported |
 | Foundry / Hardhat / npm workspace discovery | Supported |
-| Hybrid Foundry + Hardhat projects | Supported, hardening in progress |
-| Signature help, find references, rename, document/workspace symbols, semantic tokens | Planned |
+| Hybrid Foundry + Hardhat projects | Supported |
+| `solc` completeness layer | Planned |
+| Signature help, find references, rename, document/workspace symbols, semantic tokens, syntax highlighting | Planned |
 
+## Status
+
+Early development, pre-1.0: the HIR and the internal APIs still move. Diagnostics come from our own
+analysis and aim at semantic correctness; compilation remains `solc`'s job.
 
 ## Installation
 
 ### VS Code
-
 
 - **From a release:** download `solrepr-<version>-<platform>.vsix` and run
 
   ```bash
   code --install-extension solrepr-<version>-<platform>.vsix
   ```
+  ##### OR
+
+  Extensions -> ...(views and more actions) -> install from vsix -> the downloaded vsix
 
   Platform packages are published for Linux x64, macOS Apple Silicon, and Windows x64. The
   universal package covers every other platform.
@@ -83,8 +98,11 @@ npm run package:platform
 - To install:
 
   ```bash
-  code --install-extension "<printed path>" --force
+  code --install-extension "<printed path>"
   ```
+  ##### OR
+
+  Extensions -> ...(views and more actions) -> install from vsix -> the built vsix
 
 For the universal package (no bundled binary), run `npm run package`; it writes `solrepr.vsix`.
 Install the same way, then point `solrepr.serverPath` at the binary or put it on `PATH`.
@@ -104,12 +122,6 @@ VS Code settings under **Settings → Extensions → SolRepr**:
 | `solrepr.serverPath` | `""` | Absolute path to a `solrepr` binary. Overrides the bundled copy, `PATH`, and the development fallback. |
 | `solrepr.trace.server` | `"verbose"` | How much LSP traffic the client writes to the **SolRepr Trace** output channel: `off`, `messages`, or `verbose`. |
 
-
-
-## Status
-
-Early development.
-
 ## Development
 
 ```bash
@@ -120,7 +132,8 @@ npm run compile
 ```
 
 Open the repo root in VS Code and press `F5` (the `.vscode/` launch config points at
-`extensions/vscode`), or open `extensions/vscode` directly and press `F5`. 
+`extensions/vscode`), or open `extensions/vscode` directly and press `F5`. A development host runs
+the workspace build from `target/debug`, ahead of anything on `PATH`.
 
 Checks:
 

@@ -2,7 +2,7 @@
   "name": "solrepr",
   "displayName": "SolRepr",
   "description": "Semantic analyzer and language server for Solidity",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0",
   "publisher": "solrepr",
   "license": "MIT OR Apache-2.0",
   "repository": {

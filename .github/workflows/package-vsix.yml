@@ -122,6 +122,10 @@ jobs:
           out="$GITHUB_WORKSPACE/vsix"
           mkdir -p "$out"
 
+          # Only a version with a prerelease suffix is packaged as a preview.
+          pre=()
+          if [[ "$version" == *-* ]]; then pre=(--pre-release); fi
+
           while IFS='|' read -r target triple binary_name; do
             archive="$GITHUB_WORKSPACE/dist/solrepr-${triple}.tar.xz"
             [ -f "$archive" ] || archive="$GITHUB_WORKSPACE/dist/solrepr-${triple}.zip"
@@ -139,7 +143,7 @@ jobs:
             cp -R out "$stage/out"
             cp "$binary" "$stage/bin/$target/$binary_name"
 
-            (cd "$stage" && npx vsce package --target "$target" --pre-release --no-dependencies --out "$out/solrepr-${version}-${target}.vsix")
+            (cd "$stage" && npx vsce package --target "$target" "${pre[@]}" --no-dependencies --out "$out/solrepr-${version}-${target}.vsix")
             rm -rf "$work" "$(dirname "$stage")"
           done <<'TARGETS'
           linux-x64|x86_64-unknown-linux-gnu|solrepr
@@ -154,11 +158,13 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           out="$GITHUB_WORKSPACE/vsix"
+          pre=()
+          if [[ "$version" == *-* ]]; then pre=(--pre-release); fi
           stage="$(mktemp -d)/extension"
           mkdir -p "$stage"
           cp package.json .vscodeignore LICENSE README.md icon.png "$stage/"
           cp -R out "$stage/out"
-          (cd "$stage" && npx vsce package --pre-release --no-dependencies --out "$out/solrepr-${version}-universal.vsix")
+          (cd "$stage" && npx vsce package "${pre[@]}" --no-dependencies --out "$out/solrepr-${version}-universal.vsix")
           rm -rf "$(dirname "$stage")"
 
       - name: Upload VSIX files to the release
@@ -167,7 +173,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ steps.tag.outputs.tag }}" vsix/*.vsix --clobber
 
-      - name: Set VSIX release notes
+      - name: Set release notes
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -175,30 +181,9 @@ jobs:
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
           version="$(node -p "require('./extensions/vscode/package.json').version")"
-          body="$(mktemp)"
-          {
-            echo "## SolRepr ${version}"
-            echo ""
-            echo "### VS Code extension"
-            echo ""
-            echo "| File | Platform |"
-            echo "| --- | --- |"
-            for target in linux-x64 darwin-arm64 win32-x64 universal; do
-              file="solrepr-${version}-${target}.vsix"
-              url="https://github.com/${{ github.repository }}/releases/download/${tag}/${file}"
-              case "$target" in
-                linux-x64) platform="Linux x64" ;;
-                darwin-arm64) platform="Apple Silicon macOS" ;;
-                win32-x64) platform="x64 Windows" ;;
-                universal) platform="Universal (set solrepr.serverPath or PATH)" ;;
-              esac
-              echo "| [${file}](${url}) | ${platform} |"
-            done
-            echo ""
-            echo '```bash'
-            echo "code --install-extension solrepr-${version}-<platform>.vsix"
-            echo '```'
-            echo ""
-            echo "The standalone server and installers remain available as release assets."
-          } > "$body"
-          gh release edit "$tag" --notes-file "$body"
+          work="$(mktemp -d)"
+          # dist's own body is the canonical server section; rebuilding from the manifest keeps
+          # this step idempotent instead of appending a second copy on a re-run.
+          gh release download "$tag" --pattern dist-manifest.json --dir "$work" --clobber
+          node scripts/release-notes.mjs "$version" "$tag" "$work/dist-manifest.json" > "$work/notes.md"
+          gh release edit "$tag" --notes-file "$work/notes.md"
