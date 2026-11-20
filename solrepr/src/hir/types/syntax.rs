@@ -75,7 +75,7 @@ impl TyName {
     }
 }
 
-#[derive(Default, PartialEq, Eq, Clone, Copy, Hash)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Visibility {
     #[default]
     Internal,

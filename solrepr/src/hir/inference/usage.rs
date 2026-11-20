@@ -346,8 +346,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
         callee: Option<DefId>,
     ) {
         let effect = effect.state_effect();
-        self.effect = self.effect.join(effect);
-        let Some(declared) = self.declared_mutability else {
+        self.effective_mutability = self.effective_mutability.join(effect);
+        let Some(declared) = self.mutability else {
             return;
         };
         if !effect.implicitly_converts_to(declared.state_effect()) {

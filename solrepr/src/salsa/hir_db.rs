@@ -27,7 +27,7 @@ use crate::hir::linearize::Linearizer;
 use crate::hir::overrides::{OverrideAnalyzer, OverrideFacts};
 use crate::hir::resolution::Resolution;
 use crate::hir::diagnostics::SemanticDiagnostic;
-use crate::hir::types::{Fn, Ty, Type};
+use crate::hir::types::{Fn, Ty, Type, Visibility};
 use crate::ir::def_map::{DefId, DefMap, DefNamespace, Scope};
 use crate::salsa::File;
 use crate::salsa::interned_db::Id;
@@ -392,11 +392,9 @@ pub fn modifier_signature<'db>(db: &'db dyn HirDb, m: Modifier<'db>) -> Option<F
 #[salsa::tracked]
 fn build_function<'db>(db: &'db dyn RootDb, f: Function<'db>) -> (Arc<FunctionData>, Arc<SourceMap>) {
     let id = f.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let func = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_fn(&func);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_fn(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -408,11 +406,9 @@ pub fn function_data<'db>(db: &'db dyn RootDb, f: Function<'db>) -> Arc<Function
 #[salsa::tracked]
 fn build_struct<'db>(db: &'db dyn RootDb, s: Struct<'db>) -> (Arc<StructData>, Arc<SourceMap>) {
     let id = s.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let strukt = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_struct(&strukt);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_struct(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -424,11 +420,9 @@ pub fn struct_data<'db>(db: &'db dyn RootDb, s: Struct<'db>) -> Arc<StructData> 
 #[salsa::tracked]
 fn build_var<'db>(db: &'db dyn RootDb, v: Var<'db>) -> (Arc<VarData>, Arc<SourceMap>) {
     let id = v.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let var = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_var(&var);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_var(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -440,11 +434,9 @@ pub fn var_data<'db>(db: &'db dyn RootDb, v: Var<'db>) -> Arc<VarData> {
 #[salsa::tracked]
 fn build_enum<'db>(db: &'db dyn RootDb, e: Enum<'db>) -> (Arc<EnumData>, Arc<SourceMap>) {
     let id = e.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let enom = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_enum(&enom);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_enum(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -456,11 +448,9 @@ pub fn enum_data<'db>(db: &'db dyn RootDb, e: Enum<'db>) -> Arc<EnumData> {
 #[salsa::tracked]
 fn build_event<'db>(db: &'db dyn RootDb, e: Event<'db>) -> (Arc<EventData>, Arc<SourceMap>) {
     let id = e.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let event = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_event(&event);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_event(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -472,11 +462,9 @@ pub fn event_data<'db>(db: &'db dyn RootDb, e: Event<'db>) -> Arc<EventData> {
 #[salsa::tracked]
 fn build_error<'db>(db: &'db dyn RootDb, e: Error<'db>) -> (Arc<ErrorData>, Arc<SourceMap>) {
     let id = e.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let error = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_error(&error);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_error(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -488,11 +476,9 @@ pub fn error_data<'db>(db: &'db dyn RootDb, e: Error<'db>) -> Arc<ErrorData> {
 #[salsa::tracked]
 fn build_modifier<'db>(db: &'db dyn RootDb, m: Modifier<'db>) -> (Arc<ModifierData>, Arc<SourceMap>) {
     let id = m.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let modifier = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_modifier(&modifier);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_modifier(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -504,11 +490,9 @@ pub fn modifier_data<'db>(db: &'db dyn RootDb, m: Modifier<'db>) -> Arc<Modifier
 #[salsa::tracked]
 fn build_contract<'db>(db: &'db dyn RootDb, c: Contract<'db>) -> (Arc<ContractData>, Arc<SourceMap>) {
     let id = c.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let contract = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_contract(&contract);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_contract(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -520,11 +504,9 @@ pub fn contract_data<'db>(db: &'db dyn RootDb, c: Contract<'db>) -> Arc<Contract
 #[salsa::tracked]
 fn build_interface<'db>(db: &'db dyn RootDb, i: Interface<'db>) -> (Arc<InterfaceData>, Arc<SourceMap>) {
     let id = i.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let interface = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_interface(&interface);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_interface(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -536,11 +518,9 @@ pub fn interface_data<'db>(db: &'db dyn RootDb, i: Interface<'db>) -> Arc<Interf
 #[salsa::tracked]
 fn build_library<'db>(db: &'db dyn RootDb, l: Library<'db>) -> (Arc<LibraryData>, Arc<SourceMap>) {
     let id = l.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let library = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_library(&library);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_library(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -552,11 +532,9 @@ pub fn library_data<'db>(db: &'db dyn RootDb, l: Library<'db>) -> Arc<LibraryDat
 #[salsa::tracked]
 fn build_import<'db>(db: &'db dyn RootDb, i: Import<'db>) -> (Arc<ImportData>, Arc<SourceMap>) {
     let id = i.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let import = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_import(&import);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_import(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -568,11 +546,9 @@ pub fn import_data<'db>(db: &'db dyn RootDb, i: Import<'db>) -> Arc<ImportData> 
 #[salsa::tracked]
 fn build_udvt<'db>(db: &'db dyn RootDb, u: Udvt<'db>) -> (Arc<UdvtData>, Arc<SourceMap>) {
     let id = u.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let udvt = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_udvt(&udvt);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_udvt(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -584,11 +560,9 @@ pub fn udvt_data<'db>(db: &'db dyn RootDb, u: Udvt<'db>) -> Arc<UdvtData> {
 #[salsa::tracked]
 fn build_using<'db>(db: &'db dyn RootDb, u: Using<'db>) -> (Arc<UsingData>, Arc<SourceMap>) {
     let id = u.id(db);
-    let ast_id_map = db.ast_id_map(id.file);
-    let root = db.root(id.file);
-    let using = ast_id_map.get(&root, id.id).unwrap();
-    let mut builder = ItemBuilder::new(root, id.file, ast_id_map);
-    let data = builder.build_using(&using);
+    let items = db.item_tree(id.file);
+    let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
+    let data = builder.build_using(id.id, items);
     (Arc::new(data), Arc::new(builder.take_source_map()))
 }
 
@@ -779,8 +753,7 @@ pub fn resolve_using<'db>(db: &'db dyn HirDb, using: Using<'db>) -> UsingIndex {
             return;
         };
         let fn_data = function_data(db, Function::new(db, f_id));
-        if fn_data.args.is_empty() {
-            //can't attach fn with no params
+        if fn_data.vis == Visibility::Private || fn_data.args.is_empty() {
             return;
         }
         match &target {

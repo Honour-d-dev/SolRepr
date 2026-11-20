@@ -1989,8 +1989,9 @@ fn an_interface_variable_is_dropped_entirely() {
             .count()
     };
 
-    // The declarations themselves, one each.
-    assert_eq!(count("Variables cannot be declared"), 2, "{diagnostics:?}");
+    // The declarations themselves, one each — reported by the def map's
+    // membership table, not by inference.
+    assert_eq!(count("variables cannot be declared"), 2, "{diagnostics:?}");
     // Every use fails to resolve — the name is not in any scope or member table.
     assert_eq!(count("unresolved name `x`"), 1, "{diagnostics:?}");
     assert_eq!(count("unresolved member `x`"), 1, "{diagnostics:?}");

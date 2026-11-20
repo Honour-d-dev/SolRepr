@@ -51,9 +51,9 @@ pub struct Inferer<'db, 'store> {
 
     /// The mutability the owner declares. A modifier declares none but still
     /// accumulates an effect for the functions that inline it.
-    declared_mutability: Option<Mutability>,
+    mutability: Option<Mutability>,
     /// Accumulated state-mutability effect (`Pure < View < NonPayable`).
-    effect: Mutability,
+    effective_mutability: Mutability,
     /// Ambient usage permission; scoped by `Inferer::infer_in`.
     context: UsageContext,
 }
@@ -73,11 +73,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
             tables: Inference::empty(),
             sink: DiagnosticSink::default(),
             resolver,
-            declared_mutability: match owner {
+            mutability: match owner {
                 DefId::Function(id) => Some(db.function_data(id).mutability),
                 _ => None,
             },
-            effect: Mutability::Pure,
+            effective_mutability: Mutability::Pure,
             context: UsageContext::Empty,
         };
         inferer.check_definition();
@@ -86,7 +86,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         inferer
             .sink
             .extend(inferer.resolver.finish_diagnostics().iter());
-        inferer.tables.effect = inferer.effect;
+        inferer.tables.effect = inferer.effective_mutability;
         inferer.tables.diagnostics = inferer.sink.finish();
         inferer.tables
     }
@@ -301,14 +301,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 declared,
             );
         }
-        // An interface declares no variables, constants included. The def map drops the name, so
-        // nothing downstream resolves it; this is the declaration's only error.
+        // An interface declares no variables, constants included. The def map
+        // owns that rule (`ir::membership`) and drops the name, so the
+        // declaration already carries its diagnostic; the initializer is not
+        // worth checking on a declaration that cannot exist.
         if let Some(DefId::Interface(_)) = self.db.owner(var_def) {
-            return self.fail(
-                DiagnosticAnchor::Def(var_def),
-                "Variables cannot be declared in interfaces.",
-                declared,
-            );
+            return declared;
         }
         match data.init {
             Some(init) => {

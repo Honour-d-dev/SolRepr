@@ -9,28 +9,22 @@ use crate::hir::resolution::Callable;
 use crate::hir::signatures::OverrideMismatch;
 use crate::hir::syntax_store::anchor_range;
 use crate::hir::types::{Mutability, Visibility};
-use crate::ir::def_map::DefId;
+use crate::ir::def_map::{DefId, DefMap};
 use crate::salsa::hir_db::def_name;
 use crate::salsa::root_db::def_range;
 use crate::salsa::{File, HirDb};
+use rustc_hash::FxHashSet;
 
 
 pub(crate) fn collect_diagnostics(db: &dyn HirDb, file: File) -> Vec<Diagnostic> {
     let analysis = db.root_def_map_analysis(db.file_source_root(file));
-    let owners = analysis
-        .data
-        .defs
-        .keys()
-        .filter(|owner| owner.file_and_id().0 == file)
-        .copied()
-        .collect::<Vec<_>>();
     let mut diagnostics = analysis
         .diagnostics
         .iter()
         .filter(|error| error.declaration_file() == Some(file))
         .map(|error| semantic_diagnostic(db, DefId::File(file), error))
         .collect::<Vec<_>>();
-    for owner in owners {
+    for owner in owners(&analysis.data, file) {
         // @NOTE safe: only called inside a tracked fn; see capabilities/diagnostics
         db.unwind_if_revision_cancelled();
         let result = db.inference(owner);
@@ -50,6 +44,58 @@ pub(crate) fn collect_diagnostics(db: &dyn HirDb, file: File) -> Vec<Diagnostic>
         }
     }
     diagnostics
+}
+
+/// Every declaration the file actually contains, walked from its own scope
+/// through the scopes its members own.
+///
+/// `by_name` is the record of what a scope holds: the def map keeps a `DefData`
+/// for a declaration the membership gate rejected — hover and its own
+/// diagnostic need the anchor — but withholds the name, so it is absent here and
+/// never inferred. A declaration that cannot exist should not be analysed as if
+/// it did; solc stops at the membership error too, and the only diagnostics this
+/// gives up are the initializer's own (a gated variable with a bad initializer
+/// reports the membership rule instead of an unresolved name).
+///
+/// The same absence covers a declaration rejected for a name collision, which
+/// solc does analyse (2333 plus the initializer's error). That is accepted:
+/// the collision is already reported, functions — the common duplicate — are
+/// overloadable and so still present, and telling the two absences apart would
+/// mean repeating the gate's decision here.
+///
+/// The walk also skips what imports put in the file's scope — a namespace
+/// import binds a foreign file def, a named import a foreign member — since
+/// those belong to their own file's collection.
+fn owners(defmap: &DefMap, file: File) -> Vec<DefId> {
+    let Some(data) = defmap.files.get(&file) else {
+        return Vec::new();
+    };
+    let mut owners = Vec::new();
+    let mut pending = vec![data.scope];
+    let mut visited = FxHashSet::default();
+    while let Some(scope_id) = pending.pop() {
+        if !visited.insert(scope_id) {
+            continue;
+        }
+        let scope = &defmap.scopes[scope_id];
+        for group in scope.by_name.values() {
+            for &def in group.defs.iter() {
+                if def.file() != file {
+                    continue;
+                }
+                owners.push(def);
+                if let Some(child) = defmap.defs.get(&def).and_then(|data| data.child_scope) {
+                    pending.push(child);
+                }
+            }
+        }
+        for &using in scope.usings.iter().flatten() {
+            if using.file() == file {
+                owners.push(using);
+            }
+        }
+    }
+    owners
 }
 
 
@@ -311,7 +357,7 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
             (
                 DiagnosticCode::OverrideListMismatch,
                 format!(
-                    "override list of `{}` does not match its overridden contracts",
+                    "`{}` must name the overridden contracts in `override(...)`",
                     def_name(db, *declaration)
                 ),
                 related_declarations(db, expected, "`{}` must be listed in the override list"),
@@ -334,40 +380,9 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
             ),
             Vec::new(),
         ),
-        SemanticDiagnostic::MissingVirtual { declaration, .. } => (
-            DiagnosticCode::MissingVirtual,
-            match declaration {
-                DefId::Modifier(_) => format!(
-                    "modifier `{}` has no implementation and must be marked `virtual`",
-                    def_name(db, *declaration)
-                ),
-                _ => format!(
-                    "function `{}` has no implementation and must be marked `virtual`",
-                    def_name(db, *declaration)
-                ),
-            },
-            Vec::new(),
-        ),
-        SemanticDiagnostic::MissingImplementation { declaration, .. } => (
-            DiagnosticCode::MissingImplementation,
-            match db.owner(*declaration) {
-                Some(DefId::Library(_)) => format!(
-                    "library function `{}` must be implemented",
-                    def_name(db, *declaration)
-                ),
-                _ => format!(
-                    "free function `{}` must be implemented",
-                    def_name(db, *declaration)
-                ),
-            },
-            Vec::new(),
-        ),
-        SemanticDiagnostic::VirtualInLibrary { declaration, .. } => (
-            DiagnosticCode::VirtualInLibrary,
-            match declaration {
-                DefId::Modifier(_) => "modifiers in a library cannot be `virtual`".to_string(),
-                _ => "library functions cannot be `virtual`".to_string(),
-            },
+        SemanticDiagnostic::IllegalMember { violation, .. } => (
+            DiagnosticCode::IllegalMember,
+            violation.message().to_string(),
             Vec::new(),
         ),
         SemanticDiagnostic::DuplicateMemberSlot {

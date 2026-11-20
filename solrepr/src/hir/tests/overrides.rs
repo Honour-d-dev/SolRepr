@@ -404,3 +404,79 @@ fn concrete_contract_with_unimplemented_modifier_is_reported() {
         vec![DiagnosticCode::UnimplementedContract]
     );
 }
+
+/// A bare `override` names nothing, so it cannot satisfy a set of more than one
+/// overridden contract. solc: 4327 "Function needs to specify overridden
+/// contracts". One contract stays legal, with or without a list.
+#[test]
+fn bare_override_requires_a_list_for_multiple_bases() {
+    for source in [
+        r#"
+        contract A { function f() public virtual {} }
+        contract B { function f() public virtual {} }
+        contract C is A, B { function f() public override {} }
+        "#,
+        r#"
+        interface I { function f() external; }
+        interface J { function f() external; }
+        contract C is I, J { function f() external override {} }
+        "#,
+    ] {
+        assert_eq!(
+            codes(source, "C"),
+            vec![DiagnosticCode::OverrideListMismatch],
+            "{source}"
+        );
+    }
+
+    // A single contract needs no list.
+    assert!(
+        codes(
+            r#"
+        contract A { function f() public virtual {} }
+        contract C is A { function f() public override {} }
+        "#,
+            "C",
+        )
+        .is_empty()
+    );
+}
+
+/// A listed name that does not resolve is a type reference like any other, so
+/// it reports as an unresolved type — and the list comparison is skipped, as
+/// solc stops at the name (7920) instead of also asking for the missing
+/// contracts.
+#[test]
+fn unresolved_name_in_the_override_list_is_reported() {
+    assert_eq!(
+        codes(
+            r#"
+            contract A { function f() public virtual {} }
+            contract B { function f() public virtual {} }
+            contract C is A, B { function f() public override(A, Bogus) {} }
+            "#,
+            "C",
+        ),
+        vec![DiagnosticCode::UnresolvedType]
+    );
+}
+
+/// A name that resolves to something which is not a contract takes no part in
+/// the list — solc ignores it — so the missing contract is still reported.
+#[test]
+fn non_contract_name_in_the_override_list_is_ignored() {
+    assert_eq!(
+        codes(
+            r#"
+            contract A { function f() public virtual {} }
+            contract B { function f() public virtual {} }
+            contract C is A, B {
+                struct S { uint x; }
+                function f() public override(A, S) {}
+            }
+            "#,
+            "C",
+        ),
+        vec![DiagnosticCode::OverrideListMismatch]
+    );
+}

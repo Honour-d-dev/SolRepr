@@ -9,6 +9,7 @@ use crate::ast::{
     self, Ast, AstId, AstIdMap, ErasedAstId, FunctionKind, HasMembers, HasName, ImportKind,
     ToAstNode,
 };
+use crate::hir::types::{Mutability, VariableKind, Visibility};
 use crate::salsa::{File, RootDb};
 
 
@@ -31,6 +32,27 @@ pub enum ItemId {
     Event(AstId<ast::Event>),
     Error(AstId<ast::Error>),
     Modifier(AstId<ast::Modifier>),
+}
+
+impl ItemId {
+    /// The key this item is stored under — the erased form of its `AstId`.
+    pub fn erased(self) -> ErasedAstId {
+        match self {
+            ItemId::Import(id) => id.erase(),
+            ItemId::Using(id) => id.erase(),
+            ItemId::Udvt(id) => id.erase(),
+            ItemId::Contract(id) => id.erase(),
+            ItemId::Interface(id) => id.erase(),
+            ItemId::Library(id) => id.erase(),
+            ItemId::Function(id) => id.erase(),
+            ItemId::Var(id) => id.erase(),
+            ItemId::Struct(id) => id.erase(),
+            ItemId::Enum(id) => id.erase(),
+            ItemId::Event(id) => id.erase(),
+            ItemId::Error(id) => id.erase(),
+            ItemId::Modifier(id) => id.erase(),
+        }
+    }
 }
 
 /// Item_tree::Item, (not to be mistaken with ast::Item) but similar concept
@@ -109,8 +131,6 @@ impl Lowerer {
                         continue;
                     };
                     let using = Using {
-                        target: u.target(),
-                        sources: u.sources(),
                         is_global: u.is_global(),
                     };
                     self.data.insert(id.erase(), Item::Using(using));
@@ -156,6 +176,10 @@ impl Lowerer {
                     let function = Function {
                         name: function_name(&f),
                         kind: f.kind(),
+                        vis: f.vis(),
+                        mutability: f.mutability(),
+                        is_virtual: f.is_virtual(),
+                        has_body: f.has_body(),
                     };
                     self.top_level.push(ItemId::Function(id));
                     self.data.insert(id.erase(), Item::Function(function));
@@ -166,6 +190,8 @@ impl Lowerer {
                     };
                     let variable = Var {
                         name: v.name().unwrap_or_default(),
+                        kind: v.kind(),
+                        vis: v.vis(),
                     };
                     self.top_level.push(ItemId::Var(id));
                     self.data.insert(id.erase(), Item::Var(variable));
@@ -216,6 +242,8 @@ impl Lowerer {
                     };
                     let modifier = Modifier {
                         name: m.name().unwrap_or_default(),
+                        is_virtual: m.is_virtual(),
+                        has_body: m.has_body(),
                     };
                     self.top_level.push(ItemId::Modifier(id));
                     self.data.insert(id.erase(), Item::Modifier(modifier));
@@ -234,8 +262,6 @@ impl Lowerer {
                         continue;
                     };
                     let using = Using {
-                        target: u.target(),
-                        sources: u.sources(),
                         is_global: u.is_global(),
                     };
                     result.push(ItemId::Using(id));
@@ -262,6 +288,10 @@ impl Lowerer {
                     let function = Function {
                         name: function_name(&f),
                         kind: f.kind(),
+                        vis: f.vis(),
+                        mutability: f.mutability(),
+                        is_virtual: f.is_virtual(),
+                        has_body: f.has_body(),
                     };
                     result.push(ItemId::Function(id));
                     self.data.insert(id.erase(), Item::Function(function));
@@ -312,6 +342,8 @@ impl Lowerer {
                     };
                     let modifier = Modifier {
                         name: m.name().unwrap_or_default(),
+                        is_virtual: m.is_virtual(),
+                        has_body: m.has_body(),
                     };
                     result.push(ItemId::Modifier(id));
                     self.data.insert(id.erase(), Item::Modifier(modifier));
@@ -322,6 +354,8 @@ impl Lowerer {
                     };
                     let variable = Var {
                         name: v.name().unwrap_or_default(),
+                        kind: v.kind(),
+                        vis: v.vis(),
                     };
                     result.push(ItemId::Var(id));
                     self.data.insert(id.erase(), Item::Var(variable));
@@ -358,6 +392,13 @@ pub struct ItemTree {
     pub top_level: Box<[ItemId]>,
 
     pub data: FxHashMap<ErasedAstId, Item>,
+}
+
+impl ItemTree {
+    /// The item `id` names, whatever its kind.
+    pub fn item(&self, id: ItemId) -> Option<&Item> {
+        self.data.get(&id.erased())
+    }
 }
 
 macro_rules! impl_item_tree_index {
@@ -403,8 +444,9 @@ pub struct Import {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Using {
-    pub target: Option<Name>,
-    pub sources: Box<[Name]>,
+    /// The only fact a `using` directive carries that no other layer digests:
+    /// whether it is `global`. The sources and target are lowered into the
+    /// item's syntax store, where the names are expression ids.
     pub is_global: bool,
 }
 
@@ -436,11 +478,19 @@ pub struct Library {
 pub struct Function {
     pub name: Name,
     pub kind: FunctionKind,
+    /// The written visibility — `None` when the source omits it, because the
+    /// default is the container's, not the declaration's.
+    pub vis: Option<Visibility>,
+    pub mutability: Option<Mutability>,
+    pub is_virtual: bool,
+    pub has_body: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Var {
     pub name: Name,
+    pub kind: VariableKind,
+    pub vis: Option<Visibility>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -466,4 +516,6 @@ pub struct Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Modifier {
     pub name: Name,
+    pub is_virtual: bool,
+    pub has_body: bool,
 }

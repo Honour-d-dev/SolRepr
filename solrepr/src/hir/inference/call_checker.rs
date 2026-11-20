@@ -563,28 +563,31 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
 
         match self.tables.expr_resolution(callee).cloned() {
-            Some(Resolution::Type(ty)) => match ty.peel_loc(self.db).kind(self.db) {
-                TyKind::Invalid => {
-                    self.unknown_named_argument(call, named.first().map(|(name, _)| name))
+            Some(Resolution::Type(ty)) => {
+                self.tables.set_expr_resolution(call, Resolution::Type(ty));
+                match ty.peel_loc(self.db).kind(self.db) {
+                    TyKind::Invalid => {
+                        self.unknown_named_argument(call, named.first().map(|(name, _)| name))
+                    }
+                    TyKind::TypeDef(TypeDefId::Contract(id)) if self.in_modifier() => {
+                        let callable = Callable::new_constructor(id);
+                        self.resolve_named_call(call, &callable, named, arg_types)
+                    }
+                    TyKind::TypeDef(TypeDefId::Struct(id)) => self.check_struct_construction(
+                        call,
+                        id,
+                        &values,
+                        arg_types,
+                        Some(&names),
+                    ),
+                    // A cast has no parameters to name.
+                    _ => self.fail(
+                        DiagnosticAnchor::Expr(call),
+                        "type conversion cannot allow named arguments",
+                        Ty::invalid(self.db),
+                    ),
                 }
-                TyKind::TypeDef(TypeDefId::Contract(id)) if self.in_modifier() => {
-                    let callable = Callable::new_constructor(id);
-                    self.resolve_named_call(call, &callable, named, arg_types)
-                }
-                TyKind::TypeDef(TypeDefId::Struct(id)) => self.check_struct_construction(
-                    call,
-                    id,
-                    &values,
-                    arg_types,
-                    Some(&names),
-                ),
-                // A cast has no parameters to name.
-                _ => self.fail(
-                    DiagnosticAnchor::Expr(call),
-                    "type conversion cannot allow named arguments",
-                    Ty::invalid(self.db),
-                ),
-            },
+            }
             Some(Resolution::Callable(callable)) => {
                 self.resolve_named_call(call, &callable, named, arg_types)
             }

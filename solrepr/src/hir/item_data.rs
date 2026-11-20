@@ -6,10 +6,11 @@ use triomphe::Arc;
 
 use crate::ast::kinds::{FieldKind, NodeKind};
 use crate::ast::{
-    AstIdMap, AstNode, Contract, Enum, Error, Event, Function, FunctionId, FunctionKind,
-    HasMembers, HasName, Import, ImportKind, Interface, Item, Library, Modifier, NodeRange, Struct,
-    ToAstNode, Udvt, Using, Var,
+    AstId, AstIdMap, AstNode, Contract, Enum, Error, Event, Function, FunctionId, FunctionKind,
+    Import, ImportKind, Interface, Library, Modifier, NodeRange, Struct, ToAstNode, Udvt, Using,
+    Var,
 };
+use crate::ir::item_tree::{ItemId, ItemTree};
 use crate::hir::body_map::{Local, LocalId};
 use crate::hir::exprs::{Expr, ExprBuilder, ExprId, Name};
 use crate::hir::syntax_store::{SourceMap, SyntaxStore};
@@ -249,22 +250,31 @@ impl ItemBuilder {
         mem::take(&mut self.source_map)
     }
 
+    /// The node `id` names. A builder takes the declaration's id and derives
+    /// both views from it — the syntax to lower here, the digested facts from
+    /// the item tree — so the two can never name different declarations.
+    ///
+    /// Returns the node by value: it owns its tree handle, so the caller keeps
+    /// it across `&mut self` calls.
+    fn ast_node<T: ToAstNode>(&self, id: AstId<T>) -> AstNode {
+        self.ast_id_map
+            .get_node(&self.root, id.erase())
+            .expect("an AstId resolves in its own file")
+    }
+
     // ── Import Builder ───────────────────────────────────────────────────
 
-    pub fn build_import(&mut self, import: &Import) -> ImportData {
-        let import_kind = import.import_kind();
-        let import_node = import.to_node_ref().node();
+    pub fn build_import(&mut self, id: AstId<Import>, items: &ItemTree) -> ImportData {
+        let import_kind = items[id].import_kind.clone();
+        let ast = self.ast_node(id);
+        let import_node = ast.node();
         match import_kind {
             ImportKind::Named { symbols } => {
                 let mut name_cursor = import_node.walk();
                 let mut alias_cursor = import_node.walk();
-                let mut names = import
-                    .to_node_ref()
-                    .node()
+                let mut names = import_node
                     .children_by_field_id(FieldKind::IMPORT_NAME.into(), &mut name_cursor);
-                let mut aliases = import
-                    .to_node_ref()
-                    .node()
+                let mut aliases = import_node
                     .children_by_field_id(FieldKind::ALIAS.into(), &mut alias_cursor);
                 for symbol in symbols {
                     let expr = if let Some(alias) = symbol.alias {
@@ -292,10 +302,7 @@ impl ItemBuilder {
         let node = import_node
             .child_by_field_id(FieldKind::SOURCE.into())
             .unwrap();
-        let path = import
-            .to_node_ref()
-            .text_by_range(node.byte_range())
-            .trim_matches(['"', '\'']);
+        let path = self.root().text_by_range(node.byte_range()).trim_matches(['"', '\'']);
         let expr = Expr::Path(path.into());
         self.alloc_expr(expr, node);
 
@@ -306,21 +313,19 @@ impl ItemBuilder {
 
     // ── Variable Builder ─────────────────────────────────────────────────
 
-    pub fn build_var(&mut self, var: &Var) -> VarData {
-        let node = var.to_node_ref().node();
-        let mut name = Name::default();
-        let mut vis = Visibility::default();
+    pub fn build_var(&mut self, id: AstId<Var>, items: &ItemTree) -> VarData {
+        let ast = self.ast_node(id);
+        let node = ast.node();
+        let item = &items[id];
         let mut override_specifier = None;
-        let mut kind = VariableKind::StateVariable;
         let mut ty_ref = None;
         let mut init = None;
         for child in node.children(&mut node.walk()) {
             match child.kind_id().into() {
                 NodeKind::TYPE_NAME => ty_ref = self.lower_type(child),
-                NodeKind::CONSTANT => kind = VariableKind::Const,
-                NodeKind::IMMUTABLE => kind = VariableKind::Immutable,
+                // The kind and visibility are the item's facts; the walk keeps
+                // the position of the visibility token.
                 NodeKind::VISIBILITY => {
-                    vis = Visibility::parse(self.root().text_by_range(child.byte_range()).trim());
                     self.source_map.vis_range = Some(NodeRange::from(&child));
                 }
                 NodeKind::OVERRIDE_SPECIFIER => {
@@ -330,7 +335,6 @@ impl ItemBuilder {
                     if let Some(expr_id) = self.lower_expr(child) {
                         self.syntax_store.name_expr = Some(expr_id);
                     }
-                    name = self.root.text_by_range(child.byte_range()).trim().into();
                 }
                 NodeKind::EXPRESSION => {
                     init = self.lower_expr(child);
@@ -339,12 +343,12 @@ impl ItemBuilder {
             }
         }
         VarData {
-            name,
+            name: item.name.clone(),
             ty_ref: ty_ref.unwrap(),
-            vis,
+            vis: item.vis.unwrap_or_default(),
             override_specifier,
-            kind,
-            loc: if kind == VariableKind::StateVariable {
+            kind: item.kind,
+            loc: if item.kind == VariableKind::StateVariable {
                 Location::Storage(RefKind::Reference)
             } else {
                 Location::Stack
@@ -380,9 +384,9 @@ impl ItemBuilder {
 
     // ── Struct Builder ───────────────────────────────────────────────────
 
-    pub fn build_struct(&mut self, strukt: &Struct) -> StructData {
-        let node = strukt.to_node_ref().node();
-        let name = strukt.name().unwrap_or_default();
+    pub fn build_struct(&mut self, id: AstId<Struct>, items: &ItemTree) -> StructData {
+        let ast = self.ast_node(id);
+        let node = ast.node();
         let mut fields = Arena::new();
 
         node.child_by_field_id(FieldKind::NAME.into())
@@ -425,7 +429,7 @@ impl ItemBuilder {
         }
 
         StructData {
-            name,
+            name: items[id].name.clone(),
             fields,
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
@@ -433,9 +437,9 @@ impl ItemBuilder {
 
     // ── Enum Builder ─────────────────────────────────────────────────────
 
-    pub fn build_enum(&mut self, enum_: &Enum) -> EnumData {
-        let node = enum_.to_node_ref().node();
-        let name = enum_.name().unwrap_or_default();
+    pub fn build_enum(&mut self, id: AstId<Enum>, items: &ItemTree) -> EnumData {
+        let ast = self.ast_node(id);
+        let node = ast.node();
         let mut variants = Arena::new();
 
         node.child_by_field_id(FieldKind::NAME.into())
@@ -458,7 +462,7 @@ impl ItemBuilder {
         }
 
         EnumData {
-            name,
+            name: items[id].name.clone(),
             variants,
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
@@ -466,9 +470,9 @@ impl ItemBuilder {
 
     // ── Event Builder ────────────────────────────────────────────────────
 
-    pub fn build_event(&mut self, event: &Event) -> EventData {
-        let node = event.to_node_ref().node();
-        let name = event.name().unwrap_or_default();
+    pub fn build_event(&mut self, id: AstId<Event>, items: &ItemTree) -> EventData {
+        let ast = self.ast_node(id);
+        let node = ast.node();
         let mut parameters = Arena::new();
         let mut anonymous = false;
 
@@ -493,7 +497,7 @@ impl ItemBuilder {
         }
 
         EventData {
-            name,
+            name: items[id].name.clone(),
             anonymous,
             parameters,
             syntax_store: std::mem::take(&mut self.syntax_store),
@@ -502,9 +506,9 @@ impl ItemBuilder {
 
     // ── Error Builder ────────────────────────────────────────────────────
 
-    pub fn build_error(&mut self, error: &Error) -> ErrorData {
-        let node = error.to_node_ref().node();
-        let name = error.name().unwrap_or_default();
+    pub fn build_error(&mut self, id: AstId<Error>, items: &ItemTree) -> ErrorData {
+        let ast = self.ast_node(id);
+        let node = ast.node();
         let mut parameters = Arena::new();
 
         if let Some(expr_id) = node
@@ -520,7 +524,7 @@ impl ItemBuilder {
         }
 
         ErrorData {
-            name,
+            name: items[id].name.clone(),
             parameters,
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
@@ -529,21 +533,18 @@ impl ItemBuilder {
     // ── Modifier Builder ─────────────────────────────────────────────────
     
 
-    pub fn build_modifier(&mut self, modifier: &Modifier) -> ModifierData {
-        let node = modifier.to_node_ref().node();
-        let name = modifier.name().unwrap_or_default();
-        let mut marked_virtual = false;
+    pub fn build_modifier(&mut self, id: AstId<Modifier>, items: &ItemTree) -> ModifierData {
+        let ast = self.ast_node(id);
+        let node = ast.node();
+        let item = &items[id];
         let mut override_specifier = None;
         let mut parameters = Arena::new();
-
-        // node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
             match child.kind_id().into() {
                 NodeKind::PARAMETER => {
                     self.build_parameter(&mut parameters, child);
                 }
-                NodeKind::VIRTUAL => marked_virtual = true,
                 NodeKind::OVERRIDE_SPECIFIER => {
                     override_specifier = Some(self.lower_override_specifier(child));
                 }
@@ -554,10 +555,10 @@ impl ItemBuilder {
         let body = node.child_by_field_id(FieldKind::BODY.into());
         self.source_map.body_range = body.map(|body| NodeRange::from(&body));
         ModifierData {
-            name,
-            is_virtual: marked_virtual,
+            name: item.name.clone(),
+            is_virtual: item.is_virtual,
             override_specifier,
-            has_body: body.is_some(),
+            has_body: item.has_body,
             has_placeholder: body
                 .is_some_and(|body| self.body_has_placeholder(body)),
             parameters,
@@ -577,18 +578,14 @@ impl ItemBuilder {
 
     // ── Function Builder ─────────────────────────────────────────────────
 
-    pub fn build_fn(&mut self, func: &Function) -> FunctionData {
-        let node = func.to_node_ref().node();
-        let name = func.name().unwrap_or_default();
-        let mut vis = Visibility::Internal;
-        let mut mutability = Mutability::NonPayable;
-        let mut is_virtual = false;
+    pub fn build_fn(&mut self, id: AstId<Function>, items: &ItemTree) -> FunctionData {
+        let ast = self.ast_node(id);
+        let node = ast.node();
+        let item = &items[id];
         let mut override_specifier = None;
         let mut parameters = Arena::new();
         let mut args = vec![];
         let mut rets = vec![];
-
-        // node.child_by_field_id(FieldKind::NAME.into()).map(|n| self.lower_expr(n));
 
         for child in node.children(&mut node.walk()) {
             match child.kind_id().into() {
@@ -602,16 +599,11 @@ impl ItemBuilder {
                         }
                     }
                 }
+                // The visibility itself is the item's fact; the walk keeps the
+                // position of the token.
                 NodeKind::VISIBILITY | NodeKind::PUBLIC | NodeKind::INTERNAL => {
-                    vis = Visibility::parse(func.to_node_ref().text_by_range(child.byte_range()).trim());
                     self.source_map.vis_range = Some(NodeRange::from(&child));
                 }
-                NodeKind::STATE_MUTABILITY => {
-                    mutability =
-                        Mutability::parse(func.to_node_ref().text_by_range(child.byte_range()).trim());
-                }
-                NodeKind::PAYABLE => mutability = Mutability::Payable, //@NOTE is payable not under mutability in tree?
-                NodeKind::VIRTUAL => is_virtual = true,
                 NodeKind::OVERRIDE_SPECIFIER => {
                     override_specifier = Some(self.lower_override_specifier(child));
                 }
@@ -631,13 +623,13 @@ impl ItemBuilder {
             .unwrap_or_default();
 
         FunctionData {
-            name,
-            kind: func.kind(),
-            vis,
-            mutability,
-            is_virtual,
+            name: item.name.clone(),
+            kind: item.kind,
+            vis: item.vis.unwrap_or_default(),
+            mutability: item.mutability.unwrap_or_default(),
+            is_virtual: item.is_virtual,
             override_specifier,
-            has_body: node.child_by_field_id(FieldKind::BODY.into()).is_some(),
+            has_body: item.has_body,
             parameters,
             args,
             rets,
@@ -697,9 +689,9 @@ impl ItemBuilder {
 
     // ── Contract Builder ─────────────────────────────────────────────────
 
-    pub fn build_contract(&mut self, contract: &Contract) -> ContractData {
-        let node = contract.to_node_ref().node();
-        let name = contract.name().unwrap_or_default();
+    pub fn build_contract(&mut self, id: AstId<Contract>, items: &ItemTree) -> ContractData {
+        let ast = self.ast_node(id);
+        let node = ast.node();
         let is_abstract = node
             .children(&mut node.walk())
             .any(|child| child.kind_id() == NodeKind::ABSTRACT);
@@ -716,21 +708,23 @@ impl ItemBuilder {
             }
         }
 
-        let constructor = contract
-            .members()
-            .into_iter()
-            .find_map(|member| match member {
-                Item::Function(func) if func.kind() == FunctionKind::Constructor => {
-                    self.ast_id_map.id(&func).map(|id| FunctionId {
-                        file: self.file,
-                        id,
-                    })
-                }
+        // The item tree already walked the members, so the constructor is a
+        // lookup rather than a second walk.
+        let constructor = items[id].members.iter().find_map(|member| {
+            let ItemId::Function(id) = member else {
+                return None;
+            };
+            match items[*id].kind {
+                FunctionKind::Constructor => Some(FunctionId {
+                    file: self.file,
+                    id: *id,
+                }),
                 _ => None,
-            });
+            }
+        });
 
         ContractData {
-            name,
+            name: items[id].name.clone(),
             is_abstract,
             bases: bases.into_boxed_slice(),
             constructor,
@@ -740,9 +734,9 @@ impl ItemBuilder {
 
     // ── Interface Builder ────────────────────────────────────────────────
 
-    pub fn build_interface(&mut self, interface: &Interface) -> InterfaceData {
-        let node = interface.to_node_ref().node();
-        let name = interface.name().unwrap_or_default();
+    pub fn build_interface(&mut self, id: AstId<Interface>, items: &ItemTree) -> InterfaceData {
+        let ast = self.ast_node(id);
+        let node = ast.node();
         let mut bases = Vec::new();
 
         node.child_by_field_id(FieldKind::NAME.into())
@@ -757,7 +751,7 @@ impl ItemBuilder {
         }
 
         InterfaceData {
-            name,
+            name: items[id].name.clone(),
             bases: bases.into_boxed_slice(),
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
@@ -765,32 +759,27 @@ impl ItemBuilder {
 
     // ── Library Builder ──────────────────────────────────────────────────
 
-    pub fn build_library(&mut self, library: &Library) -> LibraryData {
-        let name = library.name().unwrap_or_default();
-
-        library
-            .to_node_ref()
-            .node()
+    pub fn build_library(&mut self, id: AstId<Library>, items: &ItemTree) -> LibraryData {
+        let ast = self.ast_node(id);
+        ast.node()
             .child_by_field_id(FieldKind::NAME.into())
             .map(|n| self.lower_expr(n));
 
         LibraryData {
-            name,
+            name: items[id].name.clone(),
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }
 
     // ── Udvt Builder ─────────────────────────────────────────────────────
 
-    pub fn build_udvt(&mut self, udvt: &Udvt) -> UdvtData {
-        let name = udvt.name().unwrap_or_default();
-        let underlying = Primitive::parse(&udvt.underlying().unwrap_or_default());
+    pub fn build_udvt(&mut self, id: AstId<Udvt>, items: &ItemTree) -> UdvtData {
+        let item = &items[id];
+        let underlying = Primitive::parse(&item.underlying);
+        let ast = self.ast_node(id);
+        let node = ast.node();
 
-        for node in udvt
-            .to_node_ref()
-            .node()
-            .named_children(&mut udvt.to_node_ref().node().walk())
-        {
+        for node in node.named_children(&mut node.walk()) {
             if node.kind_id() == NodeKind::IDENTIFIER {
                 self.lower_expr(node);
             }
@@ -800,7 +789,7 @@ impl ItemBuilder {
         }
 
         UdvtData {
-            name,
+            name: item.name.clone().unwrap_or_default(),
             underlying,
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
@@ -808,10 +797,11 @@ impl ItemBuilder {
 
     // ── Using Builder ────────────────────────────────────────────────────
 
-    pub fn build_using(&mut self, using: &Using) -> UsingData {
+    pub fn build_using(&mut self, id: AstId<Using>, items: &ItemTree) -> UsingData {
         let mut sources = vec![];
         let mut target = None;
-        let node = using.to_node_ref().node();
+        let ast = self.ast_node(id);
+        let node = ast.node();
 
         for child in node.named_children(&mut node.walk()) {
             match child.kind_id().into() {
@@ -830,7 +820,7 @@ impl ItemBuilder {
         UsingData {
             target,
             sources: sources.into_boxed_slice(),
-            global: using.is_global(),
+            global: items[id].is_global,
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
     }

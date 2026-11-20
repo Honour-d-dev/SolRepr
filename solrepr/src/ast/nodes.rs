@@ -1,6 +1,7 @@
 use crate::ast::ast::{AstNode, ToAstNode};
 use crate::ast::kinds::{FieldKind, NodeKind};
 use crate::hir::exprs::Name;
+use crate::hir::types::{Mutability, VariableKind, Visibility};
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
@@ -64,12 +65,81 @@ impl Function {
             _ => FunctionKind::Regular,
         }
     }
+
+    /// The written visibility, if there is one. The *default* belongs to the
+    /// container — a contract function is `internal`, an interface function
+    /// `external`, a free function has no visibility at all — so this reports
+    /// only what the source says.
+    pub fn vis(&self) -> Option<Visibility> {
+        let node = self.raw.node();
+        node.children(&mut node.walk()).find_map(|child| {
+            match child.kind_id().into() {
+                NodeKind::VISIBILITY | NodeKind::PUBLIC | NodeKind::INTERNAL => Some(
+                    Visibility::parse(self.raw.text_by_range(child.byte_range()).trim()),
+                ),
+                _ => None,
+            }
+        })
+    }
+
+    /// The written mutability, if there is one.
+    pub fn mutability(&self) -> Option<Mutability> {
+        let node = self.raw.node();
+        node.children(&mut node.walk()).find_map(|child| {
+            match child.kind_id().into() {
+                NodeKind::STATE_MUTABILITY => Some(Mutability::parse(
+                    self.raw.text_by_range(child.byte_range()).trim(),
+                )),
+                NodeKind::PAYABLE => Some(Mutability::Payable),
+                _ => None,
+            }
+        })
+    }
+
+    pub fn is_virtual(&self) -> bool {
+        let node = self.raw.node();
+        node.children(&mut node.walk())
+            .any(|child| child.kind_id() == NodeKind::VIRTUAL)
+    }
+
+    pub fn has_body(&self) -> bool {
+        self.raw
+            .node()
+            .child_by_field_id(FieldKind::BODY.into())
+            .is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Var {
     //Single wrapper for multiple var types
     raw: AstNode,
+}
+
+impl Var {
+    /// `constant`/`immutable` when written, otherwise a plain state variable.
+    pub fn kind(&self) -> VariableKind {
+        let node = self.raw.node();
+        node.children(&mut node.walk())
+            .find_map(|child| match child.kind_id().into() {
+                NodeKind::CONSTANT => Some(VariableKind::Const),
+                NodeKind::IMMUTABLE => Some(VariableKind::Immutable),
+                _ => None,
+            })
+            .unwrap_or(VariableKind::StateVariable)
+    }
+
+    pub fn vis(&self) -> Option<Visibility> {
+        let node = self.raw.node();
+        node.children(&mut node.walk()).find_map(|child| {
+            match child.kind_id().into() {
+                NodeKind::VISIBILITY => Some(Visibility::parse(
+                    self.raw.text_by_range(child.byte_range()).trim(),
+                )),
+                _ => None,
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +155,21 @@ pub struct Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Modifier {
     raw: AstNode,
+}
+
+impl Modifier {
+    pub fn is_virtual(&self) -> bool {
+        let node = self.raw.node();
+        node.named_children(&mut node.walk())
+            .any(|child| child.kind_id() == NodeKind::VIRTUAL)
+    }
+
+    pub fn has_body(&self) -> bool {
+        self.raw
+            .node()
+            .child_by_field_id(FieldKind::BODY.into())
+            .is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

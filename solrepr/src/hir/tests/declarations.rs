@@ -4,10 +4,34 @@ use crate::ast::kinds::NodeKind;
 use crate::ast::{Enum, EnumId, Event, EventId, Struct, StructId};
 use crate::capabilities::diagnostics::diagnostics;
 use crate::hir::body_map::BodyOwnerId;
+use crate::hir::diagnostics::SemanticDiagnostic;
+use crate::ir::membership::Violation;
+
+/// The membership violations the file's def map recorded, by declaration name.
+fn violations(db: &Db, file: File) -> Vec<(String, Violation)> {
+    let root = RootDb::file_source_root(db, file);
+    let analysis = db.root_def_map_analysis(root);
+    let mut found = analysis
+        .diagnostics
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            SemanticDiagnostic::IllegalMember {
+                declaration,
+                violation,
+                ..
+            } => Some((def_name(db, *declaration), *violation)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
 
 /// solc's definition-shape rules: a bodyless function or modifier must be
 /// `virtual` (except interface functions, which are implicitly virtual), and
-/// library/free functions must have an implementation.
+/// library/free functions must have an implementation. Membership is decided
+/// in the def map, so these are file diagnostics — one verdict per
+/// declaration.
 #[test]
 fn bodyless_definitions_follow_solc() {
     let (db, file) = make_test_db(
@@ -20,40 +44,23 @@ fn bodyless_definitions_follow_solc() {
             "#,
     );
 
-    let name = "cf";
     assert_eq!(
-        codes(&named_function_inference(&db, file, name)),
-        vec![DiagnosticCode::MissingVirtual],
-        "{name}",
-    );
-    for name in ["cm", "ln"] {
-        assert_eq!(
-            codes(&named_modifier_inference(&db, file, name)),
-            vec![DiagnosticCode::MissingVirtual],
-            "{name}",
-        );
-    }
-    for name in ["lh", "free"] {
-        assert_eq!(
-            codes(&named_function_inference(&db, file, name)),
-            vec![DiagnosticCode::MissingImplementation],
-            "{name}",
-        );
-    }
-    for name in ["vf", "ig"] {
-        assert!(
-            codes(&named_function_inference(&db, file, name)).is_empty(),
-            "{name}",
-        );
-    }
-    assert!(
-        codes(&named_modifier_inference(&db, file, "vm")).is_empty(),
-        "vm",
+        violations(&db, file),
+        vec![
+            ("cf".to_string(), Violation::BodylessFunctionNotVirtual),
+            ("cm".to_string(), Violation::BodylessModifier),
+            ("free".to_string(), Violation::FreeFunctionUnimplemented),
+            ("lh".to_string(), Violation::LibraryUnimplemented),
+            ("ln".to_string(), Violation::BodylessModifier),
+        ],
+        "`vf`, `vm` and `ig` are legal and must not appear",
     );
 }
 
 /// solc's placement rules: an interface can't declare modifiers at all, and
-/// `virtual` is never allowed in a library.
+/// `virtual` is never allowed in a library. One verdict per declaration — solc
+/// adds a secondary complaint (6408 plus 8063, 7801 plus 9231) that a single
+/// membership question cannot carry.
 #[test]
 fn declaration_placement_follows_solc() {
     let (db, file) = make_test_db(
@@ -67,27 +74,15 @@ fn declaration_placement_follows_solc() {
             "#,
     );
 
-    let modifier_codes = |name: &str| codes(&named_modifier_inference(&db, file, name));
-    let function_codes = |name: &str| codes(&named_function_inference(&db, file, name));
-
-    // 6408 + 8063, exactly like solc.
     assert_eq!(
-        modifier_codes("body"),
-        vec![DiagnosticCode::InferenceFailure, DiagnosticCode::MissingVirtual],
-    );
-    // 6408 only: it has a body.
-    assert_eq!(
-        modifier_codes("impl_"),
-        vec![DiagnosticCode::InferenceFailure],
-    );
-    // 3275.
-    assert_eq!(modifier_codes("vm"), vec![DiagnosticCode::VirtualInLibrary]);
-    // 7801.
-    assert_eq!(function_codes("vf"), vec![DiagnosticCode::VirtualInLibrary]);
-    // 7801 + "must be implemented".
-    assert_eq!(
-        function_codes("vfBodyless"),
-        vec![DiagnosticCode::VirtualInLibrary, DiagnosticCode::MissingImplementation],
+        violations(&db, file),
+        vec![
+            ("body".to_string(), Violation::InterfaceModifier),
+            ("impl_".to_string(), Violation::InterfaceModifier),
+            ("vf".to_string(), Violation::LibraryFunctionVirtual),
+            ("vfBodyless".to_string(), Violation::LibraryFunctionVirtual),
+            ("vm".to_string(), Violation::LibraryModifierVirtual),
+        ],
     );
 }
 
@@ -140,11 +135,9 @@ fn modifier_body_requires_the_placeholder() {
         codes_of("inComment"),
         vec![DiagnosticCode::InferenceFailure]
     );
-    // The placeholder error points at the body, 6408 at the declaration.
-    assert_eq!(
-        codes_of("iface"),
-        vec![DiagnosticCode::InferenceFailure, DiagnosticCode::InferenceFailure]
-    );
+    // The placeholder error points at the body; 6408 is a membership violation
+    // and is asserted above.
+    assert_eq!(codes_of("iface"), vec![DiagnosticCode::InferenceFailure]);
 }
 
 

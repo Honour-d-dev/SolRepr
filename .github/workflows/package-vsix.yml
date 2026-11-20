@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: package-vsix-${{ github.event.workflow_run.head_branch || github.event.release.tag_name || inputs.tag }}
@@ -177,6 +178,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ steps.tag.outputs.tag }}" vsix/*.vsix --clobber
+
+      - name: Publish VSIX files to the VS Code Marketplace
+        working-directory: extensions/vscode
+        shell: bash
+        run: |
+          set -euo pipefail
+          for vsix in "$GITHUB_WORKSPACE"/vsix/*.vsix; do
+            ./node_modules/.bin/vsce publish --oidc --packagePath "$vsix" --skip-duplicate
+          done
 
       - name: Set release notes
         shell: bash

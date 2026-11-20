@@ -20,6 +20,7 @@ use crate::ast::{
 use crate::hir::analysis::Analysis;
 use crate::hir::diagnostics::{DiagnosticSink, SemanticDiagnostic};
 use crate::ir::item_tree::{ItemId, ItemTree};
+use crate::ir::membership;
 use crate::salsa::{FileId, RootDb, SourceRootId};
 
 type Name = SmolStr;
@@ -315,6 +316,26 @@ pub struct FileCollector<'db, 'collector> {
 }
 
 impl<'db, 'collector> FileCollector<'db, 'collector> {
+    /// The membership violation for `id` as a member of `scope`'s container.
+    fn membership_error(&self, id: DefId, scope: ScopeId) -> Option<membership::Violation> {
+        let container = self.collector.scopes[scope].owner;
+        item_id(id)
+            .and_then(|item_id| self.item_tree.item(item_id))
+            .and_then(|item| membership::violation(container, item))
+    }
+
+    /// Records the violation, if any. `using` is not a member candidate — it
+    /// never enters `by_name` — so this is its only membership check.
+    fn report_member_error(&mut self, violation: membership::Violation, id: DefId, scope: ScopeId) {
+        let container = self.collector.scopes[scope].owner;
+        self.collector
+            .sink.push(SemanticDiagnostic::IllegalMember {
+            declaration: id,
+            container,
+            violation,
+        });
+    }
+
     fn collect_top(&mut self) {
         let file_scope = self.collect_file();
         let top_level = &self.item_tree.top_level;
@@ -355,6 +376,9 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
                         .usings
                         .get_or_insert_with(Vec::new)
                         .push(id);
+                    if let Some(violation) = self.membership_error(id, file_scope) {
+                        self.report_member_error(violation, id, file_scope);
+                    }
                 }
                 ItemId::Contract(id) => {
                     let c = &self.item_tree[id];
@@ -572,6 +596,9 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
                         .usings
                         .get_or_insert_with(Vec::new)
                         .push(id);
+                    if let Some(violation) = self.membership_error(id, parent_scope) {
+                        self.report_member_error(violation, id, parent_scope);
+                    }
                     continue;
                 }
                 _ => continue,
@@ -588,12 +615,12 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
         sub_scope: Option<ScopeId>,
         name: Name,
     ) {
+        let member_error = self.membership_error(id, scope_id);
         let scope = self.collector.scopes.index_mut(scope_id);
-        let enters = !(matches!(id, DefId::Var(_))
-            && matches!(scope.owner, DefId::Interface(_)));
         let ns = DefNamespace::from(&id);
         let mut previous = None;
-        if enters {
+
+        if member_error.is_none_or(|error| !error.removes_membership()) {
             match scope.by_name.entry(name.clone()) {
                 Entry::Occupied(mut entry) => {
                     let e = entry.get_mut();
@@ -615,12 +642,37 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
             self.collector
                 .report_redeclaration(id, name.clone(), previous);
         }
+
+        if let Some(violation) = member_error {
+            self.report_member_error(violation, id, scope_id);
+        }
+                
         let def_data = DefData {
             name: Some(name),
             scope: scope_id,
             child_scope: sub_scope,
         };
         self.collector.defs.insert(id, def_data);
+    }
+}
+
+/// The item a def was lowered from — the two id spaces are the same `AstId`.
+fn item_id(def: DefId) -> Option<ItemId> {
+    match def {
+        DefId::Import(id) => Some(ItemId::Import(id.id)),
+        DefId::Using(id) => Some(ItemId::Using(id.id)),
+        DefId::Udvt(id) => Some(ItemId::Udvt(id.id)),
+        DefId::Contract(id) => Some(ItemId::Contract(id.id)),
+        DefId::Interface(id) => Some(ItemId::Interface(id.id)),
+        DefId::Library(id) => Some(ItemId::Library(id.id)),
+        DefId::Function(id) => Some(ItemId::Function(id.id)),
+        DefId::Var(id) => Some(ItemId::Var(id.id)),
+        DefId::Struct(id) => Some(ItemId::Struct(id.id)),
+        DefId::Enum(id) => Some(ItemId::Enum(id.id)),
+        DefId::Event(id) => Some(ItemId::Event(id.id)),
+        DefId::Error(id) => Some(ItemId::Error(id.id)),
+        DefId::Modifier(id) => Some(ItemId::Modifier(id.id)),
+        DefId::File(_) => None,
     }
 }
 

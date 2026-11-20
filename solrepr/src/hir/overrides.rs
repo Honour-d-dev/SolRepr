@@ -162,14 +162,15 @@ struct OwnDeclaration {
     kind: DeclKind,
     is_virtual: bool,
     implemented: bool,
+    /// An `override` was written.
     marked: bool,
-    list: Option<OverrideList>,
-}
-
-struct OverrideList {
-    /// `None` when a listed path does not resolve to a contract. List
-    /// validation is then skipped rather than reporting a guessed mismatch.
+    /// The contracts named in `override(...)`, when it has a list. `None` for a
+    /// bare `override`, which names nothing.
     listed: Option<Box<[DefId]>>,
+    /// A listed name did not resolve. It carries its own diagnostic, and the
+    /// comparison is skipped so the contracts it would have named are not also
+    /// reported missing — solc stops at the unresolved name too.
+    unresolved: bool,
 }
 
 pub struct OverrideAnalyzer<'db> {
@@ -295,7 +296,7 @@ impl<'db> OverrideAnalyzer<'db> {
         }
     }
 
-    fn own_declarations(&self) -> Box<[OwnDeclaration]> {
+    fn own_declarations(&mut self) -> Box<[OwnDeclaration]> {
         let defmap = self.db.file_def_map(self.container.file());
         let Some(scope) = defmap
             .defs
@@ -315,31 +316,41 @@ impl<'db> OverrideAnalyzer<'db> {
             .collect()
     }
 
-    fn own_declaration(&self, def: DefId) -> Option<OwnDeclaration> {
+    fn own_declaration(&mut self, def: DefId) -> Option<OwnDeclaration> {
         match def {
             DefId::Function(id) => {
                 let data = self.db.function_data(id);
                 if data.kind == FunctionKind::Constructor {
                     return None;
                 }
+                let (listed, unresolved) = self.listed_contracts(
+                    &data.syntax_store.types,
+                    data.override_specifier.as_ref(),
+                );
                 Some(OwnDeclaration {
                     def,
                     kind: DeclKind::Function,
                     is_virtual: data.is_virtual || self.is_interface,
                     implemented: data.has_body,
                     marked: data.override_specifier.is_some(),
-                    list: self.override_list(&data.syntax_store.types, data.override_specifier.as_ref()),
+                    listed,
+                    unresolved,
                 })
             }
             DefId::Modifier(id) => {
                 let data = self.db.modifier_data(id);
+                let (listed, unresolved) = self.listed_contracts(
+                    &data.syntax_store.types,
+                    data.override_specifier.as_ref(),
+                );
                 Some(OwnDeclaration {
                     def,
                     kind: DeclKind::Modifier,
                     is_virtual: data.is_virtual,
                     implemented: data.has_body,
                     marked: data.override_specifier.is_some(),
-                    list: self.override_list(&data.syntax_store.types, data.override_specifier.as_ref()),
+                    listed,
+                    unresolved,
                 })
             }
             DefId::Var(id) => {
@@ -347,43 +358,65 @@ impl<'db> OverrideAnalyzer<'db> {
                 if data.vis != Visibility::Public {
                     return None;
                 }
+                let (listed, unresolved) = self.listed_contracts(
+                    &data.syntax_store.types,
+                    data.override_specifier.as_ref(),
+                );
                 Some(OwnDeclaration {
                     def,
                     kind: DeclKind::Getter,
                     is_virtual: false,
                     implemented: true,
                     marked: data.override_specifier.is_some(),
-                    list: self.override_list(&data.syntax_store.types, data.override_specifier.as_ref()),
+                    listed,
+                    unresolved,
                 })
             }
             _ => None,
         }
     }
 
-    fn override_list(
-        &self,
+    /// The contracts `override(...)` names, and whether an entry failed to
+    /// resolve. `None` when the specifier is bare: it names nothing.
+    ///
+    /// A listed name is a type reference, so an unresolvable one is reported
+    /// here — it is the list's only error, and solc stops at it rather than
+    /// also blaming the contracts it would have named. A name that resolves to
+    /// something that is not a contract is ignored, as solc ignores it.
+    fn listed_contracts(
+        &mut self,
         types: &Arena<TyName>,
         specifier: Option<&OverrideSpecifier>,
-    ) -> Option<OverrideList> {
-        let OverrideSpecifier::List { paths, .. } = specifier? else {
-            return None;
+    ) -> (Option<Box<[DefId]>>, bool) {
+        let Some(OverrideSpecifier::List { paths, .. }) = specifier else {
+            return (None, false);
         };
-        let listed = paths
-            .iter()
-            .map(|path| self.listed_contract(types, path.ty_ref))
-            .collect::<Option<Box<[_]>>>();
-        Some(OverrideList { listed })
-    }
-
-    fn listed_contract(&self, types: &Arena<TyName>, ty_ref: Option<TyNameId>) -> Option<DefId> {
-        let segments = type_path(types, ty_ref?)?;
-        match self.resolver.resolve_path(&segments)? {
-            Resolution::Type(ty) => match ty.def_id(self.db)? {
-                def @ (DefId::Contract(_) | DefId::Interface(_)) => Some(def),
-                _ => None,
-            },
-            _ => None,
+        let mut listed = Vec::with_capacity(paths.len());
+        let mut unresolved = false;
+        for path in paths.iter() {
+            let Some(ty_ref) = path.ty_ref else {
+                continue;
+            };
+            let Some(segments) = type_path(types, ty_ref) else {
+                continue;
+            };
+            match self.resolver.resolve_path(&segments) {
+                Some(Resolution::Type(ty)) => {
+                    if let Some(def @ (DefId::Contract(_) | DefId::Interface(_))) = ty.def_id(self.db)
+                    {
+                        listed.push(def);
+                    }
+                }
+                _ => {
+                    unresolved = true;
+                    self.sink.push(SemanticDiagnostic::UnresolvedType {
+                        ty_ref_id: ty_ref,
+                        name: segments.last().cloned().unwrap_or_default(),
+                    });
+                }
+            }
         }
+        (Some(listed.into_boxed_slice()), unresolved)
     }
 
     /// Direct bases in declaration order, and whether every base resolved.
@@ -485,9 +518,20 @@ impl<'db> OverrideAnalyzer<'db> {
             });
         }
 
-        if let Some(OverrideList {
-            listed: Some(listed),
-        }) = &declaration.list
+        // A bare `override` names nothing, so it cannot satisfy more than one
+        // overridden contract — the list is mandatory there, optional for one.
+        if declaration.marked && declaration.listed.is_none() && owners.len() > 1 {
+            self.sink.push(SemanticDiagnostic::OverrideListMismatch {
+                declaration: def,
+                expected: owners.clone(),
+            });
+        }
+
+        // The list as written against the contracts actually overridden. A name
+        // that did not resolve already carries its own diagnostic, and solc
+        // stops there, so the comparison is skipped rather than piling on.
+        if let Some(listed) = &declaration.listed
+            && !declaration.unresolved
         {
             let distinct: FxHashSet<DefId> = listed.iter().copied().collect();
             let owner_set: FxHashSet<DefId> = owners.iter().copied().collect();

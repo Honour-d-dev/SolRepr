@@ -208,14 +208,12 @@ define_diagnostics! {
     UnimplementedContract {
         contract: DefId,
     } => DiagnosticAnchor::Def(*contract),
-    MissingVirtual {
+    // A declaration that may not be a member of its container. The rule is the
+    // table's — see `ir::membership`.
+    IllegalMember {
         declaration: DefId,
-    } => DiagnosticAnchor::Def(*declaration),
-    MissingImplementation {
-        declaration: DefId,
-    } => DiagnosticAnchor::Def(*declaration),
-    VirtualInLibrary {
-        declaration: DefId,
+        container: DefId,
+        violation: crate::ir::membership::Violation,
     } => DiagnosticAnchor::Def(*declaration),
     UnresolvedImport {
         import: ImportId,
@@ -245,9 +243,7 @@ impl SemanticDiagnostic {
         match self {
             Self::Redeclaration { rejected, .. } => Some(rejected.file()),
             Self::DuplicateMemberSlot { declaration, .. } => Some(declaration.file()),
-            Self::MissingVirtual { declaration, .. }
-            | Self::MissingImplementation { declaration, .. }
-            | Self::VirtualInLibrary { declaration, .. } => Some(declaration.file()),
+            Self::IllegalMember { declaration, .. } => Some(declaration.file()),
             Self::InheritedMemberConflict { contract, .. } => Some(contract.file()),
             Self::UnresolvedImport { import, .. } | Self::ImportSymbolNotFound { import, .. } => {
                 Some(import.file)
