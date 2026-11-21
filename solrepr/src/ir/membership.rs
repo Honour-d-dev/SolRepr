@@ -1,37 +1,3 @@
-//! Container membership: which declarations a container may hold.
-//!
-//! A declaration that cannot belong in its container is filtered where
-//! membership is decided, so nothing downstream needs a filter. The container
-//! is the owning `DefId`; the member is its `Item`, whose digested facts
-//! (`vis`, `kind`, `is_virtual`, `has_body`, `mutability`) answer the rule
-//! without reaching into HIR.
-//!
-//! The table is the conformance record: every row was checked against solc, and
-//! two rules a "library holds no variables" reading would have added —
-//! `constant` variables and `external` functions — are legal and deliberately
-//! absent.
-//!
-//! Not covered here:
-//!
-//! - File-level non-constant variables: the grammar accepts only
-//!   `constant_variable_declaration` at file level, so `uint x;` never becomes
-//!   an item — the rejection is already a parse error, not a rule.
-//! - A container nested in a container: the grammar's member walk
-//!   drops it, so it never reaches this table. Left to `solc` until the
-//!   compiler layer reports.
-//! - Struct members: they are not defs, so struct correctness stays in the
-//!   inferer.
-//! - Rules needing an initializer, the folded member set, or base
-//!   linearization (`constant` without a value, "should be marked abstract",
-//!   interface bases): those are structural and stay in inference.
-//!
-//! One violation per declaration: the gate only needs "may this be a member",
-//! and solc's secondary complaint on the same declaration is not something a
-//! single membership answer can carry.
-//!
-//! Only the variable rules actually remove the name — see
-//! [`Violation::removes_membership`].
-
 use crate::ast::FunctionKind;
 use crate::hir::types::{Mutability, VariableKind, Visibility};
 use crate::ir::def_map::DefId;
@@ -65,13 +31,6 @@ pub enum Violation {
 impl Violation {
     /// Whether the violation also removes the declaration from its container's
     /// namespace.
-    ///
-    /// Only variables are member candidates, so only their rules change what
-    /// resolves. solc still resolves a declaration it rejected — a bodyless
-    /// non-virtual function keeps its references and reports them as pointer
-    /// or call errors — so the rest are reported at the declaration and stay
-    /// reachable, which keeps one invalid declaration from cascading into
-    /// "unresolved" errors at every use.
     pub fn removes_membership(self) -> bool {
         matches!(self, Self::InterfaceVariable | Self::LibraryStateVariable)
     }

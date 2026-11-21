@@ -18,7 +18,7 @@ use crate::worker::{Job, coalesce, debounce};
 
 /// A pass answers an edit, so it is worth waiting out a burst of keystrokes
 /// before converting anything.
-const DEBOUNCE: Duration = Duration::from_millis(50);
+const DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// One conversion pass: the snapshot to read, and which documents to convert
 /// with the version and open epoch each was read at.
