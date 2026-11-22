@@ -179,15 +179,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ steps.tag.outputs.tag }}" vsix/*.vsix --clobber
 
-      - name: Publish VSIX files to the VS Code Marketplace
-        working-directory: extensions/vscode
-        shell: bash
-        run: |
-          set -euo pipefail
-          for vsix in "$GITHUB_WORKSPACE"/vsix/*.vsix; do
-            ./node_modules/.bin/vsce publish --oidc --packagePath "$vsix" --skip-duplicate
-          done
-
       - name: Set release notes
         shell: bash
         env:
@@ -210,3 +201,12 @@ jobs:
           else
             echo "no dist-manifest.json asset on $tag; leaving the release body unchanged"
           fi
+
+      - name: Publish VSIX files to the VS Code Marketplace
+        working-directory: extensions/vscode
+        shell: bash
+        run: |
+          set -euo pipefail
+          for vsix in "$GITHUB_WORKSPACE"/vsix/*.vsix; do
+            ./node_modules/.bin/vsce publish --oidc --packagePath "$vsix" --skip-duplicate
+          done
