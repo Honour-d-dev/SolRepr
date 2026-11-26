@@ -7,8 +7,8 @@ use rustc_hash::FxHashSet;
 
 use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::salsa::{Db, RootDb};
-use crate::workspace::watch::ChangeEvent;
 use crate::workspace::diff::{WorkspaceDiff, diff};
+use crate::workspace::watch::ChangeEvent;
 use crate::workspace::{LoadedFile, Package, PackageId, RootWithFiles, WorkspaceWithFiles};
 
 /// A throwaway tree on disk: reload reads newly discovered paths from it.
@@ -60,10 +60,7 @@ fn with_dependency(tree: &TempTree) {
 }
 
 /// What the reload worker would hand the server for this discovery.
-fn reload(
-    db: &mut Db,
-    workspace: WorkspaceWithFiles<Utf8PathBuf>,
-) -> WorkspaceDiff<LoadedFile> {
+fn reload(db: &mut Db, workspace: WorkspaceWithFiles<Utf8PathBuf>) -> WorkspaceDiff<LoadedFile> {
     let (_, prepared) = diff(&db.workspace(), workspace);
     let prepared: WorkspaceDiff<LoadedFile> = prepared.into();
     db.reload_workspace(prepared.clone());
@@ -84,7 +81,10 @@ fn unresolved(db: &Db, file: crate::salsa::File) -> bool {
 fn adding_a_dependency_root_clears_an_unresolved_import() {
     let tree = TempTree::new("add_dependency");
     tree.write("foundry.toml", "[profile.default]\n");
-    tree.write("src/A.sol", "import \"../lib/dep/Dep.sol\";\ncontract A {}\n");
+    tree.write(
+        "src/A.sol",
+        "import \"../lib/dep/Dep.sol\";\ncontract A {}\n",
+    );
 
     let mut db = Db::new(tree.discover());
     let a = db.file(&tree.path("src/A.sol")).expect("A is indexed");
@@ -95,7 +95,10 @@ fn adding_a_dependency_root_clears_an_unresolved_import() {
 
     assert!(!diff.is_empty());
     assert_eq!(
-        diff.roots_added.iter().map(|root| root.path.clone()).collect::<Vec<_>>(),
+        diff.roots_added
+            .iter()
+            .map(|root| root.path.clone())
+            .collect::<Vec<_>>(),
         vec![tree.path("lib/dep")]
     );
     assert_eq!(
@@ -112,12 +115,17 @@ fn adding_a_dependency_root_clears_an_unresolved_import() {
 fn removing_a_root_reports_the_import_as_unresolved() {
     let tree = TempTree::new("remove_root");
     tree.write("foundry.toml", "[profile.default]\n");
-    tree.write("src/A.sol", "import \"../lib/dep/Dep.sol\";\ncontract A {}\n");
+    tree.write(
+        "src/A.sol",
+        "import \"../lib/dep/Dep.sol\";\ncontract A {}\n",
+    );
     with_dependency(&tree);
 
     let mut db = Db::new(tree.discover());
     let a = db.file(&tree.path("src/A.sol")).expect("A is indexed");
-    let dep = db.file(&tree.path("lib/dep/Dep.sol")).expect("Dep is indexed");
+    let dep = db
+        .file(&tree.path("lib/dep/Dep.sol"))
+        .expect("Dep is indexed");
     assert!(!unresolved(&db, a));
 
     fs::remove_dir_all(tree.root.join("lib/dep")).expect("remove the dependency");
@@ -225,7 +233,10 @@ fn a_nested_root_takes_its_files_from_the_surviving_parent() {
         .file(&Utf8PathBuf::from("/proj/lib/dep/Dep.sol"))
         .expect("Dep is indexed");
     let parent = db.file_source_root(dep).expect("Dep has a root");
-    assert!(parent.files(&db).contains(&dep), "the parent owns it to begin with");
+    assert!(
+        parent.files(&db).contains(&dep),
+        "the parent owns it to begin with"
+    );
 
     // Discovery now claims the file for a root of its own. The parent is still
     // discovered, with the same path, package and flag, so it survives.
@@ -272,16 +283,27 @@ fn a_root_replaced_in_place_keeps_its_file_handles_and_text() {
 
     let diff = reload(
         &mut db,
-        discovered("/replaced/root", "/replaced/other", &["/replaced/root/A.sol"]),
+        discovered(
+            "/replaced/root",
+            "/replaced/other",
+            &["/replaced/root/A.sol"],
+        ),
     );
 
     assert!(!diff.is_empty());
     assert_eq!(
-        diff.roots_added.iter().map(|root| root.path.clone()).collect::<Vec<_>>(),
+        diff.roots_added
+            .iter()
+            .map(|root| root.path.clone())
+            .collect::<Vec<_>>(),
         vec![Utf8PathBuf::from("/replaced/root")],
         "the root is replaced because its package moved"
     );
-    assert_eq!(db.file(&path), Some(a), "the handle survives the replacement");
+    assert_eq!(
+        db.file(&path),
+        Some(a),
+        "the handle survives the replacement"
+    );
     assert_eq!(db.rope(a).to_string(), "contract Edited {}");
 
     // The handle must be in the *new* root's list: a reload that keeps the
@@ -356,8 +378,32 @@ fn a_file_deleted_on_disk_reports_the_import_as_unresolved() {
         "the vanished path is retired"
     );
     assert!(db.file(&tree.path("src/B.sol")).is_none());
-    assert!(db.file_source_root(b).is_some(), "the root mapping survives");
+    assert!(
+        db.file_source_root(b).is_some(),
+        "the root mapping survives"
+    );
     assert!(unresolved(&db, a), "the import is reported again");
 }
 
+/// The root list is non-salsa state behind `FilesRevision`; `source_roots`
+/// must read the revision so a reload that adds a root re-runs the query.
+#[salsa::tracked]
+fn root_paths(db: &dyn RootDb) -> Vec<Utf8PathBuf> {
+    db.source_roots()
+        .iter()
+        .map(|root| root.root(db).clone())
+        .collect()
+}
 
+#[test]
+fn source_roots_invalidates_when_a_reload_adds_a_root() {
+    let tree = TempTree::new("source_roots_revision");
+    tree.write("foundry.toml", "[profile.default]\n");
+    tree.write("src/A.sol", "contract A {}\n");
+    let mut db = Db::new(tree.discover());
+    assert_eq!(root_paths(&db).len(), 1);
+
+    with_dependency(&tree);
+    reload(&mut db, tree.discover());
+    assert_eq!(root_paths(&db).len(), 2, "{:?}", root_paths(&db));
+}

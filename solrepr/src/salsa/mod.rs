@@ -6,7 +6,7 @@ pub mod interned_db;
 pub mod root_db;
 
 pub use db::Db;
-pub use db::{File, FileId, DbSnapshot, SourceRootId};
+pub use db::{DbSnapshot, File, FileId, SourceRootId};
 pub use hir_db::HirDb;
 pub use root_db::RootDb;
 

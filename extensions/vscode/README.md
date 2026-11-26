@@ -85,12 +85,16 @@ Planned:
 
 - VS Code 1.91 or newer.
 - Analysis only (for now) — Pair with [Solidity Language & Themes](https://marketplace.visualstudio.com/items?itemName=tintinweb.vscode-solidity-language) (`tintinweb.vscode-solidity-language`), for syntax-highlighting and themes.
+- **The universal package ships no server binary.** Install the platform package for
+  `linux-x64`, `darwin-arm64` or `win32-x64`, or build the server yourself with the command in
+  [Build server binary from source](https://github.com/Honour-d-dev/SolRepr#build-server-binary-from-source)
+  — it lands in `~/.cargo/bin`, which SolRepr probes directly.
 
 ## Settings
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `solrepr.serverPath` | `""` | Path to the server binary. Overrides the bundled copy. |
+| `solrepr.serverPath` | `""` | Path to the server binary. Overrides the bundled copy, `PATH`, and `~/.cargo/bin`. |
 | `solrepr.trace.server` | `"verbose"` | LSP trace level: `off`, `messages`, `verbose`. |
 
 ## Commands

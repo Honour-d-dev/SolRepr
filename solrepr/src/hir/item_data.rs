@@ -10,7 +10,6 @@ use crate::ast::{
     Import, ImportKind, Interface, Library, Modifier, NodeRange, Struct, ToAstNode, Udvt, Using,
     Var,
 };
-use crate::ir::item_tree::{ItemId, ItemTree};
 use crate::hir::body_map::{Local, LocalId};
 use crate::hir::exprs::{Expr, ExprBuilder, ExprId, Name};
 use crate::hir::syntax_store::{SourceMap, SyntaxStore};
@@ -18,11 +17,11 @@ use crate::hir::types::{
     Location, Mutability, Primitive, RefKind, TyName, TyNameId, TypeBuilder, VariableKind,
     Visibility,
 };
+use crate::ir::item_tree::{ItemId, ItemTree};
 use crate::salsa::FileId;
 
 pub type FieldId = Idx<Field>;
 pub type VariantId = Idx<Variant>;
-
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum SemanticId {
@@ -34,7 +33,6 @@ pub enum SemanticId {
     Expr(ExprId),
     Type(TyNameId),
 }
-
 
 #[derive(Default, PartialEq, Eq)]
 pub struct ImportData {
@@ -162,9 +160,7 @@ pub struct UsingData {
 #[derive(Debug, PartialEq, Eq)]
 pub enum OverrideSpecifier {
     Bare,
-    List {
-        paths: Box<[OverridePath]>,
-    },
+    List { paths: Box<[OverridePath]> },
 }
 
 /// One contract named in `override(A.B, C)`.
@@ -274,8 +270,8 @@ impl ItemBuilder {
                 let mut alias_cursor = import_node.walk();
                 let mut names = import_node
                     .children_by_field_id(FieldKind::IMPORT_NAME.into(), &mut name_cursor);
-                let mut aliases = import_node
-                    .children_by_field_id(FieldKind::ALIAS.into(), &mut alias_cursor);
+                let mut aliases =
+                    import_node.children_by_field_id(FieldKind::ALIAS.into(), &mut alias_cursor);
                 for symbol in symbols {
                     let expr = if let Some(alias) = symbol.alias {
                         let alias_node = aliases.next().unwrap();
@@ -302,7 +298,10 @@ impl ItemBuilder {
         let node = import_node
             .child_by_field_id(FieldKind::SOURCE.into())
             .unwrap();
-        let path = self.root().text_by_range(node.byte_range()).trim_matches(['"', '\'']);
+        let path = self
+            .root()
+            .text_by_range(node.byte_range())
+            .trim_matches(['"', '\'']);
         let expr = Expr::Path(path.into());
         self.alloc_expr(expr, node);
 
@@ -333,7 +332,7 @@ impl ItemBuilder {
                 }
                 NodeKind::IDENTIFIER => {
                     if let Some(expr_id) = self.lower_expr(child) {
-                        self.syntax_store.name_expr = Some(expr_id);
+                        self.syntax_store.name = Some(expr_id);
                     }
                 }
                 NodeKind::EXPRESSION => {
@@ -389,8 +388,9 @@ impl ItemBuilder {
         let node = ast.node();
         let mut fields = Arena::new();
 
-        node.child_by_field_id(FieldKind::NAME.into())
-            .map(|n| self.lower_expr(n));
+        self.syntax_store.name = node
+            .child_by_field_id(FieldKind::NAME.into())
+            .and_then(|n| self.lower_expr(n));
 
         if let Some(body) = node.child_by_field_id(FieldKind::BODY.into()) {
             for member in body.named_children(&mut body.walk()) {
@@ -442,8 +442,9 @@ impl ItemBuilder {
         let node = ast.node();
         let mut variants = Arena::new();
 
-        node.child_by_field_id(FieldKind::NAME.into())
-            .map(|n| self.lower_expr(n));
+        self.syntax_store.name = node
+            .child_by_field_id(FieldKind::NAME.into())
+            .and_then(|n| self.lower_expr(n));
 
         if let Some(body) = node.child_by_field_id(FieldKind::BODY.into()) {
             for value in body.named_children(&mut body.walk()) {
@@ -477,9 +478,10 @@ impl ItemBuilder {
         let mut anonymous = false;
 
         if let Some(expr_id) = node
-            .child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n))
+            .child_by_field_id(FieldKind::NAME.into())
+            .and_then(|n| self.lower_expr(n))
         {
-            self.syntax_store.name_expr = Some(expr_id);
+            self.syntax_store.name = Some(expr_id);
         }
 
         for child in node.children(&mut node.walk()) {
@@ -512,9 +514,10 @@ impl ItemBuilder {
         let mut parameters = Arena::new();
 
         if let Some(expr_id) = node
-            .child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n))
+            .child_by_field_id(FieldKind::NAME.into())
+            .and_then(|n| self.lower_expr(n))
         {
-            self.syntax_store.name_expr = Some(expr_id);
+            self.syntax_store.name = Some(expr_id);
         }
 
         for child in node.named_children(&mut node.walk()) {
@@ -531,7 +534,6 @@ impl ItemBuilder {
     }
 
     // ── Modifier Builder ─────────────────────────────────────────────────
-    
 
     pub fn build_modifier(&mut self, id: AstId<Modifier>, items: &ItemTree) -> ModifierData {
         let ast = self.ast_node(id);
@@ -559,8 +561,7 @@ impl ItemBuilder {
             is_virtual: item.is_virtual,
             override_specifier,
             has_body: item.has_body,
-            has_placeholder: body
-                .is_some_and(|body| self.body_has_placeholder(body)),
+            has_placeholder: body.is_some_and(|body| self.body_has_placeholder(body)),
             parameters,
             syntax_store: std::mem::take(&mut self.syntax_store),
         }
@@ -568,7 +569,8 @@ impl ItemBuilder {
 
     fn body_has_placeholder(&self, node: Node) -> bool {
         if node.kind_id() == NodeKind::EXPRESSION_STATEMENT {
-            return node.named_children(&mut node.walk())
+            return node
+                .named_children(&mut node.walk())
                 .find(|child| child.kind_id() == NodeKind::EXPRESSION)
                 .is_some_and(|expr| self.root().text_by_range(expr.byte_range()).trim() == "_");
         }
@@ -649,9 +651,7 @@ impl ItemBuilder {
                     name = self.root().text_by_range(child.byte_range()).trim().into();
                     name_range = Some(NodeRange::from(&child));
                 }
-                NodeKind::TYPE_NAME => {
-                    ty = self.lower_type(child).map(|ty_ref| (ty_ref, child))
-                }
+                NodeKind::TYPE_NAME => ty = self.lower_type(child).map(|ty_ref| (ty_ref, child)),
                 NodeKind::MEMORY => location = Some(Location::Memory),
                 NodeKind::STORAGE => location = Some(Location::Storage(RefKind::Pointer)),
                 NodeKind::CALLDATA => location = Some(Location::Calldata),
@@ -697,8 +697,9 @@ impl ItemBuilder {
             .any(|child| child.kind_id() == NodeKind::ABSTRACT);
         let mut bases = Vec::new();
 
-        node.child_by_field_id(FieldKind::NAME.into())
-            .map(|n| self.lower_expr(n));
+        self.syntax_store.name = node
+            .child_by_field_id(FieldKind::NAME.into())
+            .and_then(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
             if child.kind_id() == NodeKind::INHERITANCE_SPECIFIER
@@ -739,8 +740,9 @@ impl ItemBuilder {
         let node = ast.node();
         let mut bases = Vec::new();
 
-        node.child_by_field_id(FieldKind::NAME.into())
-            .map(|n| self.lower_expr(n));
+        self.syntax_store.name = node
+            .child_by_field_id(FieldKind::NAME.into())
+            .and_then(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
             if child.kind_id() == NodeKind::INHERITANCE_SPECIFIER
@@ -761,9 +763,10 @@ impl ItemBuilder {
 
     pub fn build_library(&mut self, id: AstId<Library>, items: &ItemTree) -> LibraryData {
         let ast = self.ast_node(id);
-        ast.node()
+        self.syntax_store.name = ast
+            .node()
             .child_by_field_id(FieldKind::NAME.into())
-            .map(|n| self.lower_expr(n));
+            .and_then(|n| self.lower_expr(n));
 
         LibraryData {
             name: items[id].name.clone(),
@@ -781,7 +784,7 @@ impl ItemBuilder {
 
         for node in node.named_children(&mut node.walk()) {
             if node.kind_id() == NodeKind::IDENTIFIER {
-                self.lower_expr(node);
+                self.syntax_store.name = self.lower_expr(node);
             }
             if node.kind_id() == NodeKind::PRIMITIVE_TYPE {
                 self.lower_type(node);
@@ -825,4 +828,3 @@ impl ItemBuilder {
         }
     }
 }
-

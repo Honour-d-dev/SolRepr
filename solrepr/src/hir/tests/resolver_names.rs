@@ -256,3 +256,19 @@ fn using_candidates_are_filtered_by_receiver_convertibility() {
         "got {names:?}"
     );
 }
+
+/// solc's keyword table is spelling-exact — `uint08` is a legal identifier, not
+/// a width — so it resolves to the declaration. A normalizing `Primitive::parse`
+/// would shadow it with `uint8`, since primitives resolve before declarations.
+#[test]
+fn noncanonical_primitive_spellings_resolve_to_declarations() {
+    let (db, file) = make_test_db("contract C { bool uint08; function probe() external {} }");
+    let resolver = Resolver::build(&db, find_function(&db, file, "probe"));
+    assert!(
+        matches!(
+            resolver.resolve_name(&"uint08".into(), None, 0),
+            Some(Resolution::Var(_))
+        ),
+        "uint08 is the state variable, not uint8"
+    );
+}

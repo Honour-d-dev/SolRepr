@@ -7,15 +7,15 @@ pub mod docs;
 pub mod exprs;
 pub mod inference;
 pub mod item_data;
+pub mod linearize;
 pub mod member_lookup;
 pub mod member_map;
 pub mod overrides;
 pub mod resolution;
 pub mod resolver;
 pub mod signatures;
-pub mod types;
-pub mod linearize;
 pub mod syntax_store;
+pub mod types;
 
 #[cfg(test)]
 pub mod tests;

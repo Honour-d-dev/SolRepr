@@ -119,7 +119,10 @@ impl TypeDefId {
     /// A contract, interface or library — the kinds whose members come from a
     /// scope rather than from a field list.
     pub fn is_contract_like(self) -> bool {
-        matches!(self, Self::Contract(_) | Self::Interface(_) | Self::Library(_))
+        matches!(
+            self,
+            Self::Contract(_) | Self::Interface(_) | Self::Library(_)
+        )
     }
 }
 
@@ -236,7 +239,6 @@ pub enum DefNamespace {
 }
 
 impl DefNamespace {
-    
     pub fn is_overloadable(&self) -> bool {
         matches!(self, DefNamespace::Functions | DefNamespace::Events)
     }
@@ -307,6 +309,41 @@ impl DefMap {
             unresolved: FxHashMap::default(),
         }
     }
+
+    /// The file's own declarations, through the scopes its members own. Skips what
+    /// imports bound, and declarations the def map withheld (the gate keeps their
+    /// `DefData` but not their name).
+    pub fn owners(&self, file: FileId) -> Vec<DefId> {
+        let Some(data) = self.files.get(&file) else {
+            return Vec::new();
+        };
+        let mut owners = Vec::new();
+        let mut pending = vec![data.scope];
+        let mut visited = FxHashSet::default();
+        while let Some(scope_id) = pending.pop() {
+            if !visited.insert(scope_id) {
+                continue;
+            }
+            let scope = &self.scopes[scope_id];
+            for group in scope.by_name.values() {
+                for &def in group.defs.iter() {
+                    if def.file() != file {
+                        continue;
+                    }
+                    owners.push(def);
+                    if let Some(child) = self.defs.get(&def).and_then(|data| data.child_scope) {
+                        pending.push(child);
+                    }
+                }
+            }
+            for &using in scope.usings.iter().flatten() {
+                if using.file() == file {
+                    owners.push(using);
+                }
+            }
+        }
+        owners
+    }
 }
 
 pub struct FileCollector<'db, 'collector> {
@@ -328,8 +365,7 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
     /// never enters `by_name` — so this is its only membership check.
     fn report_member_error(&mut self, violation: membership::Violation, id: DefId, scope: ScopeId) {
         let container = self.collector.scopes[scope].owner;
-        self.collector
-            .sink.push(SemanticDiagnostic::IllegalMember {
+        self.collector.sink.push(SemanticDiagnostic::IllegalMember {
             declaration: id,
             container,
             violation,
@@ -646,7 +682,7 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
         if let Some(violation) = member_error {
             self.report_member_error(violation, id, scope_id);
         }
-                
+
         let def_data = DefData {
             name: Some(name),
             scope: scope_id,
@@ -703,10 +739,7 @@ pub struct Collector<'db> {
 }
 
 impl<'db> Collector<'db> {
-    pub fn collect_defmap(
-        db: &'db dyn RootDb,
-        source_root_id: SourceRootId,
-    ) -> Analysis<DefMap> {
+    pub fn collect_defmap(db: &'db dyn RootDb, source_root_id: SourceRootId) -> Analysis<DefMap> {
         let files = source_root_id.files(db).as_ref();
 
         let mut collector = Collector {
@@ -833,7 +866,7 @@ impl<'db> Collector<'db> {
     }
 
     /// Binds an import into its importing file's scope.
-    /// `false` indicates the depdata isnt available or ready yet (in the case the defmaps are cyclic) 
+    /// `false` indicates the depdata isnt available or ready yet (in the case the defmaps are cyclic)
     fn extend_scope(
         &mut self,
         import: ImportId,
@@ -1021,7 +1054,13 @@ impl<'db> Collector<'db> {
         if self.root == scope.root {
             self.scopes.index(scope.scope).by_name.get(name).cloned()
         } else {
-            self.db.root_def_map(scope.root).scopes.index(scope.scope).by_name.get(name).cloned()
+            self.db
+                .root_def_map(scope.root)
+                .scopes
+                .index(scope.scope)
+                .by_name
+                .get(name)
+                .cloned()
         }
     }
 }
@@ -1074,4 +1113,3 @@ impl ImportResolver {
         }
     }
 }
-

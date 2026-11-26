@@ -3,7 +3,9 @@ use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::ir::def_map::*;
 use crate::salsa::Db;
 use crate::salsa::root_db::RootDb;
-use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles};
+use crate::workspace::{
+    LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles,
+};
 use camino::Utf8PathBuf;
 use ropey::Rope;
 
@@ -291,4 +293,62 @@ fn narrow_sums_admit_exactly_their_def_kinds() {
             assert_eq!(DefId::from(f), def);
         }
     }
+}
+
+/// The per-file owner set: every declaration the file contains, walked through
+/// the scopes its members own, and nothing an import bound into its scope.
+#[test]
+fn owners_are_the_files_own_declarations() {
+    let db = db_with(&[
+        ("src/Dep.sol", "contract Dep { uint256 d; }"),
+        (
+            "src/Test.sol",
+            "import {Dep} from \"./Dep.sol\";\n\
+             library L { function l(uint256 v) internal pure returns (uint256) { return v; } }\n\
+             using L for uint256;\n\
+             contract C { struct S { uint256 a; } uint256 x; function f() external {} }",
+        ),
+    ]);
+    let file = db
+        .file(&Utf8PathBuf::from(format!("{ROOT}/src/Test.sol")))
+        .unwrap();
+    let defmap = db.file_def_map(file);
+
+    let mut kinds = defmap
+        .owners(file)
+        .into_iter()
+        .map(|def| match def {
+            DefId::Library(_) => "library",
+            DefId::Function(_) => "function",
+            DefId::Using(_) => "using",
+            DefId::Contract(_) => "contract",
+            DefId::Struct(_) => "struct",
+            DefId::Var(_) => "var",
+            _ => "other",
+        })
+        .collect::<Vec<_>>();
+    kinds.sort();
+    assert_eq!(
+        kinds,
+        [
+            "contract", "function", "function", "library", "struct", "using", "var"
+        ],
+        "the file's own declarations, including `using` and both functions"
+    );
+
+    // The named import binds `Dep` into this file's scope; it belongs to its own
+    // file's collection.
+    let dep = db
+        .file(&Utf8PathBuf::from(format!("{ROOT}/src/Dep.sol")))
+        .unwrap();
+    let imported = defmap
+        .defs
+        .keys()
+        .copied()
+        .find(|def| matches!(def, DefId::Contract(_)) && def.file() == dep)
+        .expect("the dependency declares a contract");
+    assert!(
+        !defmap.owners(file).contains(&imported),
+        "an imported def is not one of this file's owners"
+    );
 }

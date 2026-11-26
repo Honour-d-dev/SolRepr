@@ -202,6 +202,26 @@ jobs:
             echo "no dist-manifest.json asset on $tag; leaving the release body unchanged"
           fi
 
+      - name: Publish VSIX files to Open VSX
+        working-directory: extensions/vscode
+        shell: bash
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          set -euo pipefail
+          # The namespace must exist and the token must own it; until the
+          # solrepr namespace is granted, leave the registry alone.
+          if [ -z "${OVSX_PAT:-}" ]; then
+            echo "OVSX_PAT is not set; skipping the Open VSX publish"
+            exit 0
+          fi
+          # ovsx reads the target platform from each package's manifest, so the
+          # platform VSIXs become solrepr.solrepr@<target> and the universal one
+          # is the fallback.
+          for vsix in "$GITHUB_WORKSPACE"/vsix/*.vsix; do
+            ./node_modules/.bin/ovsx publish --packagePath "$vsix" --skip-duplicate
+          done
+
       - name: Publish VSIX files to the VS Code Marketplace
         working-directory: extensions/vscode
         shell: bash

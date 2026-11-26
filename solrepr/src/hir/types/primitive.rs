@@ -12,6 +12,10 @@ pub enum Primitive {
     Uint(u16),
     Int(u16),
     FixedBytes(u8),
+    /// M bits in steps of 8 up to 256, N decimal places up to 80. Bare
+    /// `fixed`/`ufixed` spell `fixed128x18`/`ufixed128x18`.
+    Fixed(u16, u8),
+    UFixed(u16, u8),
     Undefined,
 }
 
@@ -26,6 +30,8 @@ impl fmt::Display for Primitive {
             Primitive::Uint(n) => write!(f, "uint{n}"),
             Primitive::Int(n) => write!(f, "int{n}"),
             Primitive::FixedBytes(n) => write!(f, "bytes{n}"),
+            Primitive::Fixed(m, n) => write!(f, "fixed{m}x{n}"),
+            Primitive::UFixed(m, n) => write!(f, "ufixed{m}x{n}"),
             Primitive::Undefined => write!(f, "undefined"),
         }
     }
@@ -115,42 +121,73 @@ impl Primitive {
         acc
     }
 
+    /// Spelling-exact, not just width-exact: solc's keyword table holds canonical
+    /// spellings only, so `uint08` is a legal user identifier, not a uint.
+    /// Resolution shadows declarations with primitives, so leniency here would
+    /// misresolve the names solc accepts.
     #[inline]
     pub fn parse(ty: &str) -> Primitive {
         match ty {
-            "address" => Primitive::Address,
-            "address payable" => Primitive::AddressPayable,
-            // `payable(x)` is the conversion to `address payable`; the keyword
-            // is anonymous in the grammar, so the callee is synthesized as this
-            // name and the call flows through the ordinary cast path.
-            "payable" => Primitive::AddressPayable,
-            "bool" => Primitive::Boolean,
-            "bytes" => Primitive::Bytes,
-            "string" => Primitive::String,
-            "uint" => Primitive::Uint(256),
-            "int" => Primitive::Int(256),
-            s if s
-                .strip_prefix("uint")
-                .and_then(|size| size.parse::<u16>().ok())
-                .is_some_and(|size| (8..=256).contains(&size) && size % 8 == 0) =>
-            {
-                Primitive::Uint(s[4..].parse().unwrap())
-            }
-            s if s
-                .strip_prefix("int")
-                .and_then(|size| size.parse::<u16>().ok())
-                .is_some_and(|size| (8..=256).contains(&size) && size % 8 == 0) =>
-            {
-                Primitive::Int(s[3..].parse().unwrap())
-            }
-            s if s
-                .strip_prefix("bytes")
-                .and_then(|size| size.parse::<u8>().ok())
-                .is_some_and(|size| (1..=32).contains(&size)) =>
-            {
-                Primitive::FixedBytes(s[5..].parse().unwrap())
-            }
-            _ => Primitive::Undefined, //@TODO remove unknown and make this optional
+            "address" => return Primitive::Address,
+            "address payable" => return Primitive::AddressPayable,
+            // `payable(x)` is the conversion to `address payable.
+            "payable" => return Primitive::AddressPayable,
+            "bool" => return Primitive::Boolean,
+            "bytes" => return Primitive::Bytes,
+            "string" => return Primitive::String,
+            "uint" => return Primitive::Uint(256),
+            "int" => return Primitive::Int(256),
+            "fixed" => return Primitive::Fixed(128, 18),
+            "ufixed" => return Primitive::UFixed(128, 18),
+            _ => {}
         }
+       
+        if let Some(size) = ty.strip_prefix("uint").and_then(canonical_width)
+            && (8..=256).contains(&size)
+            && size % 8 == 0
+        {
+            return Primitive::Uint(size);
+        }
+        if let Some(size) = ty.strip_prefix("int").and_then(canonical_width)
+            && (8..=256).contains(&size)
+            && size % 8 == 0
+        {
+            return Primitive::Int(size);
+        }
+        if let Some(size) = ty.strip_prefix("bytes").and_then(canonical_width)
+            && (1..=32).contains(&size)
+        {
+            return Primitive::FixedBytes(size as u8);
+        }
+        if let Some((m, n)) = ty.strip_prefix("ufixed").and_then(split_widths)
+            && m % 8 == 0
+            && (8..=256).contains(&m)
+            && n <= 80
+        {
+            return Primitive::UFixed(m, n as u8);
+        }
+        if let Some((m, n)) = ty.strip_prefix("fixed").and_then(split_widths)
+            && m % 8 == 0
+            && (8..=256).contains(&m)
+            && n <= 80
+        {
+            return Primitive::Fixed(m, n as u8);
+        }
+        Primitive::Undefined //@TODO remove unknown and make this optional
     }
+}
+
+/// The width `digits` spells when the spelling is canonical — no canonical
+/// width carries a leading zero, so any that does is a user identifier.
+fn canonical_width(digits: &str) -> Option<u16> {
+    if digits.len() > 1 && digits.starts_with('0') {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The `MxN` halves of a fixed-point spelling, each canonical.
+fn split_widths(rest: &str) -> Option<(u16, u16)> {
+    let (m, n) = rest.split_once('x')?;
+    Some((canonical_width(m)?, canonical_width(n)?))
 }

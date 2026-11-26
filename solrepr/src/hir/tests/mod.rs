@@ -1,12 +1,12 @@
 use crate::hir::body_map::*;
+use crate::hir::diagnostics::*;
 use crate::hir::exprs::*;
 use crate::hir::inference::*;
 use crate::hir::item_data::*;
 use crate::hir::resolution::*;
-use crate::hir::diagnostics::*;
+use crate::hir::syntax_store::semantic_at;
 use crate::hir::types::*;
 use crate::ir::def_map::*;
-use crate::hir::syntax_store::semantic_at;
 use crate::salsa::hir_db::def_name;
 use crate::salsa::root_db::RootDb;
 use crate::salsa::{Db, File, HirDb};
@@ -232,10 +232,16 @@ fn cycle_recovery_converges_on_the_declared_types() {
         // The cycle iterates to a fixed point, so the declared type survives
         // instead of the whole owner degrading to `Invalid`.
         for (expr, _) in data.syntax_store.exprs.iter() {
-            assert!(!inference.expr_ty(expr).is_invalid(&db), "{var:?} initializer");
+            assert!(
+                !inference.expr_ty(expr).is_invalid(&db),
+                "{var:?} initializer"
+            );
         }
         for (ty_ref_id, _) in data.syntax_store.types.iter() {
-            assert!(!inference.ty(ty_ref_id).is_invalid(&db), "{var:?} declared type");
+            assert!(
+                !inference.ty(ty_ref_id).is_invalid(&db),
+                "{var:?} declared type"
+            );
         }
     }
 }

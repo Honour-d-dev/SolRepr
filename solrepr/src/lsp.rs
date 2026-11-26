@@ -1,18 +1,21 @@
 use crate::capabilities::completion::completion;
 use crate::capabilities::definition::definition;
-use crate::capabilities::diagnostics::{DiagnosedFile, DiagnosticRequest, DiagnosticResult, DiagnosticsWorker};
+use crate::capabilities::diagnostics::{
+    DiagnosedFile, DiagnosticRequest, DiagnosticResult, DiagnosticsWorker,
+};
 use crate::capabilities::hover::hover;
+use crate::capabilities::rename::{prepare_rename, rename};
 use crate::capabilities::view_ast::{ViewAstRequest, view_ast};
 use crate::capabilities::view_hir::{ViewHirRequest, view_hir};
 use crate::live_docs::LiveDocs;
-use crate::workspace::diff::WorkspaceDiff;
-use crate::worker::Worker;
-use crate::workspace::worker::WorkspaceWorker;
-use crate::workspace::watch::{self, ChangeEvent, Watched};
-use crate::workspace::worker::ReloadRequest;
-use crate::workspace::{LoadedFile, discover_workspaces, workspace_roots};
 use crate::salsa::{Db, File};
 use crate::utilities::{document_path, log_info, to_url, to_utf8path};
+use crate::worker::Worker;
+use crate::workspace::diff::WorkspaceDiff;
+use crate::workspace::watch::{self, ChangeEvent, Watched};
+use crate::workspace::worker::ReloadRequest;
+use crate::workspace::worker::WorkspaceWorker;
+use crate::workspace::{LoadedFile, discover_workspaces, workspace_roots};
 
 use anyhow::Context;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -21,14 +24,16 @@ use lsp_types::notification::{
     DidOpenTextDocument, Exit, Notification as LspNotification, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion as CompletionRequest, GotoDefinition, HoverRequest, Request as LspRequest, Shutdown,
+    Completion as CompletionRequest, GotoDefinition, HoverRequest, PrepareRenameRequest, Rename,
+    Request as LspRequest, Shutdown,
 };
 use lsp_types::{
     CompletionOptions, Diagnostic as LspDiagnostic, DidChangeTextDocumentParams,
     DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, HoverProviderCapability, InitializeParams, InitializeResult, OneOf,
-    PublishDiagnosticsParams, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
-    WorkspaceFolder, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
+    PublishDiagnosticsParams, RenameOptions, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, WorkspaceFolder, WorkspaceFoldersServerCapabilities,
+    WorkspaceServerCapabilities,
 };
 use triomphe::Arc;
 
@@ -44,8 +49,12 @@ pub struct LspServer {
 }
 
 impl LspServer {
-    pub fn new(connection: Connection) -> anyhow::Result<(Self, crossbeam_channel::Receiver<Message>)> {
-        let (initialize_id, initialize_params) = connection.initialize_start().context("failed to start LSP initialize handshake")?;
+    pub fn new(
+        connection: Connection,
+    ) -> anyhow::Result<(Self, crossbeam_channel::Receiver<Message>)> {
+        let (initialize_id, initialize_params) = connection
+            .initialize_start()
+            .context("failed to start LSP initialize handshake")?;
 
         let params: InitializeParams = serde_json::from_value(initialize_params)
             .context("failed to deserialize InitializeParams from client")?;
@@ -56,7 +65,9 @@ impl LspServer {
         let workspace = discover_workspaces(&roots);
         log_info("Workspace discovered");
 
-        let ignored_roots: Vec<String> = workspace.ignored_roots.iter()
+        let ignored_roots: Vec<String> = workspace
+            .ignored_roots
+            .iter()
             .map(|root| to_url(root).to_string())
             .collect();
 
@@ -67,8 +78,16 @@ impl LspServer {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".to_string(), "{".to_string(), ",".to_string()]),
+                    trigger_characters: Some(vec![
+                        ".".to_string(),
+                        "{".to_string(),
+                        ",".to_string(),
+                    ]),
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
@@ -92,13 +111,15 @@ impl LspServer {
             }),
         };
 
-        connection.initialize_finish(initialize_id, serde_json::to_value(initialize_result)?)
+        connection
+            .initialize_finish(initialize_id, serde_json::to_value(initialize_result)?)
             .context("failed to finish LSP initialize handshake")?;
         log_info("LSP initialize handshake completed");
 
         // This is the first moment the spec allows a server-to-client request
         // The client owns the watch; this only tells it what to watch
-        watch::register_watchers(&connection.sender, &params, &roots).context("failed to register watched files")?;
+        watch::register_watchers(&connection.sender, &params, &roots)
+            .context("failed to register watched files")?;
         let watch_folders = watch::registers_per_folder(&params);
 
         let db = Db::new(workspace);
@@ -106,21 +127,21 @@ impl LspServer {
         let ws_worker = Worker::spawn("ws", 8, WorkspaceWorker::new(roots, db.workspace()));
         log_info("DB Initialized");
 
-        Ok((Self {
-            sender: connection.sender,
-            db,
-            diagnostics,
-            live_docs: LiveDocs::new(),
-            ws_worker,
-            watch_folders,
-            shutdown_requested: false,
-        }, connection.receiver))
+        Ok((
+            Self {
+                sender: connection.sender,
+                db,
+                diagnostics,
+                live_docs: LiveDocs::new(),
+                ws_worker,
+                watch_folders,
+                shutdown_requested: false,
+            },
+            connection.receiver,
+        ))
     }
 
-    pub fn run(
-        mut self,
-        receiver: crossbeam_channel::Receiver<Message>,
-    ) -> anyhow::Result<()> {
+    pub fn run(mut self, receiver: crossbeam_channel::Receiver<Message>) -> anyhow::Result<()> {
         loop {
             // Biased, with reload first: a finished diff is a root-set change
             // that a pending watcher event has to see. If a `.sol` creation
@@ -173,6 +194,8 @@ impl LspServer {
         let result = match request.method.as_str() {
             HoverRequest::METHOD => hover(&self.db, request),
             GotoDefinition::METHOD => definition(&self.db, request),
+            PrepareRenameRequest::METHOD => prepare_rename(&self.db, request),
+            Rename::METHOD => rename(&self.db, request),
             CompletionRequest::METHOD => completion(&self.db, request),
             ViewHirRequest::METHOD => view_hir(&self.db, request),
             ViewAstRequest::METHOD => view_ast(&self.db, request),
@@ -188,15 +211,17 @@ impl LspServer {
             DidCloseTextDocument::METHOD => self.did_close(&notification),
             DidChangeWatchedFiles::METHOD => self.did_change_watched_files(&notification),
             DidChangeWorkspaceFolders::METHOD => self.did_change_workspace_folders(&notification),
-            _ => log_info(format!( "Ignoring unsupported notification: {}", notification.method )),
+            _ => log_info(format!(
+                "Ignoring unsupported notification: {}",
+                notification.method
+            )),
         }
     }
-
 
     fn did_open(&mut self, notification: &Notification) {
         if let Some(params) = self.notification_params::<DidOpenTextDocumentParams>(notification)
             && let Some(path) = document_path(&params.text_document.uri)
-            && let Some(file) = self.db.open_file(path, params.text_document.text) 
+            && let Some(file) = self.db.open_file(path, params.text_document.text)
         {
             // An eviction only leaves the diagnosed set — the evicted
             // document stays open and keeps its last published diagnostics.
@@ -207,13 +232,17 @@ impl LspServer {
 
     fn did_change(&mut self, notification: &Notification) {
         if let Some(params) = self.notification_params::<DidChangeTextDocumentParams>(notification)
-            && let Some(path) = document_path(&params.text_document.uri) 
+            && let Some(path) = document_path(&params.text_document.uri)
             && let Some(file) = self.db.file(&path)
             && let Some(current) = self.live_docs.version(&file)
             && params.text_document.version > current
         {
             self.live_docs.touch(file, params.text_document.version);
-            if self.db.apply_changes(path, params.content_changes).is_some() {
+            if self
+                .db
+                .apply_changes(path, params.content_changes)
+                .is_some()
+            {
                 self.run_diagnostics();
             }
         }
@@ -244,7 +273,8 @@ impl LspServer {
     /// operation — and an open document is never re-read, because the client
     /// owns its text.
     fn did_change_watched_files(&mut self, notification: &Notification) {
-        let Some(params) = self.notification_params::<DidChangeWatchedFilesParams>(notification) else {
+        let Some(params) = self.notification_params::<DidChangeWatchedFilesParams>(notification)
+        else {
             return;
         };
 
@@ -280,8 +310,8 @@ impl LspServer {
     /// The watchers are per folder, so the same delta registers and revokes
     /// them.
     fn did_change_workspace_folders(&mut self, notification: &Notification) {
-        let Some(params) = self
-            .notification_params::<DidChangeWorkspaceFoldersParams>(notification)
+        let Some(params) =
+            self.notification_params::<DidChangeWorkspaceFoldersParams>(notification)
         else {
             return;
         };
@@ -322,7 +352,11 @@ impl LspServer {
 
         log_info("workspace reloaded".to_string());
         // Remove deleted files from the live docs
-        let deleted: Vec<_> = self.live_docs.iter().filter(|file| self.db.file(file.path(&self.db)).is_none()).collect();
+        let deleted: Vec<_> = self
+            .live_docs
+            .iter()
+            .filter(|file| self.db.file(file.path(&self.db)).is_none())
+            .collect();
         for file in deleted {
             let version = self.live_docs.version(&file);
             self.publish_diagnostics(file, version, Arc::from(Vec::new()));
@@ -354,7 +388,10 @@ impl LspServer {
         match serde_json::from_value(notification.params.clone()) {
             Ok(params) => Some(params),
             Err(error) => {
-                log_info(format!("ignoring malformed {}: {error}", notification.method));
+                log_info(format!(
+                    "ignoring malformed {}: {error}",
+                    notification.method
+                ));
                 None
             }
         }
@@ -441,7 +478,10 @@ impl LspServer {
     /// `shutdown` is the client's warning that `exit` comes next.
     fn shutdown(&mut self, id: RequestId) {
         self.shutdown_requested = true;
-        self.send(Message::Response(Response::new_ok(id,serde_json::Value::Null)));
+        self.send(Message::Response(Response::new_ok(
+            id,
+            serde_json::Value::Null,
+        )));
     }
 
     /// After `shutdown` the only message left is `exit`; a late request is a

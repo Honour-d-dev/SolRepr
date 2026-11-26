@@ -11,9 +11,8 @@ use std::time::Duration;
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
-    UnregistrationParams,
     DidChangeWatchedFilesRegistrationOptions, GlobPattern, PublishDiagnosticsParams,
-    RegistrationParams, Url,
+    RegistrationParams, UnregistrationParams, Url,
 };
 use serde_json::{Value, json};
 use solrepr::lsp::LspServer;
@@ -25,9 +24,10 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 const SOURCE: &str = include_str!("../fixtures/e2e/src/E2e.sol");
 
 fn fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("e2e")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("e2e")
 }
-
 
 fn document_uri() -> Url {
     Url::from_file_path(fixture_root().join("src").join("E2e.sol")).expect("fixture path")
@@ -150,7 +150,11 @@ impl Server {
     /// answered exactly once, so the caller replies.
     fn next_request(&mut self) -> lsp_server::Request {
         loop {
-            let message = match self.stashed.iter().position(|message| matches!(message, Message::Request(_))) {
+            let message = match self
+                .stashed
+                .iter()
+                .position(|message| matches!(message, Message::Request(_)))
+            {
                 Some(index) => self.stashed.remove(index),
                 None => self.recv(),
             };
@@ -254,11 +258,9 @@ impl Server {
     fn publish_without(&mut self, uri: &Url, code: &str) -> PublishDiagnosticsParams {
         loop {
             let params = self.next_publish(uri);
-            if !params
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == Some(lsp_types::NumberOrString::String(code.to_string())))
-            {
+            if !params.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == Some(lsp_types::NumberOrString::String(code.to_string()))
+            }) {
                 return params;
             }
         }
@@ -297,9 +299,13 @@ impl Drop for Server {
             "shutdown".to_string(),
             json!(null),
         )));
-        let _ = self.client.sender.send(Message::Notification(
-            Notification::new("exit".to_string(), json!(null)),
-        ));
+        let _ = self
+            .client
+            .sender
+            .send(Message::Notification(Notification::new(
+                "exit".to_string(),
+                json!(null),
+            )));
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -421,7 +427,10 @@ fn a_folder_added_mid_session_is_discovered() {
         }),
     );
     let hover = serde_json::to_string(&hover).expect("hover json");
-    assert!(hover.contains("uint256"), "the added folder is indexed: {hover}");
+    assert!(
+        hover.contains("uint256"),
+        "the added folder is indexed: {hover}"
+    );
 }
 
 /// Folder changes in one burst all land. A folder delta cannot collapse to the
@@ -624,12 +633,53 @@ fn initialize_advertises_the_protocol_surface() {
     assert_eq!(capabilities["hoverProvider"], json!(true));
     assert_eq!(capabilities["definitionProvider"], json!(true));
     assert_eq!(
+        capabilities["renameProvider"]["prepareProvider"],
+        json!(true),
+        "rename is advertised with prepareRename: {capabilities:#?}"
+    );
+    assert_eq!(
         capabilities["completionProvider"]["triggerCharacters"],
         json!([".", "{", ","])
     );
     assert!(
         capabilities["experimental"]["ignoredRoots"].is_array(),
         "ignored roots ride on `experimental`: {capabilities:#?}"
+    );
+}
+
+/// Rename and prepareRename answer over the protocol, and the edit covers every
+/// spelling of the name in the file.
+#[test]
+fn rename_and_prepare_rename_resolve_through_the_protocol() {
+    let mut server = Server::start();
+    let uri = document_uri();
+    server.open(&uri);
+
+    // `amount` in `return x + amount;`
+    let position = json!({ "line": 7, "character": 21 });
+
+    let prepare = server.request(
+        "textDocument/prepareRename",
+        json!({ "textDocument": { "uri": uri }, "position": position }),
+    );
+    assert_eq!(prepare["placeholder"], json!("amount"), "{prepare}");
+
+    let edit = server.request(
+        "textDocument/rename",
+        json!({ "textDocument": { "uri": uri }, "position": position, "newName": "total" }),
+    );
+    let edits = edit["changes"]
+        .as_object()
+        .expect("changes")
+        .values()
+        .next()
+        .expect("one file")
+        .as_array()
+        .expect("edits");
+    assert_eq!(edits.len(), 2, "the declaration and the use: {edit}");
+    assert!(
+        edits.iter().all(|item| item["newText"] == "total"),
+        "{edit}"
     );
 }
 
@@ -648,7 +698,10 @@ fn hover_and_definition_resolve_through_the_protocol() {
         json!({ "textDocument": { "uri": uri }, "position": position }),
     );
     let hover = serde_json::to_string(&hover).expect("hover json");
-    assert!(hover.contains("uint256"), "hover should name the type: {hover}");
+    assert!(
+        hover.contains("uint256"),
+        "hover should name the type: {hover}"
+    );
 
     let definition = server.request(
         "textDocument/definition",
@@ -687,7 +740,10 @@ fn completion_offers_names_in_scope() {
         .filter_map(|item| item["label"].as_str())
         .collect();
     assert!(labels.contains(&"amount"), "got {labels:?}");
-    assert!(labels.contains(&"x"), "the parameter should be offered: {labels:?}");
+    assert!(
+        labels.contains(&"x"),
+        "the parameter should be offered: {labels:?}"
+    );
 }
 
 /// An edit that breaks the type is published, and closing the document clears
@@ -703,7 +759,11 @@ fn did_change_publishes_diagnostics_and_close_clears_them() {
     server.change(&uri, 2, &broken);
 
     let published = server.publish_with_errors(&uri);
-    assert_eq!(published.version, Some(2), "the publish carries the version");
+    assert_eq!(
+        published.version,
+        Some(2),
+        "the publish carries the version"
+    );
     assert_eq!(
         published.diagnostics[0].range.start.line, 7,
         "the mismatch is on the `return` line: {published:#?}"
@@ -778,7 +838,9 @@ fn code_count(params: &PublishDiagnosticsParams, code: &str) -> usize {
     params
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.code == Some(lsp_types::NumberOrString::String(code.to_string())))
+        .filter(|diagnostic| {
+            diagnostic.code == Some(lsp_types::NumberOrString::String(code.to_string()))
+        })
         .count()
 }
 

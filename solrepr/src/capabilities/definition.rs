@@ -1,25 +1,21 @@
 use anyhow::{Context as _, Result};
 use lsp_server::{Request, Response};
-use lsp_types::{GotoDefinitionParams, GotoDefinitionResponse, Location as LspLocation, Range};
+use lsp_types::{GotoDefinitionParams, GotoDefinitionResponse, Location as LspLocation};
 
 use crate::ast::NodeRange;
 use crate::hir::body_map::{BodyOwnerId, LocalId};
-use crate::hir::item_data::{FieldId, SemanticId, VariantId};
-use crate::hir::resolution::Resolution;
-use crate::hir::types::Ty;
-use crate::ir::def_map::DefId;
 use crate::hir::syntax_store::semantic_at;
+use crate::ir::def_map::DefId;
 use crate::salsa::hir_db::owner_at;
 use crate::salsa::root_db::RootDb;
-use crate::salsa::{File, HirDb, Db};
-use crate::utilities::{byte_to_position, to_url, to_utf8path};
+use crate::salsa::{Db, File, HirDb};
+use crate::utilities::{to_url, to_utf8path};
 
-enum DefinitionTarget {
-    Def(DefId),
-    Range(File, NodeRange),
-    File(File),
-}
+use super::{lsp_range, Identity, identity_of_semantic};
 
+/// Goto is a single-identity operation. A spelling that denotes several — a tied
+/// call like `f(1)` between `f(uint8)` and `f(uint16)` — has no destination, so
+/// it answers null instead of picking one.
 pub fn definition(db: &Db, request: Request) -> Result<Response> {
     let params: GotoDefinitionParams = serde_json::from_value(request.params)?;
     let path = to_utf8path(&params.text_document_position_params.text_document.uri)?;
@@ -40,17 +36,13 @@ pub fn definition(db: &Db, request: Request) -> Result<Response> {
     let owner = owner_at(db, file, offset).context("no owner at cursor")?;
     let range = NodeRange::from(&node.node());
 
-    let locations = semantic_at(db, owner, range)
-        .map(|id| semantic_targets(db, owner, id))
-        .unwrap_or_default()
-        .into_iter()
-        .flat_map(|target| locations_for_target(db, target))
-        .collect::<Vec<_>>();
+    let location = semantic_at(db, owner, range)
+        .and_then(|id| identity_of_semantic(db, owner, id))
+        .and_then(|identity| location_of(db, identity));
 
-    let result = match locations.as_slice() {
-        [] => serde_json::Value::Null,
-        [location] => serde_json::to_value(GotoDefinitionResponse::Scalar(location.clone()))?,
-        _ => serde_json::to_value(GotoDefinitionResponse::Array(locations))?,
+    let result = match location {
+        Some(location) => serde_json::to_value(GotoDefinitionResponse::Scalar(location))?,
+        None => serde_json::Value::Null,
     };
 
     Ok(Response {
@@ -60,144 +52,72 @@ pub fn definition(db: &Db, request: Request) -> Result<Response> {
     })
 }
 
-fn semantic_targets(db: &Db, owner: DefId, id: SemanticId) -> Vec<DefinitionTarget> {
-    match id {
-        SemanticId::Expr(expr) => db
-            .inference(owner)
-            .expr_resolution(expr)
-            .map(|resolution| resolution_targets(db, resolution.clone()))
-            .unwrap_or_default(),
-        SemanticId::Local(local) => local_targets(db, owner, local),
-        SemanticId::Field(field) => field_targets(db, owner, field),
-        SemanticId::Variant(variant) => variant_targets(db, owner, variant),
-        SemanticId::Type(ty) => ty_targets(db, db.inference(owner).ty(ty).ty()),
-    }
-}
-
-fn resolution_targets(db: &Db, resolution: Resolution) -> Vec<DefinitionTarget> {
-    match resolution {
-        Resolution::Local(local) => local_targets(db, local.owner, local.id),
-        Resolution::Var(def) | Resolution::This(def) => vec![DefinitionTarget::Def(def)],
-        Resolution::Callable(callable) => callable
-            .def()
-            .map(|def| vec![DefinitionTarget::Def(def)])
-            .unwrap_or_default(),
-        Resolution::Callables(callables) => callables
-            .iter()
-            .filter_map(|callable| callable.def().map(DefinitionTarget::Def))
-            .collect(),
-        Resolution::Type(ty) => ty_targets(db, ty.ty()),
-        Resolution::Module(file) => vec![DefinitionTarget::File(file)],
-        Resolution::MetaType(ty) => ty_targets(db, ty.ty()),
-        Resolution::Literal(_) | Resolution::Builtin(_) => Vec::new(),
-        Resolution::Field(field) => field
-            .struct_field()
-            .map(|(owner, field)| field_targets(db, owner, field))
-            .unwrap_or_default(),
-        Resolution::Variant(variant) => {
-            variant_targets(db, DefId::Enum(variant.enum_id), variant.id)
+/// Where `identity` is declared — the one place a declaration's position is
+/// read. `rename` reuses it for the declaration-site edit.
+fn location_of(db: &Db, identity: Identity) -> Option<LspLocation> {
+    match identity {
+        // A module has no declaration node; its location is the file.
+        Identity::Def(DefId::File(file)) => {
+            location_for_range(db, file, NodeRange { start: 0, end: 0 })
         }
-        Resolution::Super(def) => db
-            .bases(def)
-            .get(1)
-            .copied()
-            .map(|base| vec![DefinitionTarget::Def(base)])
-            .unwrap_or_default(),
-    }
-}
-
-fn local_targets(db: &Db, owner: DefId, local_id: LocalId) -> Vec<DefinitionTarget> {
-    let (file, _) = owner.file_and_id();
-    let range = match owner {
-        DefId::Function(id) => db
-            .body_source_map(BodyOwnerId::Function(id))
-            .local_ranges
-            .get(local_id)
-            .copied(),
-        DefId::Modifier(id) => db
-            .body_source_map(BodyOwnerId::Modifier(id))
-            .local_ranges
-            .get(local_id)
-            .copied(),
-        DefId::Event(_) | DefId::Error(_) => db
-            .source_map(owner)
-            .local_ranges
-            .get(local_id)
-            .copied(),
-        _ => return Vec::new(),
-    };
-    let Some(range) = range else {
-        return Vec::new();
-    };
-    vec![DefinitionTarget::Range(file, range)]
-}
-
-fn field_targets(db: &Db, owner: DefId, field_id: FieldId) -> Vec<DefinitionTarget> {
-    let DefId::Struct(struct_id) = owner else {
-        return Vec::new();
-    };
-    let _ = db.struct_data(struct_id);
-    let Some(range) = db.source_map(owner).field_ranges.get(field_id).copied() else {
-        return Vec::new();
-    };
-    vec![DefinitionTarget::Range(owner.file_and_id().0, range)]
-}
-
-fn variant_targets(db: &Db, owner: DefId, variant_id: VariantId) -> Vec<DefinitionTarget> {
-    let DefId::Enum(enum_id) = owner else {
-        return Vec::new();
-    };
-    let _ = db.enum_data(enum_id);
-    let Some(range) = db
-        .source_map(owner)
-        .variant_ranges
-        .get(variant_id)
-        .copied()
-    else {
-        return Vec::new();
-    };
-    vec![DefinitionTarget::Range(owner.file_and_id().0, range)]
-}
-
-fn ty_targets(db: &Db, ty: Ty) -> Vec<DefinitionTarget> {
-    match ty.def_id(db) {
-        Some(DefId::File(file)) => vec![DefinitionTarget::File(file)],
-        Some(def) => vec![DefinitionTarget::Def(def)],
-        None => Vec::new(),
-    }
-}
-
-fn locations_for_target(db: &Db, target: DefinitionTarget) -> Option<LspLocation> {
-    match target {
-        DefinitionTarget::Def(def) => {
+        Identity::Def(def) => {
             let (file, Some(ast_id)) = def.file_and_id() else {
                 return None;
             };
             let node = db.ast_id_map(file).get_node(&db.root(file), ast_id)?;
             location_for_range(db, file, NodeRange::from(&node.node()))
         }
-        DefinitionTarget::Range(file, range) => location_for_range(db, file, range),
-        DefinitionTarget::File(file) => {
-            location_for_range(db, file, NodeRange { start: 0, end: 0 })
+        Identity::Local { owner, local } => {
+            location_for_range(db, owner.file(), local_range(db, owner, local)?)
+        }
+        Identity::Field { owner, field } => {
+            let DefId::Struct(id) = owner else {
+                return None;
+            };
+            let _ = db.struct_data(id);
+            let range = *db.source_map(owner).field_ranges.get(field)?;
+            location_for_range(db, owner.file(), range)
+        }
+        Identity::Variant { enum_, variant } => {
+            let _ = db.enum_data(enum_);
+            let range = *db
+                .source_map(DefId::Enum(enum_))
+                .variant_ranges
+                .get(variant)?;
+            location_for_range(db, enum_.file, range)
         }
     }
 }
 
+/// A local's declaration range: body owners keep theirs in the body map, event
+/// and error parameters in the item's own map.
+fn local_range(db: &Db, owner: DefId, local: LocalId) -> Option<NodeRange> {
+    match owner {
+        DefId::Function(id) => db
+            .body_source_map(BodyOwnerId::Function(id))
+            .local_ranges
+            .get(local)
+            .copied(),
+        DefId::Modifier(id) => db
+            .body_source_map(BodyOwnerId::Modifier(id))
+            .local_ranges
+            .get(local)
+            .copied(),
+        DefId::Event(_) | DefId::Error(_) => db.source_map(owner).local_ranges.get(local).copied(),
+        _ => None,
+    }
+}
+
 fn location_for_range(db: &Db, file: File, range: NodeRange) -> Option<LspLocation> {
-    let uri = to_url(file.path(db));
-    let rope = db.rope(file);
     Some(LspLocation {
-        uri,
-        range: Range {
-            start: byte_to_position(&rope, range.start as usize),
-            end: byte_to_position(&rope, range.end as usize),
-        },
+        uri: to_url(file.path(db)),
+        range: lsp_range(db, file, range),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::utilities::byte_to_position;
     use lsp_types::Position;
     use ropey::Rope;
 

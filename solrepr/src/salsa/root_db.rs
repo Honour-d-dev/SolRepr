@@ -1,15 +1,17 @@
 use std::cell::RefCell;
 
 use camino::Utf8Path;
+use rustc_hash::FxHashSet;
 use tree_sitter::Parser;
 use triomphe::Arc;
 
-use super::db::{File, FileId, FilesRevision, Packages, Db, SourceRootId};
+use super::db::{Db, File, FileId, Packages, SourceRootId};
 use crate::ast::kinds::FieldKind;
 use crate::ast::{Ast, AstIdMap, AstNode, NodeRange};
 use crate::hir::analysis::Analysis;
 use crate::ir::def_map::{Collector, DefId, DefMap};
-use crate::ir::item_tree::{ItemTree, Lowerer};
+use crate::ir::import_map::{ImportMap, Imports, SourceUnit, source_unit_name};
+use crate::ir::item_tree::{ItemId, ItemTree, Lowerer};
 use crate::workspace::Package;
 
 thread_local! {
@@ -18,6 +20,97 @@ thread_local! {
         parser.set_language(&tree_sitter_solidity::LANGUAGE.into()).expect("parser set language");
         parser
     });
+}
+
+
+#[salsa::db]
+pub trait RootDb: salsa::Database {
+    fn text(&self, file: FileId) -> Arc<str>;
+    fn file_source_root(&self, file: FileId) -> SourceRootId;
+    fn source_roots(&self) -> &[SourceRootId];
+    fn package_config(&self, root_id: SourceRootId) -> &Package;
+    fn ast(&self, file: File) -> Arc<Ast>;
+    fn root(&self, file: File) -> AstNode;
+    fn ast_id_map(&self, file: File) -> Arc<AstIdMap>;
+    fn item_tree(&self, file: File) -> &ItemTree;
+    fn root_def_map_analysis(&self, root: SourceRootId) -> Analysis<DefMap>;
+    fn root_def_map(&self, root: SourceRootId) -> Arc<DefMap>;
+    fn file_def_map(&self, file: File) -> Arc<DefMap>;
+    fn resolve_to_file(&self, from: FileId, import_path: &str) -> Option<FileId>;
+    fn is_ignored_path(&self, path: &Utf8Path) -> bool;
+    fn imports(&self, file: File) -> &Imports;
+    fn imports_closure(&self, file:File) -> &[SourceUnit];
+    fn import_map(&self) -> &ImportMap;
+}
+
+
+
+#[salsa::db]
+impl RootDb for Db {
+    fn text(&self, file: FileId) -> Arc<str> {
+        text(self, file)
+    }
+
+    fn file_source_root(&self, file: FileId) -> SourceRootId {
+        self.file_source_root(file).expect("file has no root")
+    }
+
+    fn source_roots(&self) -> &[SourceRootId] {
+        self.source_roots()
+    }
+
+    fn package_config(&self, root: SourceRootId) -> &Package {
+        package_config(self, root)
+    }
+
+    fn ast(&self, file: File) -> Arc<Ast> {
+        parse(self, file)
+    }
+
+    fn root(&self, file: File) -> AstNode {
+        self.ast(file).root()
+    }
+
+    fn ast_id_map(&self, file: File) -> Arc<AstIdMap> {
+        ast_id_map(self, file)
+    }
+
+    fn item_tree(&self, file: File) -> &ItemTree {
+        item_tree(self, file)
+    }
+
+    fn root_def_map_analysis(&self, root: SourceRootId) -> Analysis<DefMap> {
+        root_def_map_analysis(self, root)
+    }
+
+    fn root_def_map(&self, root: SourceRootId) -> Arc<DefMap> {
+        self.root_def_map_analysis(root).data
+    }
+
+    fn file_def_map(&self, file: File) -> Arc<DefMap> {
+        let root = self.file_source_root(file).unwrap();
+        self.root_def_map(root)
+    }
+
+    fn resolve_to_file(&self, from: FileId, rel_path: &str) -> Option<FileId> {
+        self.resolve_to_file(from, rel_path)
+    }
+
+    fn is_ignored_path(&self, path: &Utf8Path) -> bool {
+        self.is_ignored_path(path)
+    }
+
+    fn imports(&self,file: File) -> &Imports {
+        imports(self, file)
+    }
+
+    fn imports_closure(&self,file: File) -> &[SourceUnit] {
+        imports_closure(self, file)
+    }
+
+    fn import_map(&self) -> &ImportMap {
+        import_map(self)
+    }
 }
 
 //caching this so we only do it once per revision. but does this means we store 2 copies of all files?
@@ -63,33 +156,88 @@ pub fn root_def_map_analysis(db: &dyn RootDb, root: SourceRootId) -> Analysis<De
 }
 
 /// The bottom of the domain: a root that has bound no names yet.
-fn root_def_map_analysis_initial(_db: &dyn RootDb, _id: salsa::Id, root: SourceRootId) -> Analysis<DefMap> {
+fn root_def_map_analysis_initial(
+    _db: &dyn RootDb,
+    _id: salsa::Id,
+    root: SourceRootId,
+) -> Analysis<DefMap> {
     Analysis::new(DefMap::empty(root), Arc::from(Vec::new()))
 }
 
 /// Keep what the round computed; salsa re-runs until two rounds agree, which
 /// it decides by comparing the maps and their diagnostics.
-fn root_def_map_analysis_recover( _db: &dyn RootDb, _cycle: &salsa::Cycle, _last_provisional: &Analysis<DefMap>, value: Analysis<DefMap>, _root: SourceRootId) -> Analysis<DefMap> {
+fn root_def_map_analysis_recover(
+    _db: &dyn RootDb,
+    _cycle: &salsa::Cycle,
+    _last_provisional: &Analysis<DefMap>,
+    value: Analysis<DefMap>,
+    _root: SourceRootId,
+) -> Analysis<DefMap> {
     value
 }
 
-#[salsa::db]
-pub trait RootDb: salsa::Database {
-    fn text(&self, file: FileId) -> Arc<str>;
-    fn file_source_root(&self, file: FileId) -> SourceRootId;
-    fn package_config(&self, root_id: SourceRootId) -> &Package;
 
-    fn ast(&self, file: File) -> Arc<Ast>;
-    fn root(&self, file: File) -> AstNode;
-    fn ast_id_map(&self, file: File) -> Arc<AstIdMap>;
-    fn item_tree(&self, file: File) -> &ItemTree;
-    fn root_def_map_analysis(&self, root: SourceRootId) -> Analysis<DefMap>;
-    fn root_def_map(&self, root: SourceRootId) -> Arc<DefMap>;
-    fn file_def_map(&self, file: File) -> Arc<DefMap>;
-    fn resolve_to_file(&self, from: FileId, import_path: &str) -> Option<FileId>;
-    /// `path` sits under a deduplicated library root — outside the
-    /// compilation unit.
-    fn is_ignored_path(&self, path: &Utf8Path) -> bool;
+/// The imports `file` declares, resolved.
+/// i.e. files that 'file' depend on.
+#[salsa::tracked(returns(ref))]
+pub fn imports(db: &dyn RootDb, file: File) -> Imports {
+    let tree = db.item_tree(file);
+    let mut imports = Imports::default();
+    for &item in tree.top_level.iter() {
+        let ItemId::Import(id) = item else { continue };
+        let path = &tree[id].path;
+        match db.resolve_to_file(file, path.as_str()) {
+            // Two directives that resolve to one file are one edge.
+            Some(target) if !imports.resolved.contains(&target) => imports.resolved.push(target),
+            Some(_) => {}
+            None => imports.unresolved.push(path.as_str().into()),
+        }
+    }
+    imports
+}
+
+/// The inversion of [`imports`], files that depends on 'file'.
+///
+/// Dependency roots are skipped: a dependency file cannot depend on a file in a non-dep root.
+#[salsa::tracked(returns(ref))]
+pub fn import_map(db: &dyn RootDb) -> ImportMap {
+    let mut map = ImportMap::default();
+    for &root in db.source_roots() {
+        if root.is_dependency(db) {
+            continue;
+        }
+        for &file in root.files(db).iter() {
+            for &target in &imports(db, file).resolved {
+                map.insert(target, file);
+            }
+        }
+    }
+    map
+}
+
+/// `entry` and everything it reaches, named relative to the entry's package
+/// root — the source map solc is handed.
+#[salsa::tracked(returns(ref))]
+pub fn imports_closure(db: &dyn RootDb, entry: File) -> Vec<SourceUnit> {
+    let base = db.package_config(db.file_source_root(entry)).root.clone();
+    let mut closure = vec![SourceUnit {
+        name: source_unit_name(&base, entry.path(db)),
+        file: entry,
+    }];
+    let mut seen = FxHashSet::from_iter([entry]);
+    let mut pending = vec![entry];
+    while let Some(file) = pending.pop() {
+        for &target in &imports(db, file).resolved {
+            if seen.insert(target) {
+                closure.push(SourceUnit {
+                    name: source_unit_name(&base, target.path(db)),
+                    file: target,
+                });
+                pending.push(target);
+            }
+        }
+    }
+    closure
 }
 
 /// A def's declaration node and its file's root — the walk behind
@@ -111,56 +259,3 @@ pub fn def_range(db: &dyn RootDb, def: DefId) -> Option<NodeRange> {
     Some(NodeRange::from(&name.unwrap_or(node.node())))
 }
 
-#[salsa::db]
-impl RootDb for Db {
-    fn text(&self, file: FileId) -> Arc<str> {
-        text(self, file)
-    }
-
-    fn file_source_root(&self, file: FileId) -> SourceRootId {
-        FilesRevision::get(self).revision(self);
-        self.file_source_root(file).expect("file has no root")
-    }
-
-    fn package_config(&self, root: SourceRootId) -> &Package {
-        package_config(self, root)
-    }
-
-    fn ast(&self, file: File) -> Arc<Ast> {
-        parse(self, file)
-    }
-
-    fn root(&self, file: File) -> AstNode {
-        self.ast(file).root()
-    }
-
-    fn ast_id_map(&self, file: File) -> Arc<AstIdMap> {
-        ast_id_map(self, file)
-    }
-
-    fn item_tree(&self, file: File) -> &ItemTree {
-        item_tree(self, file)
-    }
-
-    fn root_def_map_analysis(&self, root: SourceRootId) -> Analysis<DefMap> {
-        root_def_map_analysis(self, root)
-    }
-
-    fn root_def_map(&self, root: SourceRootId) -> Arc<DefMap> {
-        self.root_def_map_analysis(root).data
-    }
-
-    fn file_def_map(&self, file: File) -> Arc<DefMap> {
-        let root = self.file_source_root(file).unwrap();
-        self.root_def_map(root)
-    }
-
-    fn resolve_to_file(&self, from: FileId, rel_path: &str) -> Option<FileId> {
-        FilesRevision::get(self).revision(self);
-        self.resolve_to_file(from, rel_path)
-    }
-
-    fn is_ignored_path(&self, path: &Utf8Path) -> bool {
-        self.is_ignored_path(path)
-    }
-}

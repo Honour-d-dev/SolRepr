@@ -5,24 +5,25 @@ mod lower;
 mod tables;
 mod usage;
 
-use num_bigint::BigInt;
-use triomphe::Arc;
-pub use tables::Inference;
-pub use const_eval::{ConstErrorKind, ConstValue, const_value};
 use const_eval::ConstError;
+pub use const_eval::{ConstErrorKind, ConstValue, const_value};
+use num_bigint::BigInt;
+pub use tables::Inference;
+use triomphe::Arc;
 use usage::UsageContext;
 
+use crate::hir::diagnostics::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Name, UnaryOp};
 use crate::hir::item_data::VarData;
-use crate::hir::syntax_store::OwnerStore;
 use crate::hir::resolution::{Field as ResolvedField, Resolution};
 use crate::hir::resolver::Resolver;
-use crate::hir::diagnostics::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
+use crate::hir::syntax_store::OwnerStore;
 use crate::hir::types::Primitive::FixedBytes;
-use crate::hir::types::{LiteralKind, Location, Mutability, Primitive, RefKind, Ty, TyKind, Type, VariableKind};
+use crate::hir::types::{
+    LiteralKind, Location, Mutability, Primitive, RefKind, Ty, TyKind, Type, VariableKind,
+};
 use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::HirDb;
-
 
 /// Early short-circuit on an invalid type.
 macro_rules! return_invalid {
@@ -35,7 +36,6 @@ macro_rules! return_invalid {
     }};
 }
 pub(crate) use return_invalid;
-
 
 /// The single inference context: the owner, its name-resolution context, and
 /// the accumulated tables. It reads content only — never a source map — so a
@@ -97,7 +97,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 let ty = self.infer_local(local_id);
                 self.tables.set_local(local_id, ty);
                 if let Some(init) = locals[local_id].init() {
-                     self.expect_assignable(init, ty);
+                    self.expect_assignable(init, ty);
                 }
             }
         }
@@ -144,12 +144,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         recovery
     }
 
-    fn fail<R>(
-        &mut self,
-        anchor: DiagnosticAnchor,
-        message: impl Into<String>,
-        recovery: R,
-    ) -> R {
+    fn fail<R>(&mut self, anchor: DiagnosticAnchor, message: impl Into<String>, recovery: R) -> R {
         self.report(
             SemanticDiagnostic::InferenceFailure {
                 anchor,
@@ -219,7 +214,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     // The declaration-site occurrence is the only entry point for a
                     // variable's declaration checks; any other self-resolution
                     // (`uint a = a`) is an illegal self-read.
-                    if self.input.store.name_expr == Some(expr) {
+                    if self.input.store.name == Some(expr) {
                         self.check_var_declaration(var_def, &data)
                     } else {
                         return self.fail(
@@ -361,15 +356,19 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn infer_expr_uncached(&mut self, expr: ExprId) -> Ty {
         match self.input.store.exprs[expr].clone() {
             Expr::Ident(name) => {
-                let scope = self.input.expr_scopes
+                let scope = self
+                    .input
+                    .expr_scopes
                     .and_then(|map| map.get(expr).copied());
-                let order = self.input.expr_orders
+                let order = self
+                    .input
+                    .expr_orders
                     .and_then(|map| map.get(expr).copied())
                     .unwrap_or_default();
-                let is_self_name = self.input.store.name_expr == Some(expr);
-                let resolved = self
-                    .resolver
-                    .resolve_name_at(&name, scope, order, expr, is_self_name);
+                let is_self_name = self.input.store.name == Some(expr);
+                let resolved =
+                    self.resolver
+                        .resolve_name_at(&name, scope, order, expr, is_self_name);
                 let Some(resolution) = resolved else {
                     return Ty::invalid(self.db);
                 };
@@ -546,7 +545,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
                         match kind {
                             TyKind::Array { elem, .. } => match base_type.loc(self.db) {
                                 Some(loc) => elem.upcast_from(self.db, loc).ty(),
-                                None => self.fail(DiagnosticAnchor::Expr(expr), "array has no data location", Ty::invalid(self.db)),
+                                None => self.fail(
+                                    DiagnosticAnchor::Expr(expr),
+                                    "array has no data location",
+                                    Ty::invalid(self.db),
+                                ),
                             },
                             TyKind::Mapping { value, .. } => value
                                 .upcast_from(self.db, Location::Storage(RefKind::Reference))
@@ -574,7 +577,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 }
                 // solc's TypeType check — a type name can't be sliced.
                 if matches!(base_ty.kind(self.db), TyKind::Type(_)) {
-                    return self.fail(DiagnosticAnchor::Expr(expr), "Types cannot be sliced.", Ty::invalid(self.db));
+                    return self.fail(
+                        DiagnosticAnchor::Expr(expr),
+                        "Types cannot be sliced.",
+                        Ty::invalid(self.db),
+                    );
                 }
                 // A nested slice unwraps to the array it slices.
                 let array_ty = match base_ty.kind(self.db) {
@@ -590,10 +597,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
                             DiagnosticAnchor::Expr(expr),
                             "Index range access is only possible for arrays and array slices.",
                             Ty::invalid(self.db),
-                        )
+                        );
                     }
                 }
-                if array_ty.loc(self.db) != Some(Location::Calldata) || !kind.is_dynamically_sized() {
+                if array_ty.loc(self.db) != Some(Location::Calldata) || !kind.is_dynamically_sized()
+                {
                     self.fail(
                         DiagnosticAnchor::Expr(expr),
                         "Index range access is only supported for dynamic calldata arrays.",
@@ -608,7 +616,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                         (),
                     );
                 }
-                // solc keeps the slice type even when checks failed; 
+                // solc keeps the slice type even when checks failed;
                 // the "… slice is not implicitly convertible" cascade is intentional.
                 let base = array_ty.narrow(self.db).expect("an array type is nameable");
                 Ty::new(self.db, TyKind::Slice(base))
@@ -628,7 +636,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                                     DiagnosticAnchor::Expr(expr),
                                     "Unable to deduce common type for array elements.",
                                     Ty::invalid(self.db),
-                                )
+                                );
                             }
                         },
                     };
@@ -647,11 +655,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                         Ty::invalid(self.db),
                     );
                 };
-                let array = Type::array(
-                    self.db,
-                    elem,
-                    Some(BigInt::from(elems.len())),
-                );
+                let array = Type::array(self.db, elem, Some(BigInt::from(elems.len())));
                 array.at_loc(self.db, Location::Memory).ty()
             }
             Expr::Member { obj, prop } => {
@@ -665,7 +669,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 match self.tables.expr_resolution(expr) {
                     Some(Resolution::Field(ResolvedField::Struct(..))) => {
                         let Some(loc) = obj_ty.loc(self.db) else {
-                            return self.fail(DiagnosticAnchor::Expr(expr), "struct has no data location", Ty::invalid(self.db));
+                            return self.fail(
+                                DiagnosticAnchor::Expr(expr),
+                                "struct has no data location",
+                                Ty::invalid(self.db),
+                            );
                         };
                         ty.upcast_from(self.db, loc)
                     }
@@ -691,15 +699,22 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Expr::Call { callee, args } => match self.named_group(&args) {
                 Some(named_args) => self.infer_named_call_expr(expr, callee, &named_args),
                 None => self.infer_call_expr(expr, callee, &args),
-            }
+            },
             Expr::ModifierInv(call) => self.check_modifier(call),
             Expr::Emit(call) => self.check_emit(call),
             Expr::Revert(call) => self.check_revert(call),
             Expr::Return(value) => {
                 if let Some(value) = value {
                     self.check_return(value);
-                } else if self.owner_returns().is_some_and(|returns| !returns.is_empty()) {
-                    self.fail(DiagnosticAnchor::Expr(expr), "return arguments required", ());
+                } else if self
+                    .owner_returns()
+                    .is_some_and(|returns| !returns.is_empty())
+                {
+                    self.fail(
+                        DiagnosticAnchor::Expr(expr),
+                        "return arguments required",
+                        (),
+                    );
                 }
                 Ty::void(self.db)
             }
@@ -772,7 +787,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
         self.check_positional_call(call, callee, args, &arg_types)
     }
 
-    fn infer_named_call_expr(&mut self, call: ExprId, callee: ExprId, args: &[(Name, ExprId)]) -> Ty {
+    fn infer_named_call_expr(
+        &mut self,
+        call: ExprId,
+        callee: ExprId,
+        args: &[(Name, ExprId)],
+    ) -> Ty {
         self.infer_in(callee, UsageContext::Callee);
         if let Some(invalid) = self.check_duplicate_named(call, args) {
             return invalid;
@@ -796,4 +816,3 @@ impl<'db, 'store> Inferer<'db, 'store> {
         Some(arg_types)
     }
 }
-

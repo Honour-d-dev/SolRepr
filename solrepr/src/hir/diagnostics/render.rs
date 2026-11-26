@@ -9,12 +9,10 @@ use crate::hir::resolution::Callable;
 use crate::hir::signatures::OverrideMismatch;
 use crate::hir::syntax_store::anchor_range;
 use crate::hir::types::{Mutability, Visibility};
-use crate::ir::def_map::{DefId, DefMap};
+use crate::ir::def_map::DefId;
 use crate::salsa::hir_db::def_name;
 use crate::salsa::root_db::def_range;
 use crate::salsa::{File, HirDb};
-use rustc_hash::FxHashSet;
-
 
 pub(crate) fn collect_diagnostics(db: &dyn HirDb, file: File) -> Vec<Diagnostic> {
     let analysis = db.root_def_map_analysis(db.file_source_root(file));
@@ -24,7 +22,7 @@ pub(crate) fn collect_diagnostics(db: &dyn HirDb, file: File) -> Vec<Diagnostic>
         .filter(|error| error.declaration_file() == Some(file))
         .map(|error| semantic_diagnostic(db, DefId::File(file), error))
         .collect::<Vec<_>>();
-    for owner in owners(&analysis.data, file) {
+    for owner in analysis.data.owners(file) {
         // @NOTE safe: only called inside a tracked fn; see capabilities/diagnostics
         db.unwind_if_revision_cancelled();
         let result = db.inference(owner);
@@ -45,59 +43,6 @@ pub(crate) fn collect_diagnostics(db: &dyn HirDb, file: File) -> Vec<Diagnostic>
     }
     diagnostics
 }
-
-/// Every declaration the file actually contains, walked from its own scope
-/// through the scopes its members own.
-///
-/// `by_name` is the record of what a scope holds: the def map keeps a `DefData`
-/// for a declaration the membership gate rejected — hover and its own
-/// diagnostic need the anchor — but withholds the name, so it is absent here and
-/// never inferred. A declaration that cannot exist should not be analysed as if
-/// it did; solc stops at the membership error too, and the only diagnostics this
-/// gives up are the initializer's own (a gated variable with a bad initializer
-/// reports the membership rule instead of an unresolved name).
-///
-/// The same absence covers a declaration rejected for a name collision, which
-/// solc does analyse (2333 plus the initializer's error). That is accepted:
-/// the collision is already reported, functions — the common duplicate — are
-/// overloadable and so still present, and telling the two absences apart would
-/// mean repeating the gate's decision here.
-///
-/// The walk also skips what imports put in the file's scope — a namespace
-/// import binds a foreign file def, a named import a foreign member — since
-/// those belong to their own file's collection.
-fn owners(defmap: &DefMap, file: File) -> Vec<DefId> {
-    let Some(data) = defmap.files.get(&file) else {
-        return Vec::new();
-    };
-    let mut owners = Vec::new();
-    let mut pending = vec![data.scope];
-    let mut visited = FxHashSet::default();
-    while let Some(scope_id) = pending.pop() {
-        if !visited.insert(scope_id) {
-            continue;
-        }
-        let scope = &defmap.scopes[scope_id];
-        for group in scope.by_name.values() {
-            for &def in group.defs.iter() {
-                if def.file() != file {
-                    continue;
-                }
-                owners.push(def);
-                if let Some(child) = defmap.defs.get(&def).and_then(|data| data.child_scope) {
-                    pending.push(child);
-                }
-            }
-        }
-        for &using in scope.usings.iter().flatten() {
-            if using.file() == file {
-                owners.push(using);
-            }
-        }
-    }
-    owners
-}
-
 
 /// Coalesces duplicate diagnostics at the same range, retaining distinct
 /// messages while merging their related links.
@@ -139,7 +84,6 @@ pub(crate) fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     }
     *diagnostics = merged;
 }
-
 
 fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic) -> Diagnostic {
     let (code, message, related) = match error {
@@ -353,16 +297,14 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
             declaration,
             expected,
             ..
-        } => {
-            (
-                DiagnosticCode::OverrideListMismatch,
-                format!(
-                    "`{}` must name the overridden contracts in `override(...)`",
-                    def_name(db, *declaration)
-                ),
-                related_declarations(db, expected, "`{}` must be listed in the override list"),
-            )
-        }
+        } => (
+            DiagnosticCode::OverrideListMismatch,
+            format!(
+                "`{}` must name the overridden contracts in `override(...)`",
+                def_name(db, *declaration)
+            ),
+            related_declarations(db, expected, "`{}` must be listed in the override list"),
+        ),
         SemanticDiagnostic::OverrideConflict {
             name, declarations, ..
         } => (
@@ -423,8 +365,7 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
     Diagnostic {
         code,
         severity: Severity::Error,
-        range: anchor_range(db, owner, error.anchor())
-            .unwrap_or(NodeRange { start: 0, end: 0 }),
+        range: anchor_range(db, owner, error.anchor()).unwrap_or(NodeRange { start: 0, end: 0 }),
         message,
         related,
     }
@@ -456,7 +397,9 @@ fn effect_clause(required: Mutability) -> &'static str {
 fn conflict_links(db: &dyn HirDb, defs: &[DefId]) -> Vec<RelatedDiagnostic> {
     defs.iter()
         .filter_map(|def| {
-            let owner = db.owner(*def).map_or_else(String::new, |owner| def_name(db, owner));
+            let owner = db
+                .owner(*def)
+                .map_or_else(String::new, |owner| def_name(db, owner));
             Some(RelatedDiagnostic {
                 file: def.file_and_id().0,
                 range: def_range(db, *def)?,
@@ -466,11 +409,7 @@ fn conflict_links(db: &dyn HirDb, defs: &[DefId]) -> Vec<RelatedDiagnostic> {
         .collect()
 }
 
-fn related_declarations(
-    db: &dyn HirDb,
-    defs: &[DefId],
-    message: &str,
-) -> Vec<RelatedDiagnostic> {
+fn related_declarations(db: &dyn HirDb, defs: &[DefId], message: &str) -> Vec<RelatedDiagnostic> {
     defs.iter()
         .filter_map(|def| {
             Some(RelatedDiagnostic {
@@ -525,11 +464,14 @@ fn access_related(db: &dyn HirDb, denials: &[AccessDenial]) -> Vec<RelatedDiagno
         .iter()
         .filter_map(|denial| {
             let name = def_name(db, denial.def);
-            // ``public`/`external` do not add visibility, since the denial is 
+            // ``public`/`external` do not add visibility, since the denial is
             // owner/access path based, so naming the visibility would contradict itself.
             let message = match denial.vis {
                 Visibility::Private | Visibility::Internal => {
-                    format!("`{name}` is declared {} and is not visible here", denial.vis.as_str())
+                    format!(
+                        "`{name}` is declared {} and is not visible here",
+                        denial.vis.as_str()
+                    )
                 }
                 Visibility::Public | Visibility::External => {
                     format!("`{name}` is not visible here")
@@ -574,8 +516,8 @@ fn callable_signature(db: &dyn HirDb, def: &DefId) -> Option<String> {
                 .iter()
                 .map(|id| {
                     let local = &data.parameters[*id];
-                    let ty =
-                        data.syntax_store.types[*local.ty_ref()].to_string(&data.syntax_store.types);
+                    let ty = data.syntax_store.types[*local.ty_ref()]
+                        .to_string(&data.syntax_store.types);
                     format!("{} {}", ty, local.name())
                 })
                 .collect::<Vec<_>>()
@@ -609,7 +551,8 @@ fn callable_signature(db: &dyn HirDb, def: &DefId) -> Option<String> {
                 .parameters
                 .iter()
                 .map(|(_, p)| {
-                    let ty = data.syntax_store.types[*p.ty_ref()].to_string(&data.syntax_store.types);
+                    let ty =
+                        data.syntax_store.types[*p.ty_ref()].to_string(&data.syntax_store.types);
                     format!("{} {}", ty, p.name())
                 })
                 .collect::<Vec<_>>()
@@ -622,7 +565,8 @@ fn callable_signature(db: &dyn HirDb, def: &DefId) -> Option<String> {
                 .parameters
                 .iter()
                 .map(|(_, p)| {
-                    let ty = data.syntax_store.types[*p.ty_ref()].to_string(&data.syntax_store.types);
+                    let ty =
+                        data.syntax_store.types[*p.ty_ref()].to_string(&data.syntax_store.types);
                     format!("{} {}", ty, p.name())
                 })
                 .collect::<Vec<_>>()
@@ -635,8 +579,8 @@ fn callable_signature(db: &dyn HirDb, def: &DefId) -> Option<String> {
                 .parameters
                 .iter()
                 .map(|(_, local)| {
-                    let ty =
-                        data.syntax_store.types[*local.ty_ref()].to_string(&data.syntax_store.types);
+                    let ty = data.syntax_store.types[*local.ty_ref()]
+                        .to_string(&data.syntax_store.types);
                     format!("{} {}", ty, local.name())
                 })
                 .collect::<Vec<_>>()

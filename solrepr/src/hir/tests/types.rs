@@ -100,6 +100,14 @@ fn primitive_implicit_conversions_match_solidity_directions() {
     assert_eq!(Primitive::parse("uint"), Primitive::Uint(256));
     assert_eq!(Primitive::parse("uint7"), Primitive::Undefined);
     assert_eq!(Primitive::parse("bytes33"), Primitive::Undefined);
+    assert_eq!(Primitive::parse("fixed"), Primitive::Fixed(128, 18));
+    assert_eq!(Primitive::parse("ufixed"), Primitive::UFixed(128, 18));
+    assert_eq!(Primitive::parse("fixed128x18"), Primitive::Fixed(128, 18));
+    assert_eq!(Primitive::parse("ufixed8x0"), Primitive::UFixed(8, 0));
+    // Canonical spellings only — solc scans these as identifiers.
+    assert_eq!(Primitive::parse("fixed7x3"), Primitive::Undefined);
+    assert_eq!(Primitive::parse("fixed256x81"), Primitive::Undefined);
+    assert_eq!(Primitive::parse("fixed08x18"), Primitive::Undefined);
 }
 
 #[test]

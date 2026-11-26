@@ -3,9 +3,9 @@ use rustc_hash::FxHashMap;
 
 use crate::ast::NodeRange;
 use crate::hir::body_map::{BodyOwnerId, Local, LocalId, ScopeId};
+use crate::hir::diagnostics::DiagnosticAnchor;
 use crate::hir::exprs::{Expr, ExprId};
 use crate::hir::item_data::{Field, FieldId, SemanticId, Variant, VariantId};
-use crate::hir::diagnostics::DiagnosticAnchor;
 use crate::hir::types::{TyName, TyNameId};
 use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
@@ -16,7 +16,8 @@ use crate::salsa::root_db::def_range;
 pub struct SyntaxStore {
     pub types: Arena<TyName>,
     pub exprs: Arena<Expr>,
-    pub name_expr: Option<ExprId>,
+    /// The owner's own declared name, when it has one.
+    pub name: Option<ExprId>,
 }
 
 impl Default for SyntaxStore {
@@ -24,7 +25,7 @@ impl Default for SyntaxStore {
         Self {
             types: Arena::new(),
             exprs: Arena::new(),
-            name_expr: None,
+            name: None,
         }
     }
 }
@@ -110,7 +111,23 @@ fn with_owner<R>(
 }
 
 pub fn semantic_at(db: &dyn HirDb, owner: DefId, range: NodeRange) -> Option<SemanticId> {
-    with_owner(db, owner, |_, map| map.range_to_semantic.get(&range).copied())?
+    with_owner(db, owner, |_, map| {
+        map.range_to_semantic.get(&range).copied()
+    })?
+}
+
+/// Every spelled occurrence in `owner`'s store; a file has none. A callback
+/// because the map borrows a per-owner `Arc` that must not outlive the call.
+pub(crate) fn for_each_semantic(
+    db: &dyn HirDb,
+    owner: DefId,
+    mut f: impl FnMut(NodeRange, SemanticId),
+) {
+    let _ = with_owner(db, owner, |_, map| {
+        for (&range, &id) in &map.range_to_semantic {
+            f(range, id);
+        }
+    });
 }
 
 /// The callee an expression *denotes*: the expression itself, or — when it is a

@@ -1,4 +1,5 @@
-use crate::salsa::Db;
+use crate::salsa::root_db::{import_map, imports, imports_closure};
+use crate::salsa::{Db, File};
 use crate::utilities::fixture_path;
 use crate::workspace::loader::load_roots;
 use crate::workspace::{
@@ -6,6 +7,8 @@ use crate::workspace::{
 };
 use camino::Utf8PathBuf;
 use ropey::Rope;
+use rustc_hash::FxHashSet;
+use smol_str::SmolStr;
 
 fn standalone_db() -> Db {
     let root = fixture_path("fixtures/workspaces/standalone/basic");
@@ -273,6 +276,213 @@ fn a_project_rooted_import_resolves_against_the_package_root() {
     assert_eq!(
         resolved.map(|file| file.path(&db).clone()),
         Some(root.join("src/Foo.sol"))
+    );
+}
+
+fn indexed(db: &Db, path: Utf8PathBuf) -> File {
+    db.file(&path)
+        .unwrap_or_else(|| panic!("{path} is indexed"))
+}
+
+/// One root, one package, files given as text — the smallest workspace that
+/// exercises resolution without a tree on disk.
+fn workspace(root: &str, files: &[(&str, &str)]) -> WorkspaceWithFiles<LoadedFile> {
+    let root = Utf8PathBuf::from(root);
+    let package = PackageId(root.clone());
+    WorkspaceWithFiles {
+        ignored_roots: Vec::new(),
+        packages: vec![Package {
+            root: root.clone(),
+            remappings: Vec::new(),
+        }],
+        roots: vec![RootWithFiles {
+            path: root.clone(),
+            package_id: package,
+            is_dependency: false,
+            files: files
+                .iter()
+                .map(|(relative, text)| LoadedFile {
+                    path: root.join(relative),
+                    text: Some(Rope::from_str(text)),
+                })
+                .collect(),
+        }],
+    }
+}
+
+#[test]
+fn imports_resolve_through_the_remapping_table() {
+    let fixture = fixture_path("fixtures/workspaces/foundry/remappings/vendor");
+    let db = Db::new(load_roots(fixture.clone()));
+    let main = indexed(&db, fixture.join("Main.sol"));
+    let dep = indexed(&db, fixture.join("vendor/dep/Dep.sol"));
+
+    let edges = imports(&db, main);
+    assert_eq!(edges.resolved, vec![dep]);
+    assert!(
+        edges.unresolved.is_empty(),
+        "every import in the fixture resolves"
+    );
+}
+
+#[test]
+fn importers_invert_the_table() {
+    let fixture = fixture_path("fixtures/workspaces/foundry/remappings/vendor");
+    let db = Db::new(load_roots(fixture.clone()));
+    let main = indexed(&db, fixture.join("Main.sol"));
+    let dep = indexed(&db, fixture.join("vendor/dep/Dep.sol"));
+
+    let map = import_map(&db);
+    assert_eq!(map.of(dep), &[main]);
+    assert_eq!(map.dependents_of([dep]), FxHashSet::from_iter([main]));
+}
+
+#[test]
+fn dependents_are_transitive_and_survive_a_cycle() {
+    let db = Db::new(workspace(
+        "/tmp/solrepr_deps_cycle",
+        &[
+            ("A.sol", "import \"./B.sol\";\ncontract A {}"),
+            ("B.sol", "import \"./C.sol\";\ncontract B {}"),
+            ("C.sol", "contract C {}"),
+        ],
+    ));
+    let a = indexed(&db, Utf8PathBuf::from("/tmp/solrepr_deps_cycle/A.sol"));
+    let b = indexed(&db, Utf8PathBuf::from("/tmp/solrepr_deps_cycle/B.sol"));
+    let c = indexed(&db, Utf8PathBuf::from("/tmp/solrepr_deps_cycle/C.sol"));
+
+    let map = import_map(&db);
+    assert_eq!(map.dependents_of([c]), FxHashSet::from_iter([a, b]));
+
+    // `A` imports `B` and `B` imports `A`: the seed comes back through the cycle
+    // instead of the walk failing to terminate.
+    let db = Db::new(workspace(
+        "/tmp/solrepr_deps_cycle_two",
+        &[
+            ("A.sol", "import \"./B.sol\";\ncontract A {}"),
+            ("B.sol", "import \"./A.sol\";\ncontract B {}"),
+        ],
+    ));
+    let a = indexed(&db, Utf8PathBuf::from("/tmp/solrepr_deps_cycle_two/A.sol"));
+    let b = indexed(&db, Utf8PathBuf::from("/tmp/solrepr_deps_cycle_two/B.sol"));
+    assert_eq!(
+        import_map(&db).dependents_of([a]),
+        FxHashSet::from_iter([a, b])
+    );
+}
+
+#[test]
+fn closure_names_are_relative_to_the_entry_package() {
+    let fixture = fixture_path("fixtures/workspaces/foundry/remappings/vendor");
+    let db = Db::new(load_roots(fixture.clone()));
+    let main = indexed(&db, fixture.join("Main.sol"));
+
+    let names = imports_closure(&db, main)
+        .iter()
+        .map(|unit| unit.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Main.sol", "vendor/dep/Dep.sol"]);
+}
+
+#[test]
+fn an_unresolved_import_keeps_its_literal() {
+    let root = "/tmp/solrepr_deps_unresolved";
+    let db = Db::new(workspace(
+        root,
+        &[("Main.sol", "import \"./Missing.sol\";\ncontract Main {}")],
+    ));
+    let main = indexed(&db, Utf8PathBuf::from(root).join("Main.sol"));
+
+    let edges = imports(&db, main);
+    assert!(edges.resolved.is_empty());
+    assert_eq!(edges.unresolved, [SmolStr::from("./Missing.sol")]);
+}
+
+/// The file index is not a salsa input, so `imports` reads `FilesRevision` to
+/// become a dependency of it. A path that appears must re-run the query.
+#[test]
+fn a_file_appearing_resolves_a_previously_unresolved_import() {
+    let root = "/tmp/solrepr_deps_appears";
+    let mut db = Db::new(workspace(
+        root,
+        &[("Main.sol", "import \"./Missing.sol\";\ncontract Main {}")],
+    ));
+    let main = indexed(&db, Utf8PathBuf::from(root).join("Main.sol"));
+    assert_eq!(imports(&db, main).unresolved.len(), 1);
+
+    db.open_file(
+        Utf8PathBuf::from(root).join("Missing.sol"),
+        "contract Missing {}".to_string(),
+    )
+    .expect("the path is under a source root");
+
+    let edges = imports(&db, main);
+    assert!(edges.unresolved.is_empty());
+    assert_eq!(edges.resolved.len(), 1);
+}
+
+/// Two directives to one file are one edge in the index; each still resolves on
+/// its own, because the def map binds one directive at a time.
+#[test]
+fn two_directives_to_one_file_are_one_edge() {
+    let root = "/tmp/solrepr_deps_two_directives";
+    let db = Db::new(workspace(
+        root,
+        &[
+            (
+                "A.sol",
+                "import \"./B.sol\";\nimport {B} from \"./B.sol\";\ncontract A {}",
+            ),
+            ("B.sol", "contract B {}"),
+        ],
+    ));
+    let a = indexed(&db, Utf8PathBuf::from(root).join("A.sol"));
+    let b = indexed(&db, Utf8PathBuf::from(root).join("B.sol"));
+
+    assert_eq!(imports(&db, a).resolved, vec![b]);
+    assert_eq!(import_map(&db).of(b), &[a]);
+}
+
+/// The reverse index covers workspace roots only, but the forward direction
+/// does not: a dependency can still be walked into, which is what solc needs.
+#[test]
+fn a_dependency_imports_the_workspace_but_is_not_in_the_index() {
+    let root = Utf8PathBuf::from("/tmp/solrepr_deps_dependency");
+    let package = PackageId(root.clone());
+    let db = Db::new(WorkspaceWithFiles {
+        ignored_roots: Vec::new(),
+        packages: vec![Package {
+            root: root.clone(),
+            remappings: Vec::new(),
+        }],
+        roots: vec![
+            RootWithFiles {
+                path: root.join("src"),
+                package_id: package.clone(),
+                is_dependency: false,
+                files: vec![LoadedFile {
+                    path: root.join("src/A.sol"),
+                    text: Some(Rope::from_str("contract A {}")),
+                }],
+            },
+            RootWithFiles {
+                path: root.join("lib/dep"),
+                package_id: package,
+                is_dependency: true,
+                files: vec![LoadedFile {
+                    path: root.join("lib/dep/D.sol"),
+                    text: Some(Rope::from_str("import \"src/A.sol\";\ncontract D {}")),
+                }],
+            },
+        ],
+    });
+    let a = indexed(&db, root.join("src/A.sol"));
+    let d = indexed(&db, root.join("lib/dep/D.sol"));
+
+    assert_eq!(imports(&db, d).resolved, vec![a]);
+    assert!(
+        import_map(&db).of(a).is_empty(),
+        "a dependency root is outside the reverse index"
     );
 }
 

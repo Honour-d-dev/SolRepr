@@ -380,7 +380,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             .expr_orders
             .and_then(|map| map.get(expr).copied())
             .unwrap_or_default();
-        let is_self_name = self.store.name_expr == Some(expr);
+        let is_self_name = self.store.name == Some(expr);
         self.resolver
             .resolve_name_in(name, scope, order, is_self_name)
     }

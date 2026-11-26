@@ -8,7 +8,7 @@ import {
     Trace,
 } from "vscode-languageclient/node";
 
-type ServerSource = "setting" | "bundled" | "path" | "dev";
+type ServerSource = "setting" | "bundled" | "path" | "cargo" | "dev";
 
 export interface ResolvedServer {
     path: string;
@@ -61,6 +61,24 @@ function findOnPath(name: string): string | undefined {
     return undefined;
 }
 
+/// `cargo install` writes here, and a GUI-launched editor frequently does not
+/// inherit the shell `PATH` that would otherwise make it visible — macOS from
+/// the Dock, Windows from Start.
+function findInCargoBin(name: string): string | undefined {
+    const home = process.env.CARGO_HOME ?? process.env.HOME ?? process.env.USERPROFILE;
+    if (!home) {
+        return undefined;
+    }
+    const candidate = path.join(home, "bin", name);
+    const mode = process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK;
+    try {
+        fs.accessSync(candidate, mode);
+        return candidate;
+    } catch {
+        return undefined;
+    }
+}
+
 /// The workspace build a development host runs, debug first — the profile
 /// `cargo build` writes there.
 function findDevBuild(context: vscode.ExtensionContext): string | undefined {
@@ -74,7 +92,8 @@ function findDevBuild(context: vscode.ExtensionContext): string | undefined {
 }
 
 ///@notice Resolves the server binary: explicit setting, a development build in a
-/// development host, bundled copy, then PATH. Throws with instructions when none is found.
+/// development host, bundled copy, PATH, then the cargo bin directory. Throws
+/// with instructions when none is found.
 export function resolveServerPath(context: vscode.ExtensionContext): ResolvedServer {
     const configuredPath = vscode.workspace
         .getConfiguration("solrepr")
@@ -106,10 +125,16 @@ export function resolveServerPath(context: vscode.ExtensionContext): ResolvedSer
         return { path: onPath, source: "path" };
     }
 
+    const inCargoBin = findInCargoBin(executableName());
+    if (inCargoBin) {
+        return { path: inCargoBin, source: "cargo" };
+    }
+
+    const version = context.extension.packageJSON.version;
     throw new Error(
         isDev
             ? `solrepr binary not found. Run \`cargo build\` at the repo root, set "solrepr.serverPath", or put "${executableName()}" on PATH.`
-            : `solrepr binary not found. Set "solrepr.serverPath", put "${executableName()}" on PATH, or install a platform-specific build.`,
+            : `solrepr has no binary for ${platformKey() ?? process.platform}, and no ${executableName()} on PATH or in ~/.cargo/bin.\n\nBuild the server from source:\n\ncargo install --git https://github.com/Honour-d-dev/SolRepr --tag v${version} --locked\n\nThis needs Rust (https://rustup.rs); the binary lands in ~/.cargo/bin, which SolRepr probes directly. Or set "solrepr.serverPath".`,
     );
 }
 

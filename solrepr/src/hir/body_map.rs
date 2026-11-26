@@ -32,7 +32,6 @@ impl Scope {
     pub fn parent(&self) -> Option<ScopeId> {
         self.parent
     }
-
 }
 
 pub type LocalId = Idx<Local>;
@@ -187,9 +186,7 @@ impl BodyBuilder {
             match child.kind_id().into() {
                 NodeKind::VAR_DECLARATION_STATEMENT => self.collect_declaration(child),
                 // `try` statements expose bare parameters as direct descendants.
-                NodeKind::PARAMETER => {
-                    self.add_local(child, VariableKind::Parameter, None)
-                }
+                NodeKind::PARAMETER => self.add_local(child, VariableKind::Parameter, None),
                 NodeKind::STATEMENT
                 | NodeKind::IF_STATEMENT
                 | NodeKind::WHILE_STATEMENT
@@ -244,7 +241,7 @@ impl BodyBuilder {
                     // The owner's own name at its declaration — an id, not a
                     // range, so the resolver never reads the source map.
                     if let Some(expr_id) = self.lower_expr(child) {
-                        self.syntax_store.name_expr = Some(expr_id);
+                        self.syntax_store.name = Some(expr_id);
                     }
                 }
                 NodeKind::PARAMETER => {
@@ -274,9 +271,7 @@ impl BodyBuilder {
                         .into();
                     range = Some(NodeRange::from(&child));
                 }
-                NodeKind::TYPE_NAME => {
-                    ty = self.lower_type(child).map(|ty_ref| (ty_ref, child))
-                }
+                NodeKind::TYPE_NAME => ty = self.lower_type(child).map(|ty_ref| (ty_ref, child)),
                 NodeKind::MEMORY => location = Some(Location::Memory),
                 NodeKind::STORAGE => location = Some(Location::Storage(RefKind::Pointer)),
                 NodeKind::CALLDATA => location = Some(Location::Calldata),
@@ -409,4 +404,3 @@ impl TypeBuilder for BodyBuilder {
         ty_ref_id
     }
 }
-

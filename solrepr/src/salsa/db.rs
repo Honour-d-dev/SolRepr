@@ -44,7 +44,6 @@ macro_rules! map_def_id {
     };
 }
 
-
 pub type FileId = File;
 #[salsa::input]
 #[derive(Debug)]
@@ -72,19 +71,6 @@ pub struct Packages {
     pub packages: Arc<[Package]>,
 }
 
-/// Bumped by every change to the file index, so a new or removed root
-/// invalidates the def maps that resolved through it.
-/// Is a direct dependency in [`RootDb::resolve_to_file`].
-#[salsa::input(singleton)]
-pub struct FilesRevision {
-    pub revision: u32,
-}
-
-pub(super) fn bump_revision(db: &mut dyn salsa::Database) {
-    let revision = FilesRevision::get(db).revision(db);
-    FilesRevision::get(db).set_revision(db).to(revision + 1);
-}
-
 #[salsa::db]
 #[derive(Default)]
 pub struct Db {
@@ -110,33 +96,37 @@ impl Clone for Db {
 }
 
 impl Db {
-    
     pub(crate) fn new<F: FileContent>(workspace: WorkspaceWithFiles<F>) -> Self {
         Self::build(workspace, Self::storage())
     }
 
     /// A database whose salsa events are collected by `recorder`. (for testing only)
     #[cfg(test)]
-    pub(crate) fn with_events<F: FileContent, R>(workspace: WorkspaceWithFiles<F>, recorder: R) -> Self
+    pub(crate) fn with_events<F: FileContent, R>(
+        workspace: WorkspaceWithFiles<F>,
+        recorder: R,
+    ) -> Self
     where
         R: Fn(salsa::Event) + Send + Sync + 'static,
     {
         Self::build(workspace, salsa::Storage::new(Some(Box::new(recorder))))
     }
 
-    fn build<F: FileContent>(mut workspace: WorkspaceWithFiles<F>, storage: salsa::Storage<Self>) -> Self {
+    fn build<F: FileContent>(
+        mut workspace: WorkspaceWithFiles<F>,
+        storage: salsa::Storage<Self>,
+    ) -> Self {
         let mut db = Self {
             storage,
-            files: Arc::new(Files::new()),
+            files: Arc::new(Files::default()),
         };
 
         // Seed the singleton inputs
         let _ = Packages::builder(std::mem::take(&mut workspace.packages).into())
             .durability(Durability::MEDIUM)
             .new(&db);
-        let _ = FilesRevision::builder(0).new(&db);
 
-        db.files = Arc::new(Files::new().add_roots(&mut db, workspace.into()));
+        db.files = Arc::new(Files::new(&db).add_roots(&mut db, workspace.into()));
         db
     }
 
@@ -160,7 +150,11 @@ impl Db {
     }
 
     pub fn file_source_root(&self, file: FileId) -> Option<SourceRoot> {
-        self.files.file_source_root(file)
+        self.files.file_source_root(self, file)
+    }
+
+    pub fn source_roots(&self) -> &[SourceRoot] {
+        self.files.source_roots(self)
     }
 
     pub fn workspace(&self) -> Workspace<()> {
@@ -202,7 +196,11 @@ impl Db {
         file.text(self)
     }
 
-    pub fn convert(&self, path: &Utf8PathBuf, position: lsp_types::Position) -> Option<(File, ByteOffset)> {
+    pub fn convert(
+        &self,
+        path: &Utf8PathBuf,
+        position: lsp_types::Position,
+    ) -> Option<(File, ByteOffset)> {
         let file = self.file(path)?;
         let rope = self.rope(file);
         let char_idx = to_rope_idx(&rope, position);
@@ -277,9 +275,8 @@ impl Db {
         path
     }
 
- 
     /// Apply a file change event to the database.
-    /// 
+    ///
     /// This function handles the case where a file is created, updated, or removed.
     /// It's a noop for opened files since the editor owns file text
     pub fn apply_file_change(&mut self, path: &Utf8Path) -> ChangeEvent {
@@ -299,7 +296,7 @@ impl Db {
                 Some(file) => ChangeEvent::Removed(file),
                 None => ChangeEvent::Skipped,
             },
-            (None, Some(text)) => match files.index_file(self, path, text) {
+            (None, Some(text)) => match files.add_file(self, path, text) {
                 Some(file) => ChangeEvent::Created(file),
                 // On disk, but under no root we know: a dependency directory
                 // may have appeared.
@@ -336,7 +333,6 @@ pub struct DbSnapshot {
 }
 
 impl DbSnapshot {
-    
     pub fn lsp_diagnostics(&self, file: File) -> Cancellable<Arc<[LspDiagnostic]>> {
         self.call(|db| lsp_diagnostics(db, file))
     }

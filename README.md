@@ -79,7 +79,24 @@ analysis and aim at semantic correctness; compilation remains `solc`'s job.
   The release ships `solrepr-installer.sh` and `solrepr-installer.ps1`, which install the
   server binary to `~/.cargo/bin`.
 
-### From source
+### Build server binary from source
+
+Prebuilt server binaries exist for `linux-x64`, `darwin-arm64` and `win32-x64`. On any other
+platform — or when you would rather build it yourself — install the server with one command:
+
+```bash
+cargo install --git https://github.com/Honour-d-dev/SolRepr --tag v<version> --locked
+```
+
+- `v<version>` must match the extension's version, so the server speaks the protocol that
+  client expects.
+- `--locked` builds from the committed `Cargo.lock` — the dependency set CI tested.
+- The binary lands in `~/.cargo/bin`, which SolRepr probes directly: a GUI-launched editor
+  often does not inherit the shell `PATH` that would otherwise make it visible.
+- Needs Rust (<https://rustup.rs>) and a linker — Xcode Command Line Tools on macOS,
+  `build-essential` on Linux, the MSVC build tools on Windows.
+
+### Build vsix from source for supported platforms
 
 Build the release server, then package the extension for your platform:
 
@@ -104,8 +121,10 @@ npm run package:platform
 
   Extensions -> ...(views and more actions) -> install from vsix -> the built vsix
 
-For the universal package (no bundled binary), run `npm run package`; it writes `solrepr.vsix`.
-Install the same way, then point `solrepr.serverPath` at the binary or put it on `PATH`.
+The universal package (`npm run package`, writes `solrepr.vsix`) bundles **no** binary — it is
+for platforms without a prebuilt build. Install it, then build the server with the command in
+[Build server binary from source](#build-server-binary-from-source). `solrepr.serverPath` still
+overrides every lookup if you keep the binary somewhere else.
 
 ### Any editor
 
