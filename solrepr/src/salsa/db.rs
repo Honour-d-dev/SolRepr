@@ -1,7 +1,7 @@
 use std::panic::AssertUnwindSafe;
 use triomphe::Arc;
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use lsp_types::Diagnostic as LspDiagnostic;
 use lsp_types::TextDocumentContentChangeEvent;
 use ropey::Rope;
@@ -16,8 +16,8 @@ use crate::capabilities::diagnostics::lsp_diagnostics;
 use crate::hir::body_map::ByteOffset;
 use crate::ir::def_map::DefId;
 
-use crate::utilities::logger;
-use crate::utilities::{normalize_path, to_rope_idx};
+use crate::paths::NormalizedPath;
+use crate::utilities::{logger, to_rope_idx};
 use crate::workspace::diff::WorkspaceDiff;
 use crate::workspace::watch::ChangeEvent;
 use crate::workspace::{
@@ -50,7 +50,8 @@ pub type FileId = File;
 pub struct File {
     pub text: Rope,
     #[returns(ref)]
-    pub path: Utf8PathBuf,
+    pub path: NormalizedPath,
+    pub root: SourceRootId,
 }
 
 pub type SourceRootId = SourceRoot;
@@ -58,7 +59,7 @@ pub type SourceRootId = SourceRoot;
 #[derive(Debug)]
 pub struct SourceRoot {
     #[returns(ref)]
-    pub root: Utf8PathBuf,
+    pub root: NormalizedPath,
     pub package_id: PackageId,
     #[returns(ref)]
     pub files: Arc<[FileId]>,
@@ -69,6 +70,12 @@ pub struct SourceRoot {
 pub struct Packages {
     #[returns(ref)]
     pub packages: Arc<[Package]>,
+}
+
+#[salsa::input(singleton)]
+pub struct RootSet {
+    #[returns(ref)]
+    pub roots: Arc<[SourceRootId]>,
 }
 
 #[salsa::db]
@@ -125,8 +132,12 @@ impl Db {
         let _ = Packages::builder(std::mem::take(&mut workspace.packages).into())
             .durability(Durability::MEDIUM)
             .new(&db);
+        let _ = RootSet::builder(Arc::from(Vec::new()))
+            .durability(Durability::HIGH)
+            .new(&db);
 
-        db.files = Arc::new(Files::new(&db).add_roots(&mut db, workspace.into()));
+        let files = db.files.clone();
+        db.files = Arc::new(files.add_roots(&mut db, workspace.into()));
         db
     }
 
@@ -145,16 +156,16 @@ impl Db {
         DbSnapshot { db: self.clone() }
     }
 
-    pub fn file(&self, path: &Utf8PathBuf) -> Option<File> {
+    pub fn file(&self, path: &Utf8Path) -> Option<File> {
         self.files.file(path)
     }
 
-    pub fn file_source_root(&self, file: FileId) -> Option<SourceRoot> {
-        self.files.file_source_root(self, file)
+    pub fn file_source_root(&self, file: FileId) -> SourceRootId {
+        file.root(self)
     }
 
-    pub fn source_roots(&self) -> &[SourceRoot] {
-        self.files.source_roots(self)
+    pub fn source_roots(&self) -> &[SourceRootId] {
+        RootSet::get(self).roots(self)
     }
 
     pub fn workspace(&self) -> Workspace<()> {
@@ -181,7 +192,7 @@ impl Db {
         self.files.is_ignored(path)
     }
 
-    pub fn ignored_paths(&self) -> &[Utf8PathBuf] {
+    pub fn ignored_paths(&self) -> &[NormalizedPath] {
         self.files.ignored_paths()
     }
 
@@ -198,7 +209,7 @@ impl Db {
 
     pub fn convert(
         &self,
-        path: &Utf8PathBuf,
+        path: &Utf8Path,
         position: lsp_types::Position,
     ) -> Option<(File, ByteOffset)> {
         let file = self.file(path)?;
@@ -211,7 +222,7 @@ impl Db {
     #[allow(dead_code)]
     pub fn node_at_position(
         &self,
-        path: &Utf8PathBuf,
+        path: &Utf8Path,
         position: lsp_types::Position,
     ) -> Option<AstNode> {
         let (file, offset) = self.convert(path, position)?;
@@ -279,24 +290,26 @@ impl Db {
     ///
     /// This function handles the case where a file is created, updated, or removed.
     /// It's a noop for opened files since the editor owns file text
-    pub fn apply_file_change(&mut self, path: &Utf8Path) -> ChangeEvent {
+    pub fn apply_file_change(&mut self, path: &NormalizedPath) -> ChangeEvent {
         let files = self.files.clone();
-        let path = normalize_path(path);
-        let existing = self.files.file(&path);
-        if existing.is_some_and(|file| files.is_open(file)) || files.is_ignored(&path) {
+        let existing = self.files.file(path);
+        if existing.is_some_and(|file| files.is_open(file)) || files.is_ignored(path) {
             return ChangeEvent::Skipped;
         }
 
-        match (existing, loader::read(&path)) {
+        match (existing, loader::read(path)) {
             (Some(file), Some(text)) => {
+                if file.text(self) == text {
+                    return ChangeEvent::Skipped;
+                }
                 file.set_text(self).to(text);
                 ChangeEvent::Updated(file)
             }
-            (Some(_), None) => match files.remove_file(self, &path) {
+            (Some(_), None) => match files.remove_file(self, path) {
                 Some(file) => ChangeEvent::Removed(file),
                 None => ChangeEvent::Skipped,
             },
-            (None, Some(text)) => match files.add_file(self, path, text) {
+            (None, Some(text)) => match files.add_file(self, path.clone(), text) {
                 Some(file) => ChangeEvent::Created(file),
                 // On disk, but under no root we know: a dependency directory
                 // may have appeared.
@@ -311,18 +324,18 @@ impl Db {
         self.files.close_file(file);
     }
 
-    pub fn open_file(&mut self, path: Utf8PathBuf, text: String) -> Option<File> {
+    pub fn open_file(&mut self, path: impl Into<NormalizedPath>, text: String) -> Option<File> {
         let files = self.files.clone();
-        files.open_file(self, path, text)
+        files.open_file(self, path.into(), text)
     }
 
     pub fn apply_changes(
         &mut self,
-        path: Utf8PathBuf,
+        path: impl Into<NormalizedPath>,
         changes: Vec<TextDocumentContentChangeEvent>,
     ) -> Option<File> {
         let files = self.files.clone();
-        files.apply_changes(self, path, changes)
+        files.apply_changes(self, path.into(), changes)
     }
 }
 

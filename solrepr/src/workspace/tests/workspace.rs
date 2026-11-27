@@ -1,3 +1,4 @@
+use crate::paths::NormalizedPath;
 use crate::utilities::fixture_path;
 use crate::workspace::{
     Package, PackageId, RootWithFiles, WorkspaceWithFiles, discover_workspace, discover_workspaces,
@@ -99,16 +100,16 @@ fn one_folder_skips_the_merge() {
 fn merging_folders_dedupes_shared_facts() {
     let workspace = |root: &str, package: &str, ignored: &[&str]| WorkspaceWithFiles {
         packages: vec![Package {
-            root: Utf8PathBuf::from(package),
+            root: NormalizedPath::new(package),
             remappings: Vec::new(),
         }],
         roots: vec![RootWithFiles {
-            path: Utf8PathBuf::from(root),
-            package_id: PackageId(Utf8PathBuf::from(package)),
-            files: vec![Utf8PathBuf::from(format!("{root}/A.sol"))],
+            path: NormalizedPath::new(root),
+            package_id: PackageId(NormalizedPath::new(package)),
+            files: vec![NormalizedPath::new(format!("{root}/A.sol"))],
             is_dependency: false,
         }],
-        ignored_roots: ignored.iter().map(Utf8PathBuf::from).collect(),
+        ignored_roots: ignored.iter().map(NormalizedPath::new).collect(),
     };
 
     let outer = workspace("/proj", "/proj", &["/proj/lib/dep", "/proj/lib/other"]);
@@ -154,12 +155,11 @@ fn nested_duplicate_library_is_skipped_but_unique_transitive_dependency_is_kept(
             .iter()
             .any(|root| root.ends_with("dependencies/dep-a/lib/duplicate"))
     );
-    assert!(
-        !discovered
-            .roots
-            .iter()
-            .any(|source| source.path.ends_with("dependencies/dep-a/lib/duplicate/src"))
-    );
+    assert!(!discovered.roots.iter().any(|source| {
+        source
+            .path
+            .ends_with("dependencies/dep-a/lib/duplicate/src")
+    }));
     // The skipped copy stays on the ignored list — out of the
     // compilation unit but tracked so opened files there stay silent.
     assert!(
@@ -189,9 +189,12 @@ fn discovers_hardhat_fixture_sources() {
     let discovered = discover_workspace(&root);
 
     assert_eq!(discovered.packages.len(), 1);
-    assert!(discovered.roots.iter().any(|source| {
-        source.path.ends_with("contracts") && !source.files.is_empty()
-    }));
+    assert!(
+        discovered
+            .roots
+            .iter()
+            .any(|source| { source.path.ends_with("contracts") && !source.files.is_empty() })
+    );
 }
 
 #[test]
@@ -294,8 +297,7 @@ fn remappings_only_root_keeps_remappings_and_indexes_vendored_files() {
 
 #[test]
 fn empty_workspace_root_keeps_a_fallback_source_root() {
-    let root =
-        fixture_path("fixtures/workspaces/standalone/empty");
+    let root = fixture_path("fixtures/workspaces/standalone/empty");
     let discovered = discover_workspace(&root);
 
     assert_eq!(discovered.packages.len(), 1);
@@ -469,7 +471,12 @@ fn remapping_into_a_source_dir_resolves_to_the_package_root() {
         .iter()
         .find(|source| source.is_dependency && source.path.ends_with("dependencies/fs"))
         .expect("dependencies/fs is a dependency source root");
-    assert!(dependency.files.iter().any(|file| file.ends_with("Lib.sol")));
+    assert!(
+        dependency
+            .files
+            .iter()
+            .any(|file| file.ends_with("Lib.sol"))
+    );
 }
 
 #[test]
@@ -489,9 +496,12 @@ fn remapping_into_an_ignored_library_copy_stays_ignored() {
             .iter()
             .any(|package| package.root.ends_with("dep-a/lib/duplicate"))
     );
-    assert!(!discovered.roots.iter().any(|source| {
-        source.path.ends_with("dep-a/lib/duplicate")
-    }));
+    assert!(
+        !discovered
+            .roots
+            .iter()
+            .any(|source| { source.path.ends_with("dep-a/lib/duplicate") })
+    );
 }
 
 /// A dependency's `test`/`script` dirs are outside the compilation unit:

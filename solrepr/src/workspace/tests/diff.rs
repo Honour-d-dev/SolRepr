@@ -1,6 +1,6 @@
-use camino::Utf8PathBuf;
 use rustc_hash::FxHashSet;
 
+use crate::paths::NormalizedPath;
 use crate::workspace::diff::{WorkspaceDiff, diff};
 use crate::workspace::{
     Package, PackageId, Remapping, Root, RootWithFiles, Workspace, WorkspaceWithFiles,
@@ -10,39 +10,45 @@ use crate::workspace::{
 /// reload compares roots, never their file lists.
 fn facts(roots: &[(&str, &str)], ignored: &[&str]) -> Workspace<()> {
     Workspace {
-        packages: vec![Package::default()],
+        packages: vec![Package {
+            root: NormalizedPath::new("/w"),
+            remappings: Vec::new(),
+        }],
         roots: roots
             .iter()
             .map(|(path, package)| Root {
-                path: Utf8PathBuf::from(*path),
-                package_id: PackageId(Utf8PathBuf::from(*package)),
+                path: NormalizedPath::new(*path),
+                package_id: PackageId(NormalizedPath::new(*package)),
                 files: (),
                 is_dependency: false,
             })
             .collect(),
-        ignored_roots: ignored.iter().map(Utf8PathBuf::from).collect(),
+        ignored_roots: ignored.iter().map(NormalizedPath::new).collect(),
     }
     .sorted()
 }
 
 /// A fresh discovery: the same facts plus the files under each root.
-fn workspace(roots: &[(&str, &str)], ignored: &[&str]) -> WorkspaceWithFiles<Utf8PathBuf> {
+fn workspace(roots: &[(&str, &str)], ignored: &[&str]) -> WorkspaceWithFiles<NormalizedPath> {
     WorkspaceWithFiles {
-        packages: vec![Package::default()],
+        packages: vec![Package {
+            root: NormalizedPath::new("/w"),
+            remappings: Vec::new(),
+        }],
         roots: roots
             .iter()
             .map(|(path, package)| RootWithFiles {
-                path: Utf8PathBuf::from(*path),
-                package_id: PackageId(Utf8PathBuf::from(*package)),
-                files: vec![Utf8PathBuf::from(*path).join("A.sol")],
+                path: NormalizedPath::new(*path),
+                package_id: PackageId(NormalizedPath::new(*package)),
+                files: vec![NormalizedPath::new(format!("{path}/A.sol"))],
                 is_dependency: false,
             })
             .collect(),
-        ignored_roots: ignored.iter().map(Utf8PathBuf::from).collect(),
+        ignored_roots: ignored.iter().map(NormalizedPath::new).collect(),
     }
 }
 
-fn added(diff: &WorkspaceDiff<Utf8PathBuf>) -> Vec<&str> {
+fn added(diff: &WorkspaceDiff<NormalizedPath>) -> Vec<&str> {
     diff.roots_added
         .iter()
         .map(|root| root.path.as_str())
@@ -72,7 +78,7 @@ fn a_new_root_is_added_with_the_files_under_it() {
     assert_eq!(added(&result), vec!["/w/lib/dep"]);
     assert_eq!(
         result.roots_added[0].files,
-        vec![Utf8PathBuf::from("/w/lib/dep/A.sol")]
+        vec![NormalizedPath::new("/w/lib/dep/A.sol")]
     );
     assert!(result.removed.is_empty());
 }
@@ -84,7 +90,10 @@ fn a_vanished_root_is_removed() {
         workspace(&[("/w", "/w")], &[]),
     );
 
-    assert_eq!(result.removed, FxHashSet::from_iter([Utf8PathBuf::from("/w/lib/dep")]));
+    assert_eq!(
+        result.removed,
+        FxHashSet::from_iter([NormalizedPath::new("/w/lib/dep")])
+    );
     assert!(result.roots_added.is_empty());
 }
 
@@ -98,7 +107,10 @@ fn a_root_that_changes_owner_is_replaced() {
     );
 
     assert!(!result.is_empty());
-    assert_eq!(result.removed, FxHashSet::from_iter([Utf8PathBuf::from("/w/lib/dep")]));
+    assert_eq!(
+        result.removed,
+        FxHashSet::from_iter([NormalizedPath::new("/w/lib/dep")])
+    );
     assert_eq!(added(&result), vec!["/w/lib/dep"]);
 }
 
@@ -108,13 +120,13 @@ fn a_remapping_edit_is_a_change_with_no_structural_move() {
     old.packages[0].remappings = vec![Remapping {
         context: None,
         prefix: "dep/".to_string(),
-        target: Utf8PathBuf::from("lib/dep"),
+        target: NormalizedPath::new("lib/dep"),
     }];
     let mut new = workspace(&[("/w", "/w")], &[]);
     new.packages[0].remappings = vec![Remapping {
         context: None,
         prefix: "dep/".to_string(),
-        target: Utf8PathBuf::from("lib/other"),
+        target: NormalizedPath::new("lib/other"),
     }];
 
     let (_, result) = diff(&old, new);
@@ -135,7 +147,7 @@ fn the_ignored_set_travels_whole() {
     assert!(!result.is_empty());
     assert_eq!(
         result.ignored,
-        Some(vec![Utf8PathBuf::from("/w/lib/dep/script")])
+        Some(vec![NormalizedPath::new("/w/lib/dep/script")])
     );
     assert!(result.roots_added.is_empty());
     assert!(result.removed.is_empty());

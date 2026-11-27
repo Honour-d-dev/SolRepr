@@ -3,19 +3,21 @@
 
 use std::collections::VecDeque;
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::detect::{
-    PackageDescriptor, PackageReference, find_package_roots, package_descriptor,
-};
+use crate::paths::NormalizedPath;
+
+use super::detect::{PackageDescriptor, PackageReference, find_package_roots, package_descriptor};
 
 /// Expand every package source into one deduplicated graph, with the roots kept
 /// out of the compilation unit in `ignored`.
 ///
 /// Breadth-first, so an ancestor's claim on a library name skips the nested
 /// copy (duplicate OpenZeppelin under `lib/`) while unclaimed ones survive.
-pub(super) fn discover_package_graph( root: &Utf8Path ) -> (Vec<PackageDescriptor>, Vec<Utf8PathBuf>) {
+pub(super) fn discover_package_graph(
+    root: &Utf8Path,
+) -> (Vec<PackageDescriptor>, Vec<NormalizedPath>) {
     let mut queue = VecDeque::from(find_package_roots(root, false));
     let mut discovered = Vec::new();
     let mut ignored = Vec::new();
@@ -23,7 +25,7 @@ pub(super) fn discover_package_graph( root: &Utf8Path ) -> (Vec<PackageDescripto
     // Direct library names owned by each package processed so far. Because the
     // traversal is breadth-first, every ancestor of the package being expanded
     // has already recorded its libraries.
-    let mut owned_libraries: FxHashMap<Utf8PathBuf, Vec<String>> = FxHashMap::default();
+    let mut owned_libraries: FxHashMap<NormalizedPath, Vec<String>> = FxHashMap::default();
 
     while let Some(descriptor) = queue.pop_front() {
         if !seen.insert(descriptor.root.clone()) {
@@ -36,17 +38,17 @@ pub(super) fn discover_package_graph( root: &Utf8Path ) -> (Vec<PackageDescripto
             match reference {
                 PackageReference::Workspace(root) => {
                     if !seen.contains(root) {
-                        queue.push_back(package_descriptor(root, false));
+                        queue.push_back(package_descriptor(root.as_path(), false));
                     }
                 }
                 PackageReference::Dependency(root) => {
                     if !seen.contains(root) {
-                        queue.push_back(package_descriptor(root, true));
+                        queue.push_back(package_descriptor(root.as_path(), true));
                     }
                 }
                 PackageReference::Library { name, root } => {
                     let ancestors = ancestors.get_or_insert_with(|| {
-                        ancestor_library_names(&descriptor.root, &owned_libraries)
+                        ancestor_library_names(descriptor.root.as_path(), &owned_libraries)
                     });
                     if ancestors.contains(name) {
                         ignored.push(root.clone());
@@ -55,9 +57,9 @@ pub(super) fn discover_package_graph( root: &Utf8Path ) -> (Vec<PackageDescripto
                     own_libraries.push(name.clone());
                     // A configured library dir is a named edge like a remapping
                     // target, so a manifestless child is a package in its own right.
-                    let mut roots = find_package_roots(root, true);
+                    let mut roots = find_package_roots(root.as_path(), true);
                     if !roots.iter().any(|d| d.root.as_path() == root.as_path()) {
-                        roots.push(package_descriptor(root, true));
+                        roots.push(package_descriptor(root.as_path(), true));
                     }
                     queue.extend(roots);
                 }
@@ -81,11 +83,7 @@ pub(super) fn discover_package_graph( root: &Utf8Path ) -> (Vec<PackageDescripto
 
     // A remapping edge can reach a library copy an ancestor deduplicated only
     // after the edge was queued — filter against the final ignored roots.
-    discovered.retain(|descriptor| {
-        !ignored
-            .iter()
-            .any(|root| descriptor.root.starts_with(root))
-    });
+    discovered.retain(|descriptor| !ignored.iter().any(|root| descriptor.root.starts_with(root)));
 
     (discovered, ignored)
 }
@@ -95,7 +93,7 @@ pub(super) fn discover_package_graph( root: &Utf8Path ) -> (Vec<PackageDescripto
 /// library against itself.
 fn ancestor_library_names(
     package_root: &Utf8Path,
-    owned_libraries: &FxHashMap<Utf8PathBuf, Vec<String>>,
+    owned_libraries: &FxHashMap<NormalizedPath, Vec<String>>,
 ) -> FxHashSet<String> {
     owned_libraries
         .iter()

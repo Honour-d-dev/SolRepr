@@ -1,9 +1,7 @@
-use crate::capabilities::diagnostics::*;
 use crate::ast::NodeRange;
-use crate::hir::diagnostics::{
-    Diagnostic, RelatedDiagnostic, Severity, normalize_diagnostics,
-};
+use crate::capabilities::diagnostics::*;
 use crate::hir::diagnostics::DiagnosticCode;
+use crate::hir::diagnostics::{Diagnostic, RelatedDiagnostic, Severity, normalize_diagnostics};
 use crate::hir::tests::helper::make_test_db;
 use tree_sitter::Parser;
 
@@ -130,7 +128,10 @@ fn same_range_conflicts_keep_distinct_messages_and_links() {
     let mut messages: Vec<_> = conflicts.iter().map(|d| d.message.as_str()).collect();
     messages.sort();
     assert_eq!(conflicts.len(), 2, "{messages:?}");
-    assert!(messages[0].contains("`f`") && messages[1].contains("`g`"), "{messages:?}");
+    assert!(
+        messages[0].contains("`f`") && messages[1].contains("`g`"),
+        "{messages:?}"
+    );
     for conflict in conflicts {
         assert_eq!(conflict.related.len(), 2, "{:?}", conflict.related);
     }
@@ -193,10 +194,23 @@ fn overloaded_conflicts_on_one_name_merge_related_links() {
         .iter()
         .filter(|diagnostic| diagnostic.code == DiagnosticCode::OverrideConflict)
         .collect();
-    assert_eq!(conflicts.len(), 1, "{:?}", conflicts.iter().map(|d| &d.message).collect::<Vec<_>>());
-    assert_eq!(conflicts[0].message, "derived contract must override `f`: two or more bases define it with the same parameter types");
+    assert_eq!(
+        conflicts.len(),
+        1,
+        "{:?}",
+        conflicts.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        conflicts[0].message,
+        "derived contract must override `f`: two or more bases define it with the same parameter types"
+    );
     assert_eq!(conflicts[0].related.len(), 4, "{:?}", conflicts[0].related);
-    assert!(conflicts[0].related.iter().all(|link| link.message == "declared in `A`" || link.message == "declared in `B`"));
+    assert!(
+        conflicts[0]
+            .related
+            .iter()
+            .all(|link| link.message == "declared in `A`" || link.message == "declared in `B`")
+    );
 }
 
 #[test]
@@ -304,14 +318,15 @@ use lsp_types::TextDocumentContentChangeEvent;
 use ropey::Rope;
 
 use crate::hir::tests::helper::test_workspace;
+use crate::paths::NormalizedPath;
 use crate::salsa::{Db, File};
 use crate::workspace::LoadedFile;
 
 /// Two documents with one unresolved name each, so both start with a publish.
-fn two_documents() -> (Db, File, File, camino::Utf8PathBuf) {
+fn two_documents() -> (Db, File, File, NormalizedPath) {
     let mut workspace = test_workspace("contract A { uint x = missing; }");
     let root = workspace.roots[0].path.clone();
-    let other = root.join("src/Other.sol");
+    let other = NormalizedPath::new(root.join("src/Other.sol"));
     workspace.roots[0].files.push(LoadedFile {
         path: other.clone(),
         text: Some(Rope::from_str("contract B { uint y = missing; }")),
@@ -320,7 +335,7 @@ fn two_documents() -> (Db, File, File, camino::Utf8PathBuf) {
     let db = Db::new(workspace);
     let a = db.file(&root.join("src/Test.sol")).expect("A is indexed");
     let b = db.file(&other).expect("B is indexed");
-    (db, a, b, root.join("src/Test.sol"))
+    (db, a, b, NormalizedPath::new(root.join("src/Test.sol")))
 }
 
 fn request(db: &Db, files: &[(File, i32, u64)]) -> DiagnosticRequest {
@@ -348,11 +363,25 @@ fn a_pass_republishes_only_what_changed() {
     let (tx, rx) = unbounded();
     let (_requests, no_requests) = unbounded::<DiagnosticRequest>();
 
-    assert!(job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
-    assert_eq!(rx.try_iter().count(), 2, "both documents are published once");
+    assert!(
+        job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx)
+            .is_none()
+    );
+    assert_eq!(
+        rx.try_iter().count(),
+        2,
+        "both documents are published once"
+    );
 
-    assert!(job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
-    assert_eq!(rx.try_iter().count(), 0, "nothing changed, so nothing is sent");
+    assert!(
+        job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx)
+            .is_none()
+    );
+    assert_eq!(
+        rx.try_iter().count(),
+        0,
+        "nothing changed, so nothing is sent"
+    );
 
     // Only A is edited.
     db.apply_changes(
@@ -364,7 +393,10 @@ fn a_pass_republishes_only_what_changed() {
         }],
     );
 
-    assert!(job.pass(&request(&db, &[(a, 2, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
+    assert!(
+        job.pass(&request(&db, &[(a, 2, 0), (b, 1, 0)]), &no_requests, &tx)
+            .is_none()
+    );
     let sent = rx.try_iter().collect::<Vec<_>>();
     assert_eq!(sent.len(), 1, "only the edited document is republished");
     assert_eq!(sent[0].file, a);
@@ -380,11 +412,17 @@ fn a_reopened_document_is_republished() {
     let (tx, rx) = unbounded();
     let (_requests, no_requests) = unbounded::<DiagnosticRequest>();
 
-    assert!(job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
+    assert!(
+        job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx)
+            .is_none()
+    );
     assert_eq!(rx.try_iter().count(), 2);
 
     // Same version, same content, new open.
-    assert!(job.pass(&request(&db, &[(a, 1, 1), (b, 1, 0)]), &no_requests, &tx).is_none());
+    assert!(
+        job.pass(&request(&db, &[(a, 1, 1), (b, 1, 0)]), &no_requests, &tx)
+            .is_none()
+    );
     let sent = rx.try_iter().collect::<Vec<_>>();
     assert_eq!(sent.len(), 1, "the reopened document is republished");
     assert_eq!(sent[0].file, a);

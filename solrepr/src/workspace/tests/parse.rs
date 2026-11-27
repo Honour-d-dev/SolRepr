@@ -1,8 +1,9 @@
+use crate::paths::NormalizedPath;
 use crate::workspace::parse::{
     parse_foundry_toml, parse_hardhat_config_text, parse_package_manifest_text,
     parse_remapping_entry,
 };
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 
 #[test]
 fn parses_foundry_libs_and_auto_detect_flag() {
@@ -39,11 +40,7 @@ fn parses_foundry_libs_and_auto_detect_flag() {
     .unwrap();
     assert_eq!(compat.src, "code");
     assert_eq!(compat.remappings[0].prefix, "forge-std/");
-    assert!(
-        compat.remappings[0]
-            .target
-            .ends_with("lib/forge-std/src")
-    );
+    assert!(compat.remappings[0].target.ends_with("lib/forge-std/src"));
 
     // Top-level keys without any section still apply.
     let top_level = parse_foundry_toml("src = \"raw\"", Utf8Path::new("/root")).unwrap();
@@ -60,12 +57,12 @@ fn parses_context_and_normalizes_remapping_paths() {
 
     assert_eq!(
         remapping.context,
-        Some(Utf8PathBuf::from("/root/lib/upgradeable"))
+        Some(NormalizedPath::new("/root/lib/upgradeable"))
     );
     assert_eq!(remapping.prefix, "@openzeppelin/contracts/");
     assert_eq!(
         remapping.target,
-        Utf8PathBuf::from("/root/lib/openzeppelin-contracts/contracts")
+        NormalizedPath::new("/root/lib/openzeppelin-contracts/contracts")
     );
 }
 

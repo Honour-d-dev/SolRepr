@@ -1,5 +1,5 @@
 use anyhow::Result;
-use camino::Utf8PathBuf;
+use camino::Utf8Path;
 use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::{
     Position, PrepareRenameResponse, RenameParams, TextDocumentPositionParams, TextEdit,
@@ -54,8 +54,7 @@ impl Target {
 }
 
 fn is_dependency(db: &Db, file: File) -> bool {
-    db.file_source_root(file)
-        .is_some_and(|root| root.is_dependency(db))
+    file.root(db).is_dependency(db)
 }
 
 pub fn prepare_rename(db: &Db, request: Request) -> Result<Response> {
@@ -113,7 +112,7 @@ pub fn rename(db: &Db, request: Request) -> Result<Response> {
 /// The owner and spelling range at the cursor — the locate both requests share.
 /// `file` is not returned: it is `owner.file()` by construction. What the
 /// spelling denotes is `Target::at`'s question, composed by each caller.
-fn locate(db: &Db, path: &Utf8PathBuf, position: Position) -> Option<(DefId, NodeRange)> {
+fn locate(db: &Db, path: &Utf8Path, position: Position) -> Option<(DefId, NodeRange)> {
     if db.is_ignored_path(path) {
         return None;
     }

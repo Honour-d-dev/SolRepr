@@ -14,11 +14,14 @@ use crate::ast;
 use crate::ast::kinds::{FieldKind, NodeKind};
 use crate::ast::{AstNode, HasName, NodeRange, ToAstNode};
 use crate::hir::inference::Inference;
-use crate::salsa::hir_db::inference;
 use crate::ir::def_map::DefId;
+use crate::paths::NormalizedPath;
+use crate::salsa::hir_db::inference;
 use crate::salsa::interned_db::Id;
-use crate::salsa::{File, HirDb, RootDb, Db};
-use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles};
+use crate::salsa::{Db, File, HirDb, RootDb};
+use crate::workspace::{
+    LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles,
+};
 
 pub fn make_test_db(source: &str) -> (Db, File) {
     let workspace = test_workspace(source);
@@ -31,7 +34,10 @@ pub fn make_test_db(source: &str) -> (Db, File) {
 /// The single-file workspace behind `make_test_db`, for tests that build their
 /// own database (the salsa cache tests install an event recorder).
 pub fn test_workspace(source: &str) -> WorkspaceWithFiles<LoadedFile> {
-    let root = Utf8PathBuf::from_path_buf(std::env::temp_dir().join("next_tests")).expect("temp dir is UTF-8");
+    let root = NormalizedPath::new(
+        Utf8PathBuf::from_path_buf(std::env::temp_dir().join("next_tests"))
+            .expect("temp dir is UTF-8"),
+    );
     WorkspaceWithFiles {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
@@ -43,7 +49,7 @@ pub fn test_workspace(source: &str) -> WorkspaceWithFiles<LoadedFile> {
             package_id: PackageId(root.clone()),
             is_dependency: false,
             files: vec![LoadedFile {
-                path: root.join("src/Test.sol"),
+                path: NormalizedPath::new(root.join("src/Test.sol")),
                 text: Some(Rope::from_str(source)),
             }],
         }],

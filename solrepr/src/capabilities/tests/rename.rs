@@ -5,13 +5,14 @@ use lsp_types::{Position, RenameParams, TextDocumentIdentifier, TextDocumentPosi
 use ropey::Rope;
 use rustc_hash::FxHashSet;
 
+use crate::capabilities::Identity;
 use crate::capabilities::rename::{Target, is_identifier, prepare_rename, references, rename};
 use crate::hir::body_map::BodyOwnerId;
-use crate::capabilities::Identity;
 use crate::hir::item_data::SemanticId;
 use crate::hir::resolution::{Field, Resolution};
 use crate::hir::tests::helper::{def_name_range, find_contract, find_function, make_test_db};
 use crate::ir::def_map::DefId;
+use crate::paths::NormalizedPath;
 use crate::salsa::root_db::RootDb;
 use crate::salsa::{Db, HirDb};
 use crate::utilities::{byte_to_position, to_url};
@@ -19,24 +20,31 @@ use crate::workspace::{
     LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles,
 };
 
-const ROOT: &str = "/tmp/rename_tests";
+fn root() -> Utf8PathBuf {
+    Utf8PathBuf::from_path_buf(std::env::temp_dir().join("rename_tests"))
+        .expect("temp dir is UTF-8")
+}
+
+fn path(relative: &str) -> Utf8PathBuf {
+    root().join(relative)
+}
 
 fn db_with(files: &[(&str, &str)]) -> Db {
-    let root = Utf8PathBuf::from(ROOT);
+    let root = root();
     Db::new(WorkspaceWithFiles {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
-            root: root.clone(),
+            root: NormalizedPath::new(root.clone()),
             remappings: Vec::new(),
         }],
         roots: vec![RootWithFiles {
-            path: root.clone(),
-            package_id: PackageId(root.clone()),
+            path: NormalizedPath::new(root.clone()),
+            package_id: PackageId(NormalizedPath::new(root.clone())),
             is_dependency: false,
             files: files
                 .iter()
                 .map(|(path, text)| LoadedFile {
-                    path: root.join(path),
+                    path: NormalizedPath::new(root.join(path)),
                     text: Some(Rope::from_str(text)),
                 })
                 .collect(),
@@ -59,14 +67,54 @@ fn defs_of(db: &Db, file: crate::salsa::File, kind: impl Fn(&DefId) -> bool) -> 
 #[test]
 fn identifier_validation_matches_solc() {
     const RESERVED: &[&str] = &[
-        "uint256", "int8", "bytes1", "bytes32", "address", "bool", "string", "uint", "int", "bytes",
-        "fixed128x18", "fixed8x0", "fixed", "ufixed", "hex", "years", "copyof", "supports",
-        "typedef", "byte", "throw", "wei", "gwei", "payable", "immutable",
+        "uint256",
+        "int8",
+        "bytes1",
+        "bytes32",
+        "address",
+        "bool",
+        "string",
+        "uint",
+        "int",
+        "bytes",
+        "fixed128x18",
+        "fixed8x0",
+        "fixed",
+        "ufixed",
+        "hex",
+        "years",
+        "copyof",
+        "supports",
+        "typedef",
+        "byte",
+        "throw",
+        "wei",
+        "gwei",
+        "payable",
+        "immutable",
     ];
     const LEGAL: &[&str] = &[
-        "uint7", "uint08", "uint0", "uint264", "bytes0", "bytes33", "ufixed128", "fixed08x18", "error", "revert",
-        "global", "transient", "layout", "leave", "szabo", "finney", "keccak256", "require",
-        "assert", "undefined", "counter",
+        "uint7",
+        "uint08",
+        "uint0",
+        "uint264",
+        "bytes0",
+        "bytes33",
+        "ufixed128",
+        "fixed08x18",
+        "error",
+        "revert",
+        "global",
+        "transient",
+        "layout",
+        "leave",
+        "szabo",
+        "finney",
+        "keccak256",
+        "require",
+        "assert",
+        "undefined",
+        "counter",
     ];
     for &name in RESERVED {
         assert!(!is_identifier(name), "{name} is reserved in solc");
@@ -144,7 +192,13 @@ fn a_struct_field_targets_its_field() {
 
     let target = Target::at(&db, structure, range).expect("a field is renameable");
     assert_eq!(target.name, "a");
-    assert_eq!(target.identity, Identity::Field { owner: structure, field });
+    assert_eq!(
+        target.identity,
+        Identity::Field {
+            owner: structure,
+            field
+        }
+    );
 }
 
 #[test]
@@ -203,9 +257,7 @@ fn keywords_builtins_and_paths_are_not_renameable() {
             "import \"./B.sol\";\ncontract C { function f() external { msg.sender; this; uint256 x = 1; } }",
         ),
     ]);
-    let main = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/Main.sol")))
-        .unwrap();
+    let main = db.file(&path("Main.sol")).unwrap();
     let f = find_function(&db, main, "f");
     let DefId::Function(id) = f else {
         unreachable!()
@@ -379,12 +431,8 @@ fn a_state_variable_renames_its_uses_across_files() {
             "import \"./A.sol\";\ncontract D { function f(C c) external { uint256 v = c.state(); } }",
         ),
     ]);
-    let a = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/A.sol")))
-        .unwrap();
-    let b = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/B.sol")))
-        .unwrap();
+    let a = db.file(&path("A.sol")).unwrap();
+    let b = db.file(&path("B.sol")).unwrap();
     let var = defs_of(&db, a, |def| matches!(def, DefId::Var(_)))
         .into_iter()
         .next()
@@ -471,12 +519,8 @@ fn a_contract_renames_every_spelling_across_files() {
             "import {Base} from \"./Base.sol\";\ncontract D is Base { function f() external { new Base(); } }",
         ),
     ]);
-    let base_file = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/Base.sol")))
-        .unwrap();
-    let main = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/Main.sol")))
-        .unwrap();
+    let base_file = db.file(&path("Base.sol")).unwrap();
+    let main = db.file(&path("Main.sol")).unwrap();
     let base = find_contract(&db, base_file, "Base");
     let range = def_name_range(&db, base_file, base).expect("the contract has a name");
 
@@ -500,12 +544,8 @@ fn a_struct_field_renames_its_member_uses() {
             "import \"./S.sol\";\ncontract C { function f(S s) external { s.a = 1; } }",
         ),
     ]);
-    let s_file = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/S.sol")))
-        .unwrap();
-    let main = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/Main.sol")))
-        .unwrap();
+    let s_file = db.file(&path("S.sol")).unwrap();
+    let main = db.file(&path("Main.sol")).unwrap();
     let structure = defs_of(&db, s_file, |def| matches!(def, DefId::Struct(_)))
         .into_iter()
         .next()
@@ -536,9 +576,7 @@ fn an_import_alias_is_not_mistaken_for_the_imported_name() {
             "import {A as B} from \"./A.sol\";\ncontract D { function f() external { new B(); } }",
         ),
     ]);
-    let a_file = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/A.sol")))
-        .unwrap();
+    let a_file = db.file(&path("A.sol")).unwrap();
     let a = find_contract(&db, a_file, "A");
     let range = def_name_range(&db, a_file, a).expect("the contract has a name");
 
@@ -559,29 +597,29 @@ fn an_import_alias_is_not_mistaken_for_the_imported_name() {
 #[test]
 fn a_dependency_root_is_never_edited() {
     let root = Utf8PathBuf::from("/tmp/rename_tests_dependency");
-    let package = PackageId(root.clone());
+    let package = PackageId(NormalizedPath::new(root.clone()));
     let db = Db::new(WorkspaceWithFiles {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
-            root: root.clone(),
+            root: NormalizedPath::new(root.clone()),
             remappings: Vec::new(),
         }],
         roots: vec![
             RootWithFiles {
-                path: root.join("src"),
+                path: NormalizedPath::new(root.join("src")),
                 package_id: package.clone(),
                 is_dependency: false,
                 files: vec![LoadedFile {
-                    path: root.join("src/Main.sol"),
+                    path: NormalizedPath::new(root.join("src/Main.sol")),
                     text: Some(Rope::from_str("contract M {}")),
                 }],
             },
             RootWithFiles {
-                path: root.join("lib/dep"),
+                path: NormalizedPath::new(root.join("lib/dep")),
                 package_id: package,
                 is_dependency: true,
                 files: vec![LoadedFile {
-                    path: root.join("lib/dep/D.sol"),
+                    path: NormalizedPath::new(root.join("lib/dep/D.sol")),
                     text: Some(Rope::from_str("contract Dep {}")),
                 }],
             },
@@ -674,7 +712,10 @@ fn a_tied_call_site_does_not_block_a_rename() {
     let position = byte_to_position(&db.rope(file), range.start as usize);
 
     let response = rename(&db, rename_request(&db, file, position, "h")).unwrap();
-    assert!(response.error.is_none(), "the tied call is skipped, not fatal");
+    assert!(
+        response.error.is_none(),
+        "the tied call is skipped, not fatal"
+    );
     let result = response.result.expect("rename answers");
     let edits = result["changes"]
         .as_object()
@@ -685,7 +726,6 @@ fn a_tied_call_site_does_not_block_a_rename() {
         .expect("edits");
     assert_eq!(edits.len(), 1, "only the declaration: {edits:?}");
 }
-
 
 /// The alias's semantic entry, found by spelling.
 fn import_alias_range(
@@ -715,9 +755,7 @@ fn a_namespace_alias_renames_its_spelling() {
             "import \"./B.sol\" as NS;\ncontract D { function f() external { new NS.B(); } }",
         ),
     ]);
-    let main = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/Main.sol")))
-        .unwrap();
+    let main = db.file(&path("Main.sol")).unwrap();
     let import = defs_of(&db, main, |def| matches!(def, DefId::Import(_)))
         .into_iter()
         .next()
@@ -743,12 +781,8 @@ fn two_importers_aliasing_one_file_stay_independent() {
             "import \"./B.sol\" as NS;\ncontract T { function g() external { new NS.B(); } }",
         ),
     ]);
-    let one = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/One.sol")))
-        .unwrap();
-    let two = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/Two.sol")))
-        .unwrap();
+    let one = db.file(&path("One.sol")).unwrap();
+    let two = db.file(&path("Two.sol")).unwrap();
     let import = defs_of(&db, one, |def| matches!(def, DefId::Import(_)))
         .into_iter()
         .next()
@@ -777,12 +811,8 @@ fn a_named_alias_is_file_local() {
             "import {A as B} from \"./A.sol\";\ncontract T { function g() external { new B(); } }",
         ),
     ]);
-    let one = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/One.sol")))
-        .unwrap();
-    let two = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/Two.sol")))
-        .unwrap();
+    let one = db.file(&path("One.sol")).unwrap();
+    let two = db.file(&path("Two.sol")).unwrap();
     let import = defs_of(&db, one, |def| matches!(def, DefId::Import(_)))
         .into_iter()
         .next()
@@ -802,31 +832,31 @@ fn a_named_alias_is_file_local() {
 #[test]
 fn a_dependency_declaration_is_not_renamed_from_the_workspace() {
     let root = Utf8PathBuf::from("/tmp/rename_tests_dep_alias");
-    let package = PackageId(root.clone());
+    let package = PackageId(NormalizedPath::new(root.clone()));
     let db = Db::new(WorkspaceWithFiles {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
-            root: root.clone(),
+            root: NormalizedPath::new(root.clone()),
             remappings: Vec::new(),
         }],
         roots: vec![
             RootWithFiles {
-                path: root.join("src"),
+                path: NormalizedPath::new(root.join("src")),
                 package_id: package.clone(),
                 is_dependency: false,
                 files: vec![LoadedFile {
-                    path: root.join("src/Main.sol"),
+                    path: NormalizedPath::new(root.join("src/Main.sol")),
                     text: Some(Rope::from_str(
                         "import {Dep} from \"lib/dep/D.sol\";\ncontract M { function f() external { new Dep(); } }",
                     )),
                 }],
             },
             RootWithFiles {
-                path: root.join("lib/dep"),
+                path: NormalizedPath::new(root.join("lib/dep")),
                 package_id: package,
                 is_dependency: true,
                 files: vec![LoadedFile {
-                    path: root.join("lib/dep/D.sol"),
+                    path: NormalizedPath::new(root.join("lib/dep/D.sol")),
                     text: Some(Rope::from_str("contract Dep {}")),
                 }],
             },
@@ -850,31 +880,31 @@ fn a_dependency_declaration_is_not_renamed_from_the_workspace() {
 #[test]
 fn a_namespace_alias_to_a_dependency_file_is_renameable() {
     let root = Utf8PathBuf::from("/tmp/rename_tests_dep_ns");
-    let package = PackageId(root.clone());
+    let package = PackageId(NormalizedPath::new(root.clone()));
     let db = Db::new(WorkspaceWithFiles {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
-            root: root.clone(),
+            root: NormalizedPath::new(root.clone()),
             remappings: Vec::new(),
         }],
         roots: vec![
             RootWithFiles {
-                path: root.join("src"),
+                path: NormalizedPath::new(root.join("src")),
                 package_id: package.clone(),
                 is_dependency: false,
                 files: vec![LoadedFile {
-                    path: root.join("src/Main.sol"),
+                    path: NormalizedPath::new(root.join("src/Main.sol")),
                     text: Some(Rope::from_str(
                         "import \"lib/dep/D.sol\" as NS;\ncontract M { function f() external { new NS.Dep(); } }",
                     )),
                 }],
             },
             RootWithFiles {
-                path: root.join("lib/dep"),
+                path: NormalizedPath::new(root.join("lib/dep")),
                 package_id: package,
                 is_dependency: true,
                 files: vec![LoadedFile {
-                    path: root.join("lib/dep/D.sol"),
+                    path: NormalizedPath::new(root.join("lib/dep/D.sol")),
                     text: Some(Rope::from_str("contract Dep {}")),
                 }],
             },

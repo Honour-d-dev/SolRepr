@@ -8,9 +8,10 @@ mod capabilities;
 mod hir;
 mod ir;
 mod live_docs;
+mod paths;
 mod salsa;
 mod utilities;
-mod workspace;
 mod worker;
+mod workspace;
 
 pub mod lsp;

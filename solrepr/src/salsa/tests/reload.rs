@@ -6,6 +6,7 @@ use ropey::Rope;
 use rustc_hash::FxHashSet;
 
 use crate::hir::diagnostics::SemanticDiagnostic;
+use crate::paths::NormalizedPath;
 use crate::salsa::{Db, RootDb};
 use crate::workspace::diff::{WorkspaceDiff, diff};
 use crate::workspace::watch::ChangeEvent;
@@ -13,7 +14,7 @@ use crate::workspace::{LoadedFile, Package, PackageId, RootWithFiles, WorkspaceW
 
 /// A throwaway tree on disk: reload reads newly discovered paths from it.
 struct TempTree {
-    root: Utf8PathBuf,
+    root: NormalizedPath,
 }
 
 impl TempTree {
@@ -27,7 +28,7 @@ impl TempTree {
         // Discovery canonicalizes the root, and on Windows that returns the
         // on-disk casing: `%TEMP%` may spell it differently, and path identity
         // is case-sensitive.
-        let root = crate::utilities::canonicalize_path(&root).expect("the tree exists");
+        let root = NormalizedPath::new(root);
         Self { root }
     }
 
@@ -39,12 +40,12 @@ impl TempTree {
         fs::write(&path, text).expect("write file");
     }
 
-    fn discover(&self) -> WorkspaceWithFiles<Utf8PathBuf> {
+    fn discover(&self) -> WorkspaceWithFiles<NormalizedPath> {
         crate::workspace::discover_workspaces(std::slice::from_ref(&self.root))
     }
 
-    fn path(&self, relative: &str) -> Utf8PathBuf {
-        self.root.join(relative)
+    fn path(&self, relative: &str) -> NormalizedPath {
+        NormalizedPath::new(self.root.join(relative))
     }
 }
 
@@ -60,7 +61,7 @@ fn with_dependency(tree: &TempTree) {
 }
 
 /// What the reload worker would hand the server for this discovery.
-fn reload(db: &mut Db, workspace: WorkspaceWithFiles<Utf8PathBuf>) -> WorkspaceDiff<LoadedFile> {
+fn reload(db: &mut Db, workspace: WorkspaceWithFiles<NormalizedPath>) -> WorkspaceDiff<LoadedFile> {
     let (_, prepared) = diff(&db.workspace(), workspace);
     let prepared: WorkspaceDiff<LoadedFile> = prepared.into();
     db.reload_workspace(prepared.clone());
@@ -68,7 +69,7 @@ fn reload(db: &mut Db, workspace: WorkspaceWithFiles<Utf8PathBuf>) -> WorkspaceD
 }
 
 fn unresolved(db: &Db, file: crate::salsa::File) -> bool {
-    let root = db.file_source_root(file).expect("file has a root");
+    let root = db.file_source_root(file);
     db.root_def_map_analysis(root)
         .diagnostics
         .iter()
@@ -135,9 +136,12 @@ fn removing_a_root_reports_the_import_as_unresolved() {
     assert!(unresolved(&db, a));
     assert!(db.file(&tree.path("lib/dep/Dep.sol")).is_none());
 
-    // The handle outlives the index so a queued diagnostics request holding it
-    // does not panic on `expect("file has no root")`.
-    assert!(db.file_source_root(dep).is_some());
+    // The handle outlives the index, so a queued diagnostics request holding it
+    // still resolves its root.
+    assert_eq!(
+        db.file_source_root(dep).root(&db).as_path(),
+        tree.path("lib/dep").as_path()
+    );
 }
 
 #[test]
@@ -180,16 +184,16 @@ fn open_document_text_survives_a_reload() {
 fn loaded(root: &str, package: &str, files: &[(&str, &str)]) -> WorkspaceWithFiles<LoadedFile> {
     WorkspaceWithFiles {
         packages: vec![Package {
-            root: Utf8PathBuf::from(package),
+            root: NormalizedPath::new(package),
             remappings: Vec::new(),
         }],
         roots: vec![RootWithFiles {
-            path: Utf8PathBuf::from(root),
-            package_id: PackageId(Utf8PathBuf::from(package)),
+            path: NormalizedPath::new(root),
+            package_id: PackageId(NormalizedPath::new(package)),
             files: files
                 .iter()
                 .map(|(path, text)| LoadedFile {
-                    path: Utf8PathBuf::from(*path),
+                    path: NormalizedPath::new(*path),
                     text: Some(Rope::from_str(text)),
                 })
                 .collect(),
@@ -199,16 +203,16 @@ fn loaded(root: &str, package: &str, files: &[(&str, &str)]) -> WorkspaceWithFil
     }
 }
 
-fn discovered(root: &str, package: &str, files: &[&str]) -> WorkspaceWithFiles<Utf8PathBuf> {
+fn discovered(root: &str, package: &str, files: &[&str]) -> WorkspaceWithFiles<NormalizedPath> {
     WorkspaceWithFiles {
         packages: vec![Package {
-            root: Utf8PathBuf::from(package),
+            root: NormalizedPath::new(package),
             remappings: Vec::new(),
         }],
         roots: vec![RootWithFiles {
-            path: Utf8PathBuf::from(root),
-            package_id: PackageId(Utf8PathBuf::from(package)),
-            files: files.iter().map(Utf8PathBuf::from).collect(),
+            path: NormalizedPath::new(root),
+            package_id: PackageId(NormalizedPath::new(package)),
+            files: files.iter().map(NormalizedPath::new).collect(),
             is_dependency: false,
         }],
         ignored_roots: Vec::new(),
@@ -232,7 +236,7 @@ fn a_nested_root_takes_its_files_from_the_surviving_parent() {
     let dep = db
         .file(&Utf8PathBuf::from("/proj/lib/dep/Dep.sol"))
         .expect("Dep is indexed");
-    let parent = db.file_source_root(dep).expect("Dep has a root");
+    let parent = db.file_source_root(dep);
     assert!(
         parent.files(&db).contains(&dep),
         "the parent owns it to begin with"
@@ -242,13 +246,13 @@ fn a_nested_root_takes_its_files_from_the_surviving_parent() {
     // discovered, with the same path, package and flag, so it survives.
     let mut workspace = discovered("/proj", "/proj", &["/proj/A.sol"]);
     workspace.packages.push(Package {
-        root: Utf8PathBuf::from("/proj/lib/dep"),
+        root: NormalizedPath::new("/proj/lib/dep"),
         remappings: Vec::new(),
     });
     workspace.roots.push(RootWithFiles {
-        path: Utf8PathBuf::from("/proj/lib/dep"),
-        package_id: PackageId(Utf8PathBuf::from("/proj/lib/dep")),
-        files: vec![Utf8PathBuf::from("/proj/lib/dep/Dep.sol")],
+        path: NormalizedPath::new("/proj/lib/dep"),
+        package_id: PackageId(NormalizedPath::new("/proj/lib/dep")),
+        files: vec![NormalizedPath::new("/proj/lib/dep/Dep.sol")],
         is_dependency: true,
     });
 
@@ -258,7 +262,7 @@ fn a_nested_root_takes_its_files_from_the_surviving_parent() {
         diff.removed.is_empty(),
         "the parent survives, so only the nested root is new"
     );
-    let root = db.file_source_root(dep).expect("Dep has a root");
+    let root = db.file_source_root(dep);
     assert_ne!(root, parent, "the handle is re-pointed at the nested root");
     assert!(
         !parent.files(&db).contains(&dep),
@@ -277,7 +281,7 @@ fn a_root_replaced_in_place_keeps_its_file_handles_and_text() {
         &[("/replaced/root/A.sol", "contract A {}")],
     ));
     let a = db.file(&path).expect("A is indexed");
-    let before = db.file_source_root(a).expect("A has a root");
+    let before = db.file_source_root(a);
     db.open_file(path.clone(), "contract Edited {}".to_string())
         .expect("the document is indexed");
 
@@ -296,7 +300,7 @@ fn a_root_replaced_in_place_keeps_its_file_handles_and_text() {
             .iter()
             .map(|root| root.path.clone())
             .collect::<Vec<_>>(),
-        vec![Utf8PathBuf::from("/replaced/root")],
+        vec![NormalizedPath::new("/replaced/root")],
         "the root is replaced because its package moved"
     );
     assert_eq!(
@@ -309,7 +313,7 @@ fn a_root_replaced_in_place_keeps_its_file_handles_and_text() {
     // The handle must be in the *new* root's list: a reload that keeps the
     // path mapped but drops it from the root would pass the assertions above
     // while leaving the file out of the compilation unit.
-    let root = db.file_source_root(a).expect("A has a root");
+    let root = db.file_source_root(a);
     assert_ne!(
         root, before,
         "the handle is re-pointed at the replacement root, not left on the old one"
@@ -349,11 +353,16 @@ fn a_file_created_on_disk_clears_an_unresolved_import() {
 
     assert_eq!(db.file(&tree.path("src/B.sol")), Some(b));
     assert!(!unresolved(&db, a), "the import resolves");
-    // The same path again is an update, not a second create.
+    assert_eq!(
+        db.apply_file_change(&tree.path("src/B.sol")),
+        ChangeEvent::Skipped,
+        "unchanged text is a no-op"
+    );
+    tree.write("src/B.sol", "contract B { uint256 value; }\n");
     assert_eq!(
         db.apply_file_change(&tree.path("src/B.sol")),
         ChangeEvent::Updated(b),
-        "an indexed path is re-read, never re-created"
+        "changed text updates the same handle"
     );
 }
 
@@ -378,17 +387,18 @@ fn a_file_deleted_on_disk_reports_the_import_as_unresolved() {
         "the vanished path is retired"
     );
     assert!(db.file(&tree.path("src/B.sol")).is_none());
-    assert!(
-        db.file_source_root(b).is_some(),
-        "the root mapping survives"
+    assert_eq!(
+        db.file_source_root(b).root(&db).as_path(),
+        tree.path("src").as_path(),
+        "the root survives on the handle"
     );
     assert!(unresolved(&db, a), "the import is reported again");
 }
 
-/// The root list is non-salsa state behind `FilesRevision`; `source_roots`
-/// must read the revision so a reload that adds a root re-runs the query.
+/// `source_roots` reads the root-set input, so a reload that adds a root
+/// re-runs a query that read it.
 #[salsa::tracked]
-fn root_paths(db: &dyn RootDb) -> Vec<Utf8PathBuf> {
+fn root_paths(db: &dyn RootDb) -> Vec<NormalizedPath> {
     db.source_roots()
         .iter()
         .map(|root| root.root(db).clone())
@@ -397,7 +407,7 @@ fn root_paths(db: &dyn RootDb) -> Vec<Utf8PathBuf> {
 
 #[test]
 fn source_roots_invalidates_when_a_reload_adds_a_root() {
-    let tree = TempTree::new("source_roots_revision");
+    let tree = TempTree::new("source_roots_added");
     tree.write("foundry.toml", "[profile.default]\n");
     tree.write("src/A.sol", "contract A {}\n");
     let mut db = Db::new(tree.discover());

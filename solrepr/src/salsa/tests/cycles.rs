@@ -25,7 +25,7 @@ fn roots_that_import_each_other_converge() {
 
     for relative in ["src/A.sol", "test/B.sol"] {
         let file = db.file(&root.join(relative)).expect("indexed");
-        let root_id = db.file_source_root(file).expect("file has a root");
+        let root_id = db.file_source_root(file);
         let unresolved = db
             .root_def_map_analysis(root_id)
             .diagnostics

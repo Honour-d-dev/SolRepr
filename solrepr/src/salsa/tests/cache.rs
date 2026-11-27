@@ -17,9 +17,14 @@ use ropey::Rope;
 use crate::capabilities::diagnostics::lsp_diagnostics;
 use crate::hir::tests::helper::test_workspace;
 use crate::ir::def_map::DefId;
+use crate::paths::NormalizedPath;
 use crate::salsa::db::{Db, File};
+use crate::salsa::root_db::{import_map_of, imports};
 use crate::salsa::{HirDb, RootDb};
-use crate::workspace::LoadedFile;
+use crate::workspace::diff::diff;
+use crate::workspace::{
+    LoadedFile, Package, PackageId, Remapping, RootWithFiles, WorkspaceWithFiles,
+};
 
 const SOURCE: &str = r#"
 contract C {
@@ -54,6 +59,11 @@ fn ran(events: &[String], query: &str) -> usize {
     events.iter().filter(|key| key.starts_with(&prefix)).count()
 }
 
+#[salsa::tracked]
+fn root_count(db: &dyn RootDb) -> usize {
+    db.source_roots().len()
+}
+
 fn fixture() -> (Db, File, Recorder) {
     let recorder = Recorder::default();
     let sink = recorder.clone();
@@ -66,6 +76,47 @@ fn fixture() -> (Db, File, Recorder) {
     });
     let file = db.file(&path).unwrap();
     (db, file, recorder)
+}
+
+fn recording(workspace: WorkspaceWithFiles<LoadedFile>) -> (Db, Recorder) {
+    let recorder = Recorder::default();
+    let sink = recorder.clone();
+    let db = Db::with_events(workspace, move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            sink.seen.lock().unwrap().push(format!("{database_key:?}"));
+        }
+    });
+    (db, recorder)
+}
+
+fn loaded(path: &str, text: &str) -> LoadedFile {
+    LoadedFile {
+        path: NormalizedPath::new(path),
+        text: Some(Rope::from_str(text)),
+    }
+}
+
+fn root(path: &str, files: Vec<LoadedFile>) -> RootWithFiles<LoadedFile> {
+    RootWithFiles {
+        path: NormalizedPath::new(path),
+        package_id: PackageId(NormalizedPath::new(path)),
+        is_dependency: false,
+        files,
+    }
+}
+
+fn workspace_of(roots: Vec<RootWithFiles<LoadedFile>>) -> WorkspaceWithFiles<LoadedFile> {
+    WorkspaceWithFiles {
+        ignored_roots: Vec::new(),
+        packages: roots
+            .iter()
+            .map(|root| Package {
+                root: root.path.clone(),
+                remappings: Vec::new(),
+            })
+            .collect(),
+        roots,
+    }
 }
 
 fn function_named(db: &Db, file: File, name: &str) -> DefId {
@@ -136,6 +187,23 @@ fn out_of_body_edit_runs_no_inference() {
     assert_eq!(ran(&events, "body"), 2, "{events:#?}");
 }
 
+/// Opening an unmodified document does not rewrite its text or re-parse it.
+#[test]
+fn opening_an_unchanged_document_keeps_parse_cached() {
+    let (mut db, file, recorder) = fixture();
+    let _ = db.item_tree(file);
+    recorder.take();
+
+    let path = file.path(&db).to_path_buf();
+    db.open_file(path, SOURCE.to_string())
+        .expect("the document is indexed");
+
+    let _ = db.item_tree(file);
+    let events = recorder.take();
+    assert_eq!(ran(&events, "parse"), 0, "{events:#?}");
+    assert_eq!(ran(&events, "item_tree"), 0, "{events:#?}");
+}
+
 /// An edit inside one body invalidates exactly that body's inference.
 #[test]
 fn in_body_edit_runs_only_that_inference() {
@@ -180,7 +248,7 @@ fn lsp_diagnostics_survives_an_edit_in_another_file() {
     let sink = recorder.clone();
     let mut workspace = test_workspace(SOURCE);
     let root = workspace.roots[0].path.clone();
-    let other_path = root.join("src/Other.sol");
+    let other_path = NormalizedPath::new(root.join("src/Other.sol"));
     workspace.roots[0].files.push(LoadedFile {
         path: other_path.clone(),
         text: Some(Rope::from_str(OTHER)),
@@ -211,4 +279,194 @@ fn lsp_diagnostics_survives_an_edit_in_another_file() {
     assert_eq!(ran(&events, "item_tree"), 1, "{events:#?}");
     assert_eq!(ran(&events, "root_def_map_analysis"), 0, "{events:#?}");
     assert_eq!(ran(&events, "lsp_diagnostics"), 0, "{events:#?}");
+}
+
+/// A file appearing in one root re-collects that root's inversion only: the
+/// other roots' maps are validated without executing.
+#[test]
+fn a_new_file_re_collects_one_roots_inversion() {
+    let workspace = workspace_of(vec![
+        root(
+            "/w/src",
+            vec![
+                loaded("/w/src/A.sol", "import \"./B.sol\";\ncontract A {}\n"),
+                loaded("/w/src/B.sol", "contract B {}\n"),
+            ],
+        ),
+        root(
+            "/w/test",
+            vec![
+                loaded("/w/test/T.sol", "import \"./U.sol\";\ncontract T {}\n"),
+                loaded("/w/test/U.sol", "contract U {}\n"),
+            ],
+        ),
+    ]);
+    let (mut db, recorder) = recording(workspace);
+    let src = db.source_roots()[0];
+    let test = db.source_roots()[1];
+    let _ = import_map_of(&db, src);
+    let _ = import_map_of(&db, test);
+    recorder.take();
+
+    db.open_file(
+        Utf8PathBuf::from("/w/src/New.sol"),
+        "contract New {}".to_string(),
+    )
+    .expect("indexed under src");
+
+    // The untouched root: neither its map nor its files' imports re-run.
+    let _ = import_map_of(&db, test);
+    let events = recorder.take();
+    assert_eq!(ran(&events, "import_map_of"), 0, "{events:#?}");
+    assert_eq!(ran(&events, "imports"), 0, "{events:#?}");
+
+    // The root that gained the file: its map re-collects, and only `A`
+    // re-resolves — `New.sol` is computed for the first time.
+    let _ = import_map_of(&db, src);
+    let events = recorder.take();
+    assert_eq!(ran(&events, "import_map_of"), 1, "{events:#?}");
+    assert_eq!(ran(&events, "imports"), 2, "{events:#?}");
+}
+
+/// An import that resolved to nothing is re-resolved when the file appears.
+#[test]
+fn an_unresolved_import_resolves_when_the_file_appears() {
+    let workspace = workspace_of(vec![root(
+        "/w/src",
+        vec![loaded(
+            "/w/src/A.sol",
+            "import \"./Missing.sol\";\ncontract A {}\n",
+        )],
+    )]);
+    let (mut db, recorder) = recording(workspace);
+    let a = db.file(&Utf8PathBuf::from("/w/src/A.sol")).unwrap();
+    assert!(imports(&db, a).resolved.is_empty());
+    recorder.take();
+
+    db.open_file(
+        Utf8PathBuf::from("/w/src/Missing.sol"),
+        "contract Missing {}".to_string(),
+    )
+    .expect("indexed under src");
+
+    assert_eq!(
+        imports(&db, a).resolved.len(),
+        1,
+        "the import resolves once the file exists"
+    );
+}
+
+/// A reload that moves only package facts does not rewrite the root set.
+#[test]
+fn manifest_only_reload_does_not_invalidate_root_set() {
+    let workspace = workspace_of(vec![
+        root("/w/src", vec![loaded("/w/src/A.sol", "contract A {}\n")]),
+        root("/w/test", vec![loaded("/w/test/T.sol", "contract T {}\n")]),
+    ]);
+    let (mut db, recorder) = recording(workspace);
+    let test = db.source_roots()[1];
+    let _ = root_count(&db);
+    let _ = import_map_of(&db, test);
+    recorder.take();
+
+    let mut reloaded = workspace_of(vec![
+        root("/w/src", vec![loaded("/w/src/A.sol", "contract A {}\n")]),
+        root("/w/test", vec![loaded("/w/test/T.sol", "contract T {}\n")]),
+    ]);
+    reloaded
+        .packages
+        .iter_mut()
+        .find(|package| package.root.as_path() == "/w/src")
+        .unwrap()
+        .remappings
+        .push(Remapping {
+            context: None,
+            prefix: "dep/".to_string(),
+            target: NormalizedPath::new("/w/lib/dep"),
+        });
+    let (_, prepared) = diff(&db.workspace(), reloaded);
+    db.reload_workspace(prepared);
+
+    let _ = root_count(&db);
+    let _ = import_map_of(&db, test);
+
+    let events = recorder.take();
+    assert_eq!(ran(&events, "root_count"), 0, "{events:#?}");
+    assert_eq!(ran(&events, "import_map_of"), 0, "{events:#?}");
+}
+
+/// A root appearing elsewhere is not an edge of an import that already resolved.
+#[test]
+fn adding_a_new_root_does_not_re_run_resolved_imports() {
+    let workspace = workspace_of(vec![root(
+        "/w/src",
+        vec![
+            loaded("/w/src/A.sol", "import \"./B.sol\";\ncontract A {}\n"),
+            loaded("/w/src/B.sol", "contract B {}\n"),
+        ],
+    )]);
+    let (mut db, recorder) = recording(workspace);
+    let src = db.source_roots()[0];
+    let a = db.file(&Utf8PathBuf::from("/w/src/A.sol")).unwrap();
+    let _ = imports(&db, a);
+    let _ = import_map_of(&db, src);
+    recorder.take();
+
+    let reloaded = workspace_of(vec![
+        root(
+            "/w/src",
+            vec![
+                loaded("/w/src/A.sol", "import \"./B.sol\";\ncontract A {}\n"),
+                loaded("/w/src/B.sol", "contract B {}\n"),
+            ],
+        ),
+        root(
+            "/w/lib/dep",
+            vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")],
+        ),
+    ]);
+    let (_, prepared) = diff(&db.workspace(), reloaded);
+    db.reload_workspace(prepared);
+
+    let _ = imports(&db, a);
+    let _ = import_map_of(&db, src);
+
+    let events = recorder.take();
+    assert_eq!(ran(&events, "imports"), 0, "{events:#?}");
+    assert_eq!(ran(&events, "import_map_of"), 0, "{events:#?}");
+}
+
+/// Re-parenting a file to a narrower root moves the handle, not its text: the
+/// parse and the item tree keep their memos.
+#[test]
+fn re_parenting_a_file_does_not_re_parse_it() {
+    let workspace = workspace_of(vec![root(
+        "/w",
+        vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")],
+    )]);
+    let (mut db, recorder) = recording(workspace);
+    let dep = db.file(&Utf8PathBuf::from("/w/lib/dep/Dep.sol")).unwrap();
+    let _ = db.item_tree(dep);
+    recorder.take();
+
+    let narrowed = workspace_of(vec![
+        root("/w", Vec::new()),
+        root(
+            "/w/lib/dep",
+            vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")],
+        ),
+    ]);
+    let (_, prepared) = diff(&db.workspace(), narrowed);
+    db.reload_workspace(prepared);
+    assert_eq!(
+        db.file_source_root(dep).root(&db).as_path(),
+        Utf8PathBuf::from("/w/lib/dep").as_path(),
+        "the handle moved to the narrower root"
+    );
+
+    let _ = db.item_tree(dep);
+
+    let events = recorder.take();
+    assert_eq!(ran(&events, "parse"), 0, "{events:#?}");
+    assert_eq!(ran(&events, "item_tree"), 0, "{events:#?}");
 }

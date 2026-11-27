@@ -9,11 +9,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use glob::glob;
 use rustc_hash::FxHashSet;
 
+use super::Remapping;
 use super::parse::{
     parse_foundry_toml, parse_hardhat_config, parse_package_manifest, parse_remappings_txt,
 };
-use super::Remapping;
-use crate::utilities::normalize_path;
+use crate::paths::NormalizedPath;
 
 pub(super) const PRUNED_DIRS: [&str; 5] = [".git", "node_modules", "out", "artifacts", "cache"];
 
@@ -40,18 +40,18 @@ pub(crate) fn is_manifest(path: &Utf8Path) -> bool {
 /// A package digested from its manifests: source roots, dev dirs, remappings
 /// and outgoing edges. Foundry and Hardhat config can coexist, so this records
 /// the resolved facts rather than one package kind.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(super) struct PackageDescriptor {
-    pub root: Utf8PathBuf,
+    pub root: NormalizedPath,
     pub is_dependency: bool,
     /// Resolved source roots: configured source dirs (foundry `src` plus
     /// `contracts`, hardhat `sources`) plus dev dirs for workspace packages,
     /// or the default fallback when none exist.
-    pub source_roots: Vec<Utf8PathBuf>,
+    pub source_roots: Vec<NormalizedPath>,
     /// Configured dev dirs (foundry `test`/`script`, hardhat `tests`) when
     /// `is_dependency` — on disk but outside the compilation unit. Empty for
     /// workspace packages, whose dev dirs are source roots.
-    pub ignored_dirs: Vec<Utf8PathBuf>,
+    pub ignored_dirs: Vec<NormalizedPath>,
     /// The completed remapping table: declared remappings plus npm dependency
     /// and synthesized library remappings, sorted and deduplicated.
     pub remappings: Vec<Remapping>,
@@ -62,15 +62,18 @@ pub(super) struct PackageDescriptor {
 
 #[derive(Debug, Clone)]
 pub(super) enum PackageReference {
-    Workspace(Utf8PathBuf),
-    Dependency(Utf8PathBuf),
+    Workspace(NormalizedPath),
+    Dependency(NormalizedPath),
     /// A vendored library child (foundry `libs`, hardhat `imports`): `name`
     /// is its directory name — an enclosing package owning a library with
     /// the same name shadows this copy.
-    Library { name: String, root: Utf8PathBuf },
+    Library {
+        name: String,
+        root: NormalizedPath,
+    },
 }
 
-pub(super) fn find_package_roots( root: &Utf8Path, is_dependency: bool) -> Vec<PackageDescriptor> {
+pub(super) fn find_package_roots(root: &Utf8Path, is_dependency: bool) -> Vec<PackageDescriptor> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_owned()];
 
@@ -104,18 +107,23 @@ pub(super) fn find_package_roots( root: &Utf8Path, is_dependency: bool) -> Vec<P
 /// manifestless package trusted by the edge that named it (a configured
 /// library dir or an npm dependency).
 pub(super) fn package_descriptor(root: &Utf8Path, is_dependency: bool) -> PackageDescriptor {
-    detect_package(root, is_dependency).unwrap_or_else(|| PackageDescriptor {
-        root: normalize_path(root),
-        is_dependency,
-        source_roots: default_source_roots(root, is_dependency),
-        ..PackageDescriptor::default()
+    detect_package(root, is_dependency).unwrap_or_else(|| {
+        let root = NormalizedPath::new(root);
+        PackageDescriptor {
+            root: root.clone(),
+            is_dependency,
+            source_roots: default_source_roots(&root, is_dependency),
+            ignored_dirs: Vec::new(),
+            remappings: Vec::new(),
+            references: Vec::new(),
+        }
     })
 }
 
 /// The fallback source roots when a package configures none: dependencies
 /// index from their package root; workspace packages try the conventional
 /// `contracts/` dir first, then the root itself.
-fn default_source_roots(root: &Utf8Path, is_dependency: bool) -> Vec<Utf8PathBuf> {
+fn default_source_roots(root: &NormalizedPath, is_dependency: bool) -> Vec<NormalizedPath> {
     let candidates: &[&str] = if is_dependency {
         &[""]
     } else {
@@ -123,8 +131,10 @@ fn default_source_roots(root: &Utf8Path, is_dependency: bool) -> Vec<Utf8PathBuf
     };
     candidates
         .iter()
-        .map(|dir| root.join(dir))
-        .find(|dir| dir.is_dir())
+        .find_map(|dir| {
+            let path = root.join(dir);
+            path.is_dir().then(|| NormalizedPath::new(path))
+        })
         .into_iter()
         .collect()
 }
@@ -168,16 +178,24 @@ fn manifests_in(dir: &Utf8Path) -> Option<Manifests> {
 
 /// The digested package at a manifest-bearing root: both configs' facts,
 /// resolved into one descriptor.
-fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -> PackageDescriptor {
-    let root = normalize_path(dir);
+fn manifest_package(
+    dir: &Utf8Path,
+    is_dependency: bool,
+    manifests: Manifests,
+) -> PackageDescriptor {
+    let root = NormalizedPath::new(dir);
     let foundry = manifests.foundry_toml.as_ref().and_then(|path| {
         fs::read_to_string(path)
             .ok()
-            .and_then(|text| parse_foundry_toml(&text, &root))
+            .and_then(|text| parse_foundry_toml(&text, root.as_path()))
     });
-    let hardhat = manifests.hardhat_config.as_deref().map(parse_hardhat_config);
+    let hardhat = manifests
+        .hardhat_config
+        .as_deref()
+        .map(parse_hardhat_config);
     // `remappings.txt` overrides foundry.toml entirely — resolved here.
-    let mut remappings = manifests.remappings_txt
+    let mut remappings = manifests
+        .remappings_txt
         .as_deref()
         .and_then(parse_remappings_txt)
         .unwrap_or_else(|| {
@@ -186,7 +204,10 @@ fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -
                 .map(|foundry| foundry.remappings.clone())
                 .unwrap_or_default()
         });
-    let manifest = manifests.package_json.as_deref().and_then(parse_package_manifest);
+    let manifest = manifests
+        .package_json
+        .as_deref()
+        .and_then(parse_package_manifest);
     let resolved_dependencies = manifest
         .as_ref()
         .map(|manifest| {
@@ -304,7 +325,7 @@ fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -
 /// `Workspace` edges for each npm `workspaces` glob. Globbing for
 /// `package.json` encodes the "members must have one" rule; braces are expanded
 /// here because `glob` lacks them.
-fn workspace_references(root: &Utf8Path, patterns: &[String]) -> Vec<PackageReference> {
+fn workspace_references(root: &NormalizedPath, patterns: &[String]) -> Vec<PackageReference> {
     let mut references = Vec::new();
     for pattern in patterns {
         for pattern in expand_braces(pattern) {
@@ -320,7 +341,7 @@ fn workspace_references(root: &Utf8Path, patterns: &[String]) -> Vec<PackageRefe
                 })
                 // node_modules packages are npm deps, not workspace members.
                 .filter(|dir| !dir.components().any(|c| c.as_str() == "node_modules"))
-                .map(|dir| normalize_path(&dir))
+                .map(NormalizedPath::new)
                 .collect::<Vec<_>>();
             dirs.sort();
             references.extend(dirs.into_iter().map(PackageReference::Workspace));
@@ -333,7 +354,7 @@ fn workspace_references(root: &Utf8Path, patterns: &[String]) -> Vec<PackageRefe
 /// auto-detected libraries and hardhat's vendored `imports`. The first
 /// remapping to claim a prefix wins.
 fn synthesize_library_remappings(
-    libraries: &[(String, Utf8PathBuf)],
+    libraries: &[(String, NormalizedPath)],
     remappings: &mut Vec<Remapping>,
     claimed: &mut FxHashSet<String>,
 ) {
@@ -346,8 +367,10 @@ fn synthesize_library_remappings(
         // never to `contracts/`.
         let target = ["src"]
             .iter()
-            .map(|dir| child.join(dir))
-            .find(|dir| dir.is_dir())
+            .find_map(|dir| {
+                let path = child.join(dir);
+                path.is_dir().then(|| NormalizedPath::new(path))
+            })
             .unwrap_or_else(|| child.clone());
         remappings.push(Remapping {
             context: None,
@@ -363,8 +386,9 @@ fn existing_file(dir: &Utf8Path, name: &str) -> Option<Utf8PathBuf> {
 }
 
 /// `dir.join(name)` when that dir exists.
-fn existing_dir(root: &Utf8Path, dir: &str) -> Option<Utf8PathBuf> {
-    Some(root.join(dir)).filter(|path| path.is_dir())
+fn existing_dir(root: &NormalizedPath, dir: &str) -> Option<NormalizedPath> {
+    let path = root.join(dir);
+    path.is_dir().then(|| NormalizedPath::new(path))
 }
 
 /// Brace alternates expanded out of a glob pattern — `{a,b}` becomes one
@@ -388,7 +412,10 @@ fn expand_braces(pattern: &str) -> Vec<String> {
 }
 
 /// The configured directories under `root` that exist.
-fn dirs_under<S: AsRef<str>>(root: &Utf8Path, dirs: impl IntoIterator<Item = S>) -> Vec<Utf8PathBuf> {
+fn dirs_under<S: AsRef<str>>(
+    root: &NormalizedPath,
+    dirs: impl IntoIterator<Item = S>,
+) -> Vec<NormalizedPath> {
     dirs.into_iter()
         .filter_map(|dir| existing_dir(root, dir.as_ref()))
         .collect()
@@ -396,16 +423,16 @@ fn dirs_under<S: AsRef<str>>(root: &Utf8Path, dirs: impl IntoIterator<Item = S>)
 
 /// `(name, dir)` pairs for the immediate children of each configured
 /// directory that exists — the libraries a package can import from.
-fn libraries_under(root: &Utf8Path, dirs: &[String]) -> Vec<(String, Utf8PathBuf)> {
+fn libraries_under(root: &NormalizedPath, dirs: &[String]) -> Vec<(String, NormalizedPath)> {
     dirs_under(root, dirs)
         .iter()
-        .flat_map(|dir| library_children(dir))
+        .flat_map(library_children)
         .collect()
 }
 
 /// Immediate child directories of a directory, sorted so iteration order is
 /// deterministic.
-fn library_children(dir: &Utf8Path) -> Vec<(String, Utf8PathBuf)> {
+fn library_children(dir: &NormalizedPath) -> Vec<(String, NormalizedPath)> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -416,19 +443,19 @@ fn library_children(dir: &Utf8Path) -> Vec<(String, Utf8PathBuf)> {
             if !path.is_dir() {
                 return None;
             }
-            Some((path.file_name()?.to_string(), path))
+            Some((path.file_name()?.to_string(), NormalizedPath::new(path)))
         })
         .collect::<Vec<_>>();
     children.sort();
     children
 }
 
-fn resolve_node_package(owner: &Utf8Path, name: &str) -> Option<Utf8PathBuf> {
-    let mut current = Some(owner);
+fn resolve_node_package(owner: &NormalizedPath, name: &str) -> Option<NormalizedPath> {
+    let mut current = Some(owner.as_path());
     while let Some(directory) = current {
         let candidate = directory.join("node_modules").join(name);
         if candidate.join("package.json").is_file() {
-            return Some(normalize_path(&candidate));
+            return Some(NormalizedPath::new(candidate));
         }
         current = directory.parent();
     }

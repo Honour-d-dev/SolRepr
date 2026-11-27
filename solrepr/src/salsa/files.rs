@@ -1,48 +1,38 @@
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use dashmap::{DashMap, DashSet};
 use lsp_types::TextDocumentContentChangeEvent;
 use ropey::Rope;
-use rustc_hash::{FxBuildHasher, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use salsa::{Durability, Setter};
 use triomphe::Arc;
 
-use super::db::{File, FileId, Packages, SourceRoot, SourceRootId};
+use super::db::{File, FileId, Packages, RootSet, SourceRoot, SourceRootId};
 use super::root_db::RootDb;
-use crate::utilities::{normalize_path, resolve_import, to_rope_idx};
+use crate::paths::NormalizedPath;
+use crate::utilities::{resolve_import, to_rope_idx};
 use crate::workspace::diff::WorkspaceDiff;
 use crate::workspace::{Root, Workspace, loader::FileContent};
 
 pub type FxDashMap<K, V> = DashMap<K, V, FxBuildHasher>;
 pub type FxDashSet<K> = DashSet<K, FxBuildHasher>;
 
-/// Bumped by every file/path change to the file index. The index is not a salsa input, so
-/// this is the edge that re-runs the queries which read it.
-#[salsa::input(singleton)]
-struct FilesRevision {
-    revision: u32,
-}
-
-/// The file index: every `File` the server knows about, the source root that
-/// owns it, and the package set those roots belong to.
+/// The path index, the documents the client owns, and the roots kept out of the
+/// compilation unit. Everything else about a file lives on its salsa inputs.
 #[derive(Clone)]
 pub struct Files {
-    files: Arc<FxDashMap<Utf8PathBuf, File>>,
-    file_source_root: Arc<FxDashMap<FileId, SourceRootId>>,
-    source_roots: Arc<[SourceRoot]>,
+    index: Arc<FxDashMap<NormalizedPath, File>>,
     /// Documents the client has open. Their text is the client's.
     opened: Arc<FxDashSet<File>>,
     /// Roots/paths kept out of the compilation unit — deduplicated library copies
     /// and dependency dev dirs. Files beneath them get no `File`, no
     /// diagnostics, and no features.
-    ignored: Arc<[Utf8PathBuf]>,
+    ignored: Arc<[NormalizedPath]>,
 }
 
 impl Default for Files {
     fn default() -> Self {
         Self {
-            files: Arc::new(FxDashMap::default()),
-            source_roots: Arc::from(Vec::new()),
-            file_source_root: Arc::new(FxDashMap::default()),
+            index: Arc::new(FxDashMap::default()),
             opened: Arc::new(FxDashSet::default()),
             ignored: Arc::from(Vec::new()),
         }
@@ -50,95 +40,73 @@ impl Default for Files {
 }
 
 impl Files {
-    fn init(db: &dyn RootDb) {
-        let _ = FilesRevision::builder(0).new(db);
-    }
-
-    /// Intializes an empty FileIndex and revision.
-    /// Use [`Files::default`] for plain empty FileIndex.
-    pub fn new(db: &dyn RootDb) -> Self {
-        Self::init(db);
-        Self::default()
-    }
-
-    fn revision(&self, db: &dyn RootDb) {
-        FilesRevision::get(db).revision(db);
-    }
-
-    fn bump_revision(&self, db: &mut dyn RootDb) {
-        let revision = FilesRevision::get(db).revision(db);
-        FilesRevision::get(db).set_revision(db).to(revision + 1);
-    }
-
     pub fn add_roots<F: FileContent>(&self, db: &mut dyn RootDb, diff: WorkspaceDiff<F>) -> Files {
-        let added: FxHashSet<&Utf8Path> = diff
-            .roots_added
-            .iter()
-            .map(|root| root.path.as_path())
-            .collect();
+        if !diff.roots_added.is_empty() || !diff.removed.is_empty() {
+            let (mut roots, dropped): (Vec<_>, Vec<_>) = self
+                .source_roots(db)
+                .iter()
+                .copied()
+                .partition(|root| !diff.removed.contains(root.root(db).as_path()));
+            let mut detached: FxHashMap<SourceRootId, FxHashSet<File>> = FxHashMap::default();
 
-        let mut source_roots = Vec::with_capacity(
-            self.source_roots.len() + diff.roots_added.len() - diff.removed.len(),
-        );
+            for root in diff.roots_added {
+                let new = SourceRoot::builder(root.path, root.package_id, Arc::from(Vec::new()), root.is_dependency)
+                    .durability(Durability::HIGH)
+                    .files_durability(files_durability(root.is_dependency))
+                    .new(db);
 
-        let roots_changed = !added.is_empty() || !diff.removed.is_empty();
-
-        // Drop all files in a diff.removed root, unless the root is "replaced" i.e it exists in both sets
-        for root in self.source_roots.iter() {
-            match diff.removed.contains(root.root(db).as_path()) {
-                false => source_roots.push(*root),
-                true if !added.contains(root.root(db).as_path()) => {
-                    for file in root.files(db).iter() {
-                        self.files.remove(file.path(db));
+                let mut indexed = Vec::with_capacity(root.files.len());
+                let mut minted = Vec::new();
+                for file in root.files {
+                    let file = match self.file(file.path()) {
+                        Some(existing) => {
+                            let previous = existing.root(db);
+                            if !dropped.contains(&previous) {
+                                detached.entry(previous).or_default().insert(existing);
+                            }
+                            existing.set_root(db).to(new);
+                            existing
+                        }
+                        None => {
+                            let (path, text) = file.load();
+                            let Some(text) = text else { continue };
+                            let file = self.mint_file(db, new, path.clone(), text);
+                            minted.push((path, file));
+                            file
+                        }
+                    };
+                    indexed.push(file);
+                }
+                if !indexed.is_empty() {
+                    // Index writes wait until the input write cannot be cancelled halfway.
+                    new.set_files(db).to(indexed.into());
+                    for (path, file) in minted {
+                        self.index.insert(path, file);
                     }
                 }
-                // A root replaced in place keeps its files.
-                // The files are eventually moved into the replacing id, then the root is dropped
-                _ => {}
+                roots.push(new);
             }
-        }
 
-        // Add files for newly discorvered roots, relocating a file if necessary
-        for root in diff.roots_added {
-            let new = SourceRootId::builder(
-                root.path,
-                root.package_id,
-                Arc::from(Vec::new()),
-                root.is_dependency,
-            )
-            .durability(Durability::HIGH)
-            .new(db);
-            let indexed = root
-                .files
-                .iter()
-                .filter_map(|file| match self.file(file.path()) {
-                    Some(existing) => {
-                        if let Some(previous) = self.file_source_root.get(&existing)
-                            && !diff.removed.contains((*previous).root(db).as_path())
-                        {
-                            self.detach_file(db, *previous, existing);
-                        }
-                        self.file_source_root.insert(existing, new);
-                        Some(existing)
-                    }
-                    None => {
-                        let (path, text) = file.load();
-                        Some(self.index_file(db, new, path, text?))
-                    }
-                })
-                .collect::<Vec<_>>();
-            new.set_files(db)
-                .with_durability(Durability::HIGH)
-                .to(indexed.into());
-            source_roots.push(new);
-        }
+            for (previous, removed) in detached {
+                Files::detach_files(db, previous, |file| !removed.contains(&file));
+            }
 
-        if roots_changed {
-            self.bump_revision(db);
+            // A file no surviving root owns leaves the index. The `File` input stays,
+            // so a request already holding the handle still resolves its root.
+            for old in dropped {
+                let old_files = old.set_files(db).to(Arc::from(Vec::new()));
+                for &file in old_files.iter() {
+                    if file.root(db) == old {
+                        self.index.remove(file.path(db));
+                        self.opened.remove(&file);
+                    }
+                }
+            }
+
+            RootSet::get(db).set_roots(db).to(roots.into());
         }
 
         Files {
-            source_roots: Arc::from(source_roots),
             ignored: match diff.ignored {
                 Some(ignored) => Arc::from(ignored),
                 None => self.ignored.clone(),
@@ -147,13 +115,13 @@ impl Files {
         }
     }
 
-    /// The live workspace facts in the shape workspace discovery produces
+    /// The live workspace facts in the shape workspace discovery produces.
     /// Files are absent because a reload compares roots, not their file lists.
     pub fn workspace(&self, db: &dyn RootDb) -> Workspace {
         Workspace {
             packages: Packages::get(db).packages(db).to_vec(),
             roots: self
-                .source_roots
+                .source_roots(db)
                 .iter()
                 .map(|root| Root {
                     path: root.root(db).clone(),
@@ -171,19 +139,11 @@ impl Files {
 
     /// The file indexed at `path`.
     pub fn file(&self, path: &Utf8Path) -> Option<File> {
-        self.files.get(path).map(|file| *file)
+        self.index.get(path).map(|file| *file)
     }
 
-    pub fn file_source_root(&self, db: &dyn RootDb, file: FileId) -> Option<SourceRoot> {
-        self.revision(db);
-        self.file_source_root.get(&file).map(|root| *root)
-    }
-
-    /// The root set. Query-facing: reads the revision so root additions and
-    /// removals re-run the caller.
-    pub fn source_roots(&self, db: &dyn RootDb) -> &[SourceRoot] {
-        self.revision(db);
-        self.source_roots.as_ref()
+    pub fn source_roots<'db>(&self, db: &'db dyn RootDb) -> &'db [SourceRootId] {
+        RootSet::get(db).roots(db)
     }
 
     /// `path` sits under a root kept out of the compilation unit — never
@@ -192,110 +152,89 @@ impl Files {
         self.ignored.iter().any(|root| path.starts_with(root))
     }
 
-    pub fn ignored_paths(&self) -> &[Utf8PathBuf] {
+    pub fn ignored_paths(&self) -> &[NormalizedPath] {
         &self.ignored
     }
 
-    /// The source root `path` belongs to, or `None` when the path is outside
-    /// the compilation unit
-    pub fn path_source_root(&self, db: &dyn RootDb, path: &Utf8Path) -> Option<SourceRootId> {
-        if self.is_ignored(path) {
-            return None;
-        }
-        self.source_roots
+    /// The root that owns `path`, by the longest enclosing root path.
+    fn root_containing(&self, db: &dyn RootDb, roots: &[SourceRootId], path: &NormalizedPath) -> Option<SourceRootId> {
+        roots
             .iter()
-            .filter(|root| path.starts_with(root.root(db)))
-            .max_by_key(|root| root.root(db).components().count())
-            .copied()
+            .filter_map(|&root| {
+                let root_path = root.root(db);
+                path.starts_with(root_path).then(|| (root_path.components().count(), root))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, root)| root)
+    }
+
+    /// `candidate`'s file, subscribed to the membership that would change the
+    /// answer: the owning root when it exists, the would-be owner when it does
+    /// not, so a file appearing or vanishing re-runs the resolution.
+    fn indexed(&self, db: &dyn RootDb, candidate: &NormalizedPath) -> Option<File> {
+        if let Some(file) = self.file(candidate) {
+            file.root(db).files(db);
+            return Some(file);
+        }
+        let roots = self.source_roots(db);
+        self.root_containing(db, roots, candidate)?.files(db);
+        None
     }
 
     // Writes ----------------------------------------------------------------------------------------------
 
     /// Adds a new file on a path that is not indexed yet, under the root that owns it.
     /// The one "a file appeared" operation: `open_file` and a disk create both end up here.
-    pub(super) fn add_file(
-        &self,
-        db: &mut dyn RootDb,
-        path: Utf8PathBuf,
-        rope: Rope,
-    ) -> Option<File> {
-        let source_root = self.path_source_root(db, &path)?;
-        let file = self.index_file(db, source_root, path, rope);
+    pub(super) fn add_file(&self, db: &mut dyn RootDb, path: NormalizedPath, rope: Rope) -> Option<File> {
+        if self.is_ignored(&path) {
+            return None;
+        }
+        let root = self.root_containing(db, self.source_roots(db), &path)?;
+        let file = self.mint_file(db, root, path.clone(), rope);
 
-        let mut files = source_root.files(db).to_vec(); //@TODO maybe we use vec in soureceroots directly
+        let mut files = root.files(db).to_vec();
         files.push(file);
-        source_root
-            .set_files(db)
-            .with_durability(Durability::HIGH)
-            .to(files.into());
-
-        // A path that was not resolvable before now is.
-        self.bump_revision(db);
+        root.set_files(db).to(files.into());
+        self.index.insert(path, file);
         Some(file)
     }
 
-    /// Retires a path that vanished from disk. The `file_source_root` entry
-    /// stays: a request already holding the handle still resolves its root.
-    pub(super) fn remove_file(&self, db: &mut dyn RootDb, path: &Utf8Path) -> Option<File> {
-        let (_, file) = self.files.remove(path)?;
-        if let Some(root) = self.file_source_root.get(&file) {
-            self.detach_file(db, *root, file);
-        }
-        self.bump_revision(db);
+    /// Retires a path that vanished from disk. The `File` input keeps its root,
+    /// so a request already holding the handle still resolves it.
+    pub(super) fn remove_file(&self, db: &mut dyn RootDb, path: &NormalizedPath) -> Option<File> {
+        let file = self.file(path)?;
+        let root = file.root(db);
+        Files::detach_files(db, root, |indexed| indexed != file);
+        self.index.remove(path);
         Some(file)
     }
 
-    /// Removes `file` from `source_root`'s list. Used when a more specific root
-    /// claims a path a broader root used to own.
-    fn detach_file(&self, db: &mut dyn salsa::Database, source_root: SourceRootId, file: File) {
-        let files = source_root.files(db);
-        let remaining = files
-            .iter()
-            .copied()
-            .filter(|indexed| *indexed != file)
-            .collect::<Vec<_>>();
-        if remaining.len() != files.len() {
-            source_root
-                .set_files(db)
-                .with_durability(Durability::HIGH)
-                .to(remaining.into());
-        }
+    fn mint_file(&self, db: &mut dyn salsa::Database, source_root: SourceRootId, path: NormalizedPath, text: Rope) -> File {
+        File::builder(text, path, source_root)
+            .durability(Durability::HIGH)
+            .text_durability(text_durability(source_root.is_dependency(db)))
+            .new(db)
     }
 
-    /// Mints the `File` and indexes it.
-    fn index_file(
-        &self,
-        db: &mut dyn salsa::Database,
-        source_root: SourceRootId,
-        path: Utf8PathBuf,
-        text: Rope,
-    ) -> File {
-        let durability = if source_root.is_dependency(db) {
-            Durability::HIGH
-        } else {
-            Durability::LOW
-        };
-        let file = File::builder(text, path.clone())
-            .durability(durability)
-            .new(db);
-        self.files.insert(path, file);
-        self.file_source_root.insert(file, source_root);
-        file
-    }
-
-    pub fn open_file(&self, db: &mut dyn RootDb, path: Utf8PathBuf, text: String) -> Option<File> {
-        let path = normalize_path(&path);
-        let rope = Rope::from_str(&text);
+    pub fn open_file(&self, db: &mut dyn RootDb, path: NormalizedPath, text: String) -> Option<File> {
         let file = if let Some(file) = self.file(&path) {
-            // file already exixst, update with editor version
-            file.set_text(db).to(rope);
+            if file.text(db) != text {
+                file.set_text(db).to(Rope::from_str(&text));
+            }
             file
         } else {
-            // new file, index it under the root that owns it
-            self.add_file(db, path, rope)?
+            self.add_file(db, path, Rope::from_str(&text))?
         };
         self.opened.insert(file);
         Some(file)
+    }
+
+    fn detach_files(db: &mut dyn salsa::Database, source_root: SourceRootId, mut keep: impl FnMut(File) -> bool) {
+        let files = source_root.files(db);
+        let remaining = files.iter().copied().filter(|&file| keep(file)).collect::<Vec<_>>();
+        if remaining.len() != files.len() {
+            source_root.set_files(db).to(remaining.into());
+        }
     }
 
     /// The document is no longer open: disk is the truth for it again.
@@ -308,42 +247,46 @@ impl Files {
         self.opened.contains(&file)
     }
 
-    pub fn apply_changes(
-        &self,
-        db: &mut dyn RootDb,
-        path: Utf8PathBuf,
-        changes: Vec<TextDocumentContentChangeEvent>,
-    ) -> Option<File> {
-        let path = normalize_path(&path);
+    pub fn apply_changes(&self, db: &mut dyn RootDb, path: NormalizedPath, changes: Vec<TextDocumentContentChangeEvent>) -> Option<File> {
         let file = self.file(&path)?;
+        if changes.is_empty() {
+            return Some(file);
+        }
 
+        let mut rope = file.text(db);
         for change in changes {
             if let Some(range) = change.range {
-                let mut rope = file.text(db);
                 let start = to_rope_idx(&rope, range.start);
                 let end = to_rope_idx(&rope, range.end);
                 rope.remove(start..end);
                 rope.insert(start, &change.text);
-                file.set_text(db).to(rope);
             } else {
-                file.set_text(db).to(Rope::from_str(&change.text));
+                rope = Rope::from_str(&change.text);
             }
         }
+        file.set_text(db).to(rope);
         Some(file)
     }
 
     pub fn resolve_to_file(&self, db: &dyn RootDb, from: FileId, rel_path: &str) -> Option<FileId> {
-        self.revision(db);
-        let source_root = *self.file_source_root.get(&from)?;
-        let package = db.package_config(source_root);
-        // A non-relative import also resolves against the package root, the base path Foundry and
-        // solc compile with.
-        let rooted =
-            (!rel_path.starts_with('.')).then(|| normalize_path(&package.root.join(rel_path)));
-        resolve_import(from.path(db), rel_path, &package.remappings)
-            .ok()
-            .into_iter()
-            .chain(rooted)
-            .find_map(|path| self.file(&path))
+        let package = db.package_config(from.root(db));
+        if let Ok(candidate) = resolve_import(from.path(db), rel_path, &package.remappings)
+            && let Some(file) = self.indexed(db, &candidate)
+        {
+            return Some(file);
+        }
+        if !rel_path.starts_with('.') {
+            let candidate = NormalizedPath::new(package.root.join(rel_path));
+            return self.indexed(db, &candidate);
+        }
+        None
     }
+}
+
+fn files_durability(is_dependency: bool) -> Durability {
+    if is_dependency { Durability::HIGH } else { Durability::MEDIUM }
+}
+
+fn text_durability(is_dependency: bool) -> Durability {
+    if is_dependency { Durability::HIGH } else { Durability::LOW }
 }

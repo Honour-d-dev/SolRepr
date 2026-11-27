@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use camino::Utf8PathBuf;
 use crossbeam_channel::{Receiver, Sender};
 
+use crate::paths::NormalizedPath;
 use crate::worker::{Job, coalesce, debounce};
 
 use super::diff::{WorkspaceDiff, diff};
@@ -20,8 +20,8 @@ pub(crate) enum ReloadRequest {
     Rediscover,
     /// The client's workspace folder set moved. The delta is applied to the folders the worker holds
     Folders {
-        added: Box<[Utf8PathBuf]>,
-        removed: Box<[Utf8PathBuf]>,
+        added: Box<[NormalizedPath]>,
+        removed: Box<[NormalizedPath]>,
     },
 }
 
@@ -46,7 +46,7 @@ impl ReloadRequest {
 }
 
 /// Both paths, each named once, in arrival order.
-fn union(first: Box<[Utf8PathBuf]>, second: Box<[Utf8PathBuf]>) -> Box<[Utf8PathBuf]> {
+fn union(first: Box<[NormalizedPath]>, second: Box<[NormalizedPath]>) -> Box<[NormalizedPath]> {
     let mut paths = first.into_vec();
     for path in second.into_vec() {
         if !paths.contains(&path) {
@@ -61,14 +61,16 @@ fn union(first: Box<[Utf8PathBuf]>, second: Box<[Utf8PathBuf]>) -> Box<[Utf8Path
 pub(crate) struct WorkspaceWorker {
     /// The folders this session loads. The worker owns them, so a folder
     /// change is a delta applied here rather than a list sent from the loop.
-    roots: Vec<Utf8PathBuf>,
+    roots: Vec<NormalizedPath>,
     workspace: Workspace<()>,
 }
 
 impl WorkspaceWorker {
-
-    pub(crate) fn new(roots: Box<[Utf8PathBuf]>, workspace: Workspace<()>) -> Self {
-        Self { roots: roots.into_vec(), workspace }
+    pub(crate) fn new(roots: Box<[NormalizedPath]>, workspace: Workspace<()>) -> Self {
+        Self {
+            roots: roots.into_vec(),
+            workspace,
+        }
     }
 
     /// Apply a folder delta to the folders the worker holds.
@@ -85,7 +87,10 @@ impl WorkspaceWorker {
     }
 
     /// Compare a discovery against the root set the last diff left behind.
-    fn plan(&self, new: WorkspaceWithFiles<Utf8PathBuf>) -> (Workspace<()>, WorkspaceDiff<LoadedFile>) {
+    fn plan(
+        &self,
+        new: WorkspaceWithFiles<NormalizedPath>,
+    ) -> (Workspace<()>, WorkspaceDiff<LoadedFile>) {
         let (next, diff) = diff(&self.workspace, new);
         // Converting to `LoadedFile` reads every added file from disk.
         (next, WorkspaceDiff::<LoadedFile>::from(diff))
@@ -101,7 +106,7 @@ impl Job for WorkspaceWorker {
 
         while let Ok(request) = match pending.take() {
             Some(request) => Ok(request),
-            None => rx.recv(),// nothing pending, block on recv
+            None => rx.recv(), // nothing pending, block on recv
         } {
             self.apply(debounce(&rx, request, DEBOUNCE, ReloadRequest::combine));
 
@@ -119,7 +124,8 @@ impl Job for WorkspaceWorker {
                 _ if diff.is_empty() => continue,
                 // Advance only on send: the next diff is computed against what
                 // the loop actually applied.
-                _ => {                    self.workspace = next;
+                _ => {
+                    self.workspace = next;
                     if tx.send(diff).is_err() {
                         return;
                     }

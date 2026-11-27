@@ -15,7 +15,7 @@ use crate::salsa::root_db::def_range;
 use crate::salsa::{File, HirDb};
 
 pub(crate) fn collect_diagnostics(db: &dyn HirDb, file: File) -> Vec<Diagnostic> {
-    let analysis = db.root_def_map_analysis(db.file_source_root(file));
+    let analysis = db.root_def_map_analysis(file.root(db));
     let mut diagnostics = analysis
         .diagnostics
         .iter()

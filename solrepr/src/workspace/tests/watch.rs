@@ -3,14 +3,14 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use lsp_types::{FileChangeType, FileEvent, Url};
 
-use crate::utilities::normalize_path;
+use crate::paths::NormalizedPath;
 use crate::workspace::watch::{self, Watched};
 
 /// An absolute path on every platform: `/w/a.sol` is not one on Windows, so
 /// `Url::from_file_path` would refuse it.
-fn path(name: &str) -> Utf8PathBuf {
+fn path(name: &str) -> NormalizedPath {
     let temp = Utf8PathBuf::from_path_buf(std::env::temp_dir()).expect("temp dir is UTF-8");
-    normalize_path(&temp.join(name))
+    NormalizedPath::new(temp.join(name))
 }
 
 fn event(path: &Utf8Path) -> FileEvent {

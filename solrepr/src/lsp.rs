@@ -8,6 +8,7 @@ use crate::capabilities::rename::{prepare_rename, rename};
 use crate::capabilities::view_ast::{ViewAstRequest, view_ast};
 use crate::capabilities::view_hir::{ViewHirRequest, view_hir};
 use crate::live_docs::LiveDocs;
+use crate::paths::NormalizedPath;
 use crate::salsa::{Db, File};
 use crate::utilities::{document_path, log_info, to_url, to_utf8path};
 use crate::worker::Worker;
@@ -498,7 +499,7 @@ impl LspServer {
 
 /// The `file:` folders among `folders`, in order. A folder the server cannot
 /// read is skipped — it has no files to discover.
-fn folder_paths(folders: Vec<WorkspaceFolder>) -> Vec<camino::Utf8PathBuf> {
+fn folder_paths(folders: Vec<WorkspaceFolder>) -> Vec<NormalizedPath> {
     folders
         .iter()
         .filter_map(|folder| to_utf8path(&folder.uri).ok())

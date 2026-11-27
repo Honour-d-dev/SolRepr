@@ -6,7 +6,7 @@ use std::fs;
 use camino::Utf8Path;
 
 use super::Remapping;
-use crate::utilities::normalize_path;
+use crate::paths::NormalizedPath;
 
 /// The package.json data needed to expand the package graph. Deliberately
 /// small: plugin execution is outside workspace discovery.
@@ -96,11 +96,9 @@ pub(super) fn parse_hardhat_config_text(text: &str) -> HardhatConfig {
         return HardhatConfig::default();
     };
     HardhatConfig {
-        sources: string_list(paths, "sources")
-            .unwrap_or_else(|| vec!["contracts".to_string()]),
+        sources: string_list(paths, "sources").unwrap_or_else(|| vec!["contracts".to_string()]),
         tests: string_list(paths, "tests").unwrap_or_else(|| vec!["test".to_string()]),
-        imports: string_list(paths, "imports")
-            .unwrap_or_else(|| vec!["imports".to_string()]),
+        imports: string_list(paths, "imports").unwrap_or_else(|| vec!["imports".to_string()]),
     }
 }
 
@@ -197,7 +195,9 @@ fn find_identifier(text: &str, key: &str) -> Option<usize> {
 fn string_list(paths: &str, key: &str) -> Option<Vec<String>> {
     let index = find_identifier(paths, key)?;
     let value = paths[index + key.len()..].trim_start();
-    let value = value.strip_prefix(':').or_else(|| value.strip_prefix('='))?;
+    let value = value
+        .strip_prefix(':')
+        .or_else(|| value.strip_prefix('='))?;
     let value = value.trim_start();
 
     let values = if let Some(list) = value.strip_prefix('[') {
@@ -333,7 +333,7 @@ pub(super) fn parse_remapping_entry(package_root: &Utf8Path, entry: &str) -> Opt
     let (lhs, target) = entry.trim().split_once('=')?;
     let (context, prefix) = match lhs.trim().split_once(':') {
         Some((context, prefix)) if !context.trim().is_empty() => (
-            Some(normalize_path(&package_root.join(context.trim()))),
+            Some(NormalizedPath::new(package_root.join(context.trim()))),
             prefix.trim(),
         ),
         _ => (None, lhs.trim()),
@@ -344,9 +344,9 @@ pub(super) fn parse_remapping_entry(package_root: &Utf8Path, entry: &str) -> Opt
     }
     let target = Utf8Path::new(target);
     let target = if target.is_absolute() {
-        normalize_path(target)
+        NormalizedPath::new(target)
     } else {
-        normalize_path(&package_root.join(target))
+        NormalizedPath::new(package_root.join(target))
     };
     Some(Remapping {
         context,
@@ -354,4 +354,3 @@ pub(super) fn parse_remapping_entry(package_root: &Utf8Path, entry: &str) -> Opt
         target,
     })
 }
-

@@ -12,27 +12,24 @@ use super::root_db::RootDb;
 use crate::ast::{self, FunctionKind, NodeRange, ToAstNode};
 use crate::hir::analysis::Analysis;
 use crate::hir::body_map::{BodyBuilder, BodyMap, BodyOwnerId, BodySourceMap, ByteOffset, LocalId};
-use crate::hir::member_map::{MemberBuilder, MemberMap};
+use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::hir::docs::{docs, inline_docs};
 use crate::hir::exprs::Name;
 use crate::hir::inference::{ConstErrorKind, ConstValue, Inference, Inferer, const_value};
-use crate::hir::syntax_store::{OwnerStore, SourceMap, with_owner_store};
-use crate::hir::signatures::getter_signature;
 use crate::hir::item_data::{
-    ContractData, EnumData, ErrorData, EventData, FunctionData, ImportData,
-    InterfaceData, ItemBuilder, LibraryData, ModifierData, StructData, UdvtData,
-    UsingData, VarData,
+    ContractData, EnumData, ErrorData, EventData, FunctionData, ImportData, InterfaceData,
+    ItemBuilder, LibraryData, ModifierData, StructData, UdvtData, UsingData, VarData,
 };
 use crate::hir::linearize::Linearizer;
+use crate::hir::member_map::{MemberBuilder, MemberMap};
 use crate::hir::overrides::{OverrideAnalyzer, OverrideFacts};
 use crate::hir::resolution::Resolution;
-use crate::hir::diagnostics::SemanticDiagnostic;
+use crate::hir::signatures::getter_signature;
+use crate::hir::syntax_store::{OwnerStore, SourceMap, with_owner_store};
 use crate::hir::types::{Fn, Ty, Type, Visibility};
 use crate::ir::def_map::{DefId, DefMap, DefNamespace, Scope};
 use crate::salsa::File;
 use crate::salsa::interned_db::Id;
-
-
 
 #[salsa::db]
 pub trait HirDb: RootDb {
@@ -215,7 +212,7 @@ impl HirDb for Db {
         inline_docs(self, file, range)
     }
 
-    fn override_facts(&self,def: DefId) -> Analysis<OverrideFacts> {
+    fn override_facts(&self, def: DefId) -> Analysis<OverrideFacts> {
         let def = match def {
             DefId::Contract(c) => DefWithBases::new(self, DefWithBasesId::Contract(c)),
             DefId::Interface(i) => DefWithBases::new(self, DefWithBasesId::Interface(i)),
@@ -234,8 +231,6 @@ impl HirDb for Db {
         }
     }
 }
-
-
 
 /// A def's display name: the written name from its item data, or a
 /// synthesized name for defs that have none — `import`, `using`, `file`,
@@ -306,11 +301,7 @@ pub fn body<'db>(db: &'db dyn RootDb, owner: BodyOwner<'db>) -> Arc<BodyMap> {
 
 /// Signature params — every parameter carries its default or written data
 /// location, so no slot needs to re-derive one.
-fn lower_params(
-    inferer: &Inference,
-    ids: &[LocalId],
-    db: &dyn HirDb,
-) -> Option<Box<[Type]>> {
+fn lower_params(inferer: &Inference, ids: &[LocalId], db: &dyn HirDb) -> Option<Box<[Type]>> {
     ids.iter()
         .map(|id| {
             let ty = inferer.local_ty(*id);
@@ -390,7 +381,10 @@ pub fn modifier_signature<'db>(db: &'db dyn HirDb, m: Modifier<'db>) -> Option<F
 }
 
 #[salsa::tracked]
-fn build_function<'db>(db: &'db dyn RootDb, f: Function<'db>) -> (Arc<FunctionData>, Arc<SourceMap>) {
+fn build_function<'db>(
+    db: &'db dyn RootDb,
+    f: Function<'db>,
+) -> (Arc<FunctionData>, Arc<SourceMap>) {
     let id = f.id(db);
     let items = db.item_tree(id.file);
     let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
@@ -474,7 +468,10 @@ pub fn error_data<'db>(db: &'db dyn RootDb, e: Error<'db>) -> Arc<ErrorData> {
 }
 
 #[salsa::tracked]
-fn build_modifier<'db>(db: &'db dyn RootDb, m: Modifier<'db>) -> (Arc<ModifierData>, Arc<SourceMap>) {
+fn build_modifier<'db>(
+    db: &'db dyn RootDb,
+    m: Modifier<'db>,
+) -> (Arc<ModifierData>, Arc<SourceMap>) {
     let id = m.id(db);
     let items = db.item_tree(id.file);
     let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
@@ -488,7 +485,10 @@ pub fn modifier_data<'db>(db: &'db dyn RootDb, m: Modifier<'db>) -> Arc<Modifier
 }
 
 #[salsa::tracked]
-fn build_contract<'db>(db: &'db dyn RootDb, c: Contract<'db>) -> (Arc<ContractData>, Arc<SourceMap>) {
+fn build_contract<'db>(
+    db: &'db dyn RootDb,
+    c: Contract<'db>,
+) -> (Arc<ContractData>, Arc<SourceMap>) {
     let id = c.id(db);
     let items = db.item_tree(id.file);
     let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
@@ -502,7 +502,10 @@ pub fn contract_data<'db>(db: &'db dyn RootDb, c: Contract<'db>) -> Arc<Contract
 }
 
 #[salsa::tracked]
-fn build_interface<'db>(db: &'db dyn RootDb, i: Interface<'db>) -> (Arc<InterfaceData>, Arc<SourceMap>) {
+fn build_interface<'db>(
+    db: &'db dyn RootDb,
+    i: Interface<'db>,
+) -> (Arc<InterfaceData>, Arc<SourceMap>) {
     let id = i.id(db);
     let items = db.item_tree(id.file);
     let mut builder = ItemBuilder::new(db.root(id.file), id.file, db.ast_id_map(id.file));
@@ -616,10 +619,7 @@ fn cycle_diagnostic(container: DefId) -> Arc<[SemanticDiagnostic]> {
 /// `member_map` query. It does not compute effective slots or diagnostics
 /// for inherited conflicts.
 #[salsa::tracked(cycle_result = override_facts_cycle_result)]
-fn override_facts<'db>(
-    db: &'db dyn HirDb,
-    def: DefWithBases<'db>,
-) -> Analysis<OverrideFacts> {
+fn override_facts<'db>(db: &'db dyn HirDb, def: DefWithBases<'db>) -> Analysis<OverrideFacts> {
     let container = match def.id(db) {
         DefWithBasesId::Contract(c) => DefId::Contract(c),
         DefWithBasesId::Interface(i) => DefId::Interface(i),
@@ -642,10 +642,7 @@ fn override_facts_cycle_result<'db>(
 }
 
 #[salsa::tracked(cycle_result = member_map_cycle_result)]
-pub fn member_map<'db>(
-    db: &'db dyn HirDb,
-    def: DefWithBases<'db>,
-) -> Analysis<MemberMap> {
+pub fn member_map<'db>(db: &'db dyn HirDb, def: DefWithBases<'db>) -> Analysis<MemberMap> {
     let container = match def.id(db) {
         DefWithBasesId::Contract(c) => DefId::Contract(c),
         DefWithBasesId::Interface(i) => DefId::Interface(i),
@@ -667,7 +664,6 @@ fn member_map_cycle_result<'db>(
     )
 }
 
-
 /// Initializers and struct fields can reference each other cyclically. The
 /// cycle is legal code, and the declared types are still knowable, so this
 /// iterates to a fixed point instead of degrading to `Invalid`.
@@ -683,7 +679,11 @@ pub fn inference<'db>(db: &'db dyn HirDb, owner: Id<'db>) -> Arc<Inference> {
 
 /// The bottom of the domain: every allocated id is `Invalid`, so the tables
 /// stay total while the other side of the cycle is still unknown.
-fn inference_cycle_initial<'db>(db: &'db dyn HirDb, _id: salsa::Id, owner: Id<'db>) -> Arc<Inference> {
+fn inference_cycle_initial<'db>(
+    db: &'db dyn HirDb,
+    _id: salsa::Id,
+    owner: Id<'db>,
+) -> Arc<Inference> {
     let tables = match with_owner_store(db, owner.id(db), |input| {
         Inference::invalid_for(db, input.store, input.locals, input.fields, input.variants)
     }) {
@@ -695,7 +695,13 @@ fn inference_cycle_initial<'db>(db: &'db dyn HirDb, _id: salsa::Id, owner: Id<'d
 
 /// Keep what the round computed; salsa re-runs until two rounds agree, which it
 /// decides by comparing the tables and their diagnostics.
-fn inference_cycle_recover<'db>(_db: &'db dyn HirDb, _c: &salsa::Cycle, _last: &Arc<Inference>, value: Arc<Inference>, _owner: Id<'db>) -> Arc<Inference> {
+fn inference_cycle_recover<'db>(
+    _db: &'db dyn HirDb,
+    _c: &salsa::Cycle,
+    _last: &Arc<Inference>,
+    value: Arc<Inference>,
+    _owner: Id<'db>,
+) -> Arc<Inference> {
     value
 }
 
@@ -706,7 +712,6 @@ pub fn owner_at(db: &Db, file: File, offset: ByteOffset) -> Option<DefId> {
     let node = db.named_node_at(file, offset)?;
     db.enclosing_containers(node.node(), file).last().copied()
 }
-
 
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct UsingIndex {
@@ -744,9 +749,7 @@ pub fn resolve_using<'db>(db: &'db dyn HirDb, using: Using<'db>) -> UsingIndex {
     let def_id = DefId::Using(id);
     let inference = db.inference(def_id);
     // Keys are location-free: receivers are peeled before the lookup.
-    let target = using_data
-        .target
-        .map(|t| inference.ty(t).ty().peel_loc(db));
+    let target = using_data.target.map(|t| inference.ty(t).ty().peel_loc(db));
 
     let mut collect = |fn_def: DefId| {
         let DefId::Function(f_id) = fn_def else {
@@ -854,7 +857,7 @@ fn collect_container_using<'db>(db: &'db dyn HirDb, id: Id<'db>) -> UsingIndex {
     let (file, _) = def_id.file_and_id();
     let mut index = collect_file_using(db, file);
 
-    let defmap = db.root_def_map(db.file_source_root(file));
+    let defmap = db.root_def_map(file.root(db));
     if let Some(data) = defmap.defs.get(&def_id)
         && let Some(child_scope) = data.child_scope
     {
@@ -862,4 +865,3 @@ fn collect_container_using<'db>(db: &'db dyn HirDb, id: Id<'db>) -> UsingIndex {
     }
     index
 }
-

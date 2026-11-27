@@ -2,7 +2,9 @@
 //! table a dependency compiles against, and how the owner's and the
 //! dependency's tables merge.
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
+
+use crate::paths::NormalizedPath;
 
 use super::Remapping;
 
@@ -11,7 +13,7 @@ use super::Remapping;
 /// dependency is hoisted outside every package.
 pub(super) fn owner_remappings<'a>(
     dependency_root: &Utf8Path,
-    owners: &'a [(Utf8PathBuf, Vec<Remapping>)],
+    owners: &'a [(NormalizedPath, Vec<Remapping>)],
     fallback: &'a [Remapping],
 ) -> &'a [Remapping] {
     owners
@@ -35,4 +37,3 @@ pub(super) fn merge_remappings(root: &[Remapping], dependency: Vec<Remapping>) -
     }
     remappings
 }
-

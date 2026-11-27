@@ -17,9 +17,12 @@ pub struct ImportMap(FxHashMap<FileId, Vec<FileId>>);
 
 impl ImportMap {
     pub fn insert(&mut self, target: FileId, importer: FileId) {
-        let importers = self.0.entry(target).or_default();
-        if !importers.contains(&importer) {
-            importers.push(importer);
+        self.0.entry(target).or_default().push(importer);
+    }
+
+    pub fn merge(&mut self, other: &ImportMap) {
+        for (&target, importers) in &other.0 {
+            self.0.entry(target).or_default().extend_from_slice(importers);
         }
     }
 
@@ -60,5 +63,9 @@ pub struct SourceUnit {
 /// base path as much as of the file. A path outside `base` keeps its absolute
 /// spelling, which is what solc does for one.
 pub fn source_unit_name(base: &Utf8Path, path: &Utf8Path) -> Box<str> {
-    path.strip_prefix(base).unwrap_or(path).as_str().into()
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .as_str()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+        .into()
 }

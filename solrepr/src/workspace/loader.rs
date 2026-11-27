@@ -1,9 +1,11 @@
 //! Reads discovered files. `FileContent` is what the index asks of a file-list
 //! entry; `LoadedFile` is the one loaded shape, with `None` when a read failed.
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use ropey::Rope;
 use std::fs::File;
+
+use crate::paths::NormalizedPath;
 
 #[cfg(test)]
 use super::{RootWithFiles, WorkspaceWithFiles, discover_workspace};
@@ -12,16 +14,16 @@ use super::{RootWithFiles, WorkspaceWithFiles, discover_workspace};
 /// is asked for separately because the index checks for an existing handle
 /// before deciding whether it needs the text at all.
 pub(crate) trait FileContent {
-    fn path(&self) -> &Utf8Path;
-    fn load(&self) -> (Utf8PathBuf, Option<Rope>);
+    fn path(&self) -> &NormalizedPath;
+    fn load(&self) -> (NormalizedPath, Option<Rope>);
 }
 
-impl FileContent for Utf8PathBuf {
-    fn path(&self) -> &Utf8Path {
+impl FileContent for NormalizedPath {
+    fn path(&self) -> &NormalizedPath {
         self
     }
 
-    fn load(&self) -> (Utf8PathBuf, Option<Rope>) {
+    fn load(&self) -> (NormalizedPath, Option<Rope>) {
         (self.clone(), read(self))
     }
 }
@@ -31,38 +33,38 @@ impl FileContent for Utf8PathBuf {
 /// existing: the index may still hold a handle for it.
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedFile {
-    pub path: Utf8PathBuf,
+    pub path: NormalizedPath,
     pub text: Option<Rope>,
 }
 
 impl LoadedFile {
     /// Read `path`, keeping the path whether or not the read succeeds.
-    pub(crate) fn read(path: Utf8PathBuf) -> Self {
+    pub(crate) fn read(path: NormalizedPath) -> Self {
         let text = read(&path);
         Self { path, text }
     }
 }
 
-impl From<Utf8PathBuf> for LoadedFile {
+impl From<NormalizedPath> for LoadedFile {
     /// Reads the file: the text is `None` when it cannot be read, which keeps
     /// the path indexed-but-textless rather than dropping it.
-    fn from(path: Utf8PathBuf) -> Self {
+    fn from(path: NormalizedPath) -> Self {
         Self::read(path)
     }
 }
 
-impl From<LoadedFile> for Utf8PathBuf {
+impl From<LoadedFile> for NormalizedPath {
     fn from(file: LoadedFile) -> Self {
         file.path
     }
 }
 
 impl FileContent for LoadedFile {
-    fn path(&self) -> &Utf8Path {
+    fn path(&self) -> &NormalizedPath {
         &self.path
     }
 
-    fn load(&self) -> (Utf8PathBuf, Option<Rope>) {
+    fn load(&self) -> (NormalizedPath, Option<Rope>) {
         (self.path.clone(), self.text.clone())
     }
 }
@@ -76,7 +78,7 @@ pub(crate) fn read(path: &Utf8Path) -> Option<Rope> {
 /// Discover the workspace rooted at `root` and read every discovered file.
 /// Files that cannot be read are skipped.
 #[cfg(test)]
-pub(crate) fn load_roots(root: Utf8PathBuf) -> WorkspaceWithFiles<LoadedFile> {
+pub(crate) fn load_roots(root: NormalizedPath) -> WorkspaceWithFiles<LoadedFile> {
     let discovered = discover_workspace(&root);
     let roots = discovered
         .roots
@@ -86,11 +88,7 @@ pub(crate) fn load_roots(root: Utf8PathBuf) -> WorkspaceWithFiles<LoadedFile> {
             path: root.path,
             package_id: root.package_id,
             is_dependency: root.is_dependency,
-            files: root
-                .files
-                .into_iter()
-                .map(LoadedFile::read)
-                .collect(),
+            files: root.files.into_iter().map(LoadedFile::read).collect(),
         })
         .collect();
     WorkspaceWithFiles {
@@ -99,5 +97,3 @@ pub(crate) fn load_roots(root: Utf8PathBuf) -> WorkspaceWithFiles<LoadedFile> {
         ignored_roots: discovered.ignored_roots,
     }
 }
-
-

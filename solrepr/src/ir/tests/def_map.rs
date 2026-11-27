@@ -1,6 +1,7 @@
 use crate::hir::analysis::Analysis;
 use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::ir::def_map::*;
+use crate::paths::NormalizedPath;
 use crate::salsa::Db;
 use crate::salsa::root_db::RootDb;
 use crate::workspace::{
@@ -12,7 +13,7 @@ use ropey::Rope;
 const ROOT: &str = "/tmp/def_map_tests";
 
 fn db_with(files: &[(&str, &str)]) -> Db {
-    let root = Utf8PathBuf::from(ROOT);
+    let root = NormalizedPath::new(ROOT);
     let workspace = WorkspaceWithFiles {
         ignored_roots: Vec::new(),
         packages: vec![WsPackage {
@@ -26,7 +27,7 @@ fn db_with(files: &[(&str, &str)]) -> Db {
             files: files
                 .iter()
                 .map(|(path, text)| LoadedFile {
-                    path: root.join(path),
+                    path: NormalizedPath::new(root.join(path)),
                     text: Some(Rope::from_str(text)),
                 })
                 .collect(),

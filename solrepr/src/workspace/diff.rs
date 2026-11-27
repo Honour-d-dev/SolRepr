@@ -1,8 +1,9 @@
 //! The diff between the live root set and a fresh discovery: pure, no database,
 //! no filesystem, no file contents.
 
-use camino::Utf8PathBuf;
 use rustc_hash::FxHashSet;
+
+use crate::paths::NormalizedPath;
 
 use super::{LoadedFile, Package, Root, RootWithFiles, Workspace, WorkspaceWithFiles};
 
@@ -10,15 +11,15 @@ use super::{LoadedFile, Package, Root, RootWithFiles, Workspace, WorkspaceWithFi
 /// changed. A fact that did not change is absent, so "changed but the same
 /// value" cannot be expressed. `F` is the file type, as in `WorkspaceWithFiles`.
 #[derive(Debug, Clone)]
-pub(crate) struct WorkspaceDiff<F = Utf8PathBuf> {
+pub(crate) struct WorkspaceDiff<F = NormalizedPath> {
     /// The roots that appeared, with the files discovery found under them.
     pub roots_added: Vec<RootWithFiles<F>>,
-    pub removed: FxHashSet<Utf8PathBuf>,
+    pub removed: FxHashSet<NormalizedPath>,
     /// `Some` when the package list moved. A package is identified by its
     /// root, so position carries no meaning and the list replaces the old one.
     pub packages: Option<Vec<Package>>,
     /// `Some` when the ignored set moved, so the client's view of it is stale.
-    pub ignored: Option<Vec<Utf8PathBuf>>,
+    pub ignored: Option<Vec<NormalizedPath>>,
 }
 
 impl<F> WorkspaceDiff<F> {
@@ -42,10 +43,14 @@ impl<F> From<WorkspaceWithFiles<F>> for WorkspaceDiff<F> {
     }
 }
 
-impl From<WorkspaceDiff<Utf8PathBuf>> for WorkspaceDiff<LoadedFile> {
-    fn from(diff: WorkspaceDiff<Utf8PathBuf>) -> Self {
+impl From<WorkspaceDiff<NormalizedPath>> for WorkspaceDiff<LoadedFile> {
+    fn from(diff: WorkspaceDiff<NormalizedPath>) -> Self {
         Self {
-            roots_added: diff.roots_added.into_iter().map(RootWithFiles::from).collect(),
+            roots_added: diff
+                .roots_added
+                .into_iter()
+                .map(RootWithFiles::from)
+                .collect(),
             removed: diff.removed,
             packages: diff.packages,
             ignored: diff.ignored,
@@ -53,10 +58,14 @@ impl From<WorkspaceDiff<Utf8PathBuf>> for WorkspaceDiff<LoadedFile> {
     }
 }
 
-impl From<WorkspaceDiff<LoadedFile>> for WorkspaceDiff<Utf8PathBuf> {
+impl From<WorkspaceDiff<LoadedFile>> for WorkspaceDiff<NormalizedPath> {
     fn from(diff: WorkspaceDiff<LoadedFile>) -> Self {
         Self {
-            roots_added: diff.roots_added.into_iter().map(RootWithFiles::from).collect(),
+            roots_added: diff
+                .roots_added
+                .into_iter()
+                .map(RootWithFiles::from)
+                .collect(),
             removed: diff.removed,
             packages: diff.packages,
             ignored: diff.ignored,
@@ -67,18 +76,25 @@ impl From<WorkspaceDiff<LoadedFile>> for WorkspaceDiff<Utf8PathBuf> {
 /// A root is the same only when its path, package and dependency flag match, so
 /// an ownership change is a replacement, never an in-place edit. `new` is
 /// sorted here because discovery order varies; its projection comes back too.
-pub(crate) fn diff<F>(old: &Workspace, new: WorkspaceWithFiles<F>) -> (Workspace<()>, WorkspaceDiff<F>) {
+pub(crate) fn diff<F>(
+    old: &Workspace,
+    new: WorkspaceWithFiles<F>,
+) -> (Workspace<()>, WorkspaceDiff<F>) {
     let new = new.sorted();
     let discovered: Workspace<()> = (&new).into();
 
     let old_roots = old.roots.iter().collect::<FxHashSet<&Root>>();
     let new_roots = discovered.roots.iter().collect::<FxHashSet<&Root>>();
 
-    let roots_removed = old.roots.iter()
+    let roots_removed = old
+        .roots
+        .iter()
         .filter(|root| !new_roots.contains(root))
         .map(|root| root.path.clone())
         .collect();
-    let roots_added = new.roots.into_iter()
+    let roots_added = new
+        .roots
+        .into_iter()
         .filter(|root| !old_roots.contains(&Root::from(root)))
         .collect();
 

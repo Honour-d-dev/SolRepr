@@ -1,34 +1,35 @@
 //! The shape discovery produces: packages, source roots, and the workspace that
 //! groups them. Pure data — no filesystem, no database.
 
-use camino::Utf8PathBuf;
 use rustc_hash::FxHashSet;
+
+use crate::paths::NormalizedPath;
 
 use super::loader::LoadedFile;
 
 /// A package, identified by its root directory rather than its position, so
 /// inserting a package renumbers nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PackageId(pub Utf8PathBuf);
+pub struct PackageId(pub NormalizedPath);
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Package {
-    pub root: Utf8PathBuf,
+    pub root: NormalizedPath,
     pub remappings: Vec<Remapping>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Remapping {
-    pub context: Option<Utf8PathBuf>,
+    pub context: Option<NormalizedPath>,
     pub prefix: String,
-    pub target: Utf8PathBuf,
+    pub target: NormalizedPath,
 }
 
 /// A source root at whatever stage the pipeline loaded it to: `F` is the file
 /// list, and `()` when only the root-level facts matter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Root<F = ()> {
-    pub path: Utf8PathBuf,
+    pub path: NormalizedPath,
     pub package_id: PackageId,
     pub files: F,
     pub is_dependency: bool,
@@ -40,14 +41,13 @@ impl<F> From<&Root<F>> for Root<()> {
             path: root.path.clone(),
             package_id: root.package_id.clone(),
             is_dependency: root.is_dependency,
-            files: ()
+            files: (),
         }
     }
 }
 
 /// A root that carries the files discovery found under it.
-pub(crate) type RootWithFiles<T = Utf8PathBuf> = Root<Vec<T>>;
-
+pub(crate) type RootWithFiles<T = NormalizedPath> = Root<Vec<T>>;
 
 impl<F> RootWithFiles<F> {
     /// Re-stage the files, e.g. paths that were read into `LoadedFile`s.
@@ -61,15 +61,15 @@ impl<F> RootWithFiles<F> {
     }
 }
 
-impl From<RootWithFiles<Utf8PathBuf>> for RootWithFiles<LoadedFile> {
-    fn from(root: RootWithFiles<Utf8PathBuf>) -> Self {
+impl From<RootWithFiles<NormalizedPath>> for RootWithFiles<LoadedFile> {
+    fn from(root: RootWithFiles<NormalizedPath>) -> Self {
         root.map_files(LoadedFile::from)
     }
 }
 
-impl From<RootWithFiles<LoadedFile>> for RootWithFiles<Utf8PathBuf> {
+impl From<RootWithFiles<LoadedFile>> for RootWithFiles<NormalizedPath> {
     fn from(root: RootWithFiles<LoadedFile>) -> Self {
-        root.map_files(Utf8PathBuf::from)
+        root.map_files(|file| file.path)
     }
 }
 
@@ -80,11 +80,11 @@ pub(crate) struct Workspace<F = ()> {
     pub roots: Vec<Root<F>>,
     /// Roots kept out of the compilation unit — deduplicated library copies
     /// and dependency dev dirs. On disk but never indexed.
-    pub ignored_roots: Vec<Utf8PathBuf>,
+    pub ignored_roots: Vec<NormalizedPath>,
 }
 
 /// A workspace that carries the files discovery found under each root.
-pub(crate) type WorkspaceWithFiles<T = Utf8PathBuf> = Workspace<Vec<T>>;
+pub(crate) type WorkspaceWithFiles<T = NormalizedPath> = Workspace<Vec<T>>;
 
 impl<F> Workspace<F> {
     pub(crate) fn empty() -> Self {
@@ -131,8 +131,11 @@ impl<F> WorkspaceWithFiles<F> {
             ignored_roots.extend(workspace.ignored_roots);
         }
 
-        ignored_roots
-            .retain(|ignored| !roots.iter().any(|root| root.path.starts_with(ignored.as_path())));
+        ignored_roots.retain(|ignored| {
+            !roots
+                .iter()
+                .any(|root| root.path.starts_with(ignored.as_path()))
+        });
         ignored_roots.sort();
         ignored_roots.dedup();
 
@@ -156,15 +159,15 @@ impl<F> WorkspaceWithFiles<F> {
     }
 }
 
-impl From<WorkspaceWithFiles<Utf8PathBuf>> for WorkspaceWithFiles<LoadedFile> {
-    fn from(workspace: WorkspaceWithFiles<Utf8PathBuf>) -> Self {
+impl From<WorkspaceWithFiles<NormalizedPath>> for WorkspaceWithFiles<LoadedFile> {
+    fn from(workspace: WorkspaceWithFiles<NormalizedPath>) -> Self {
         workspace.map_files(LoadedFile::from)
     }
 }
 
-impl From<WorkspaceWithFiles<LoadedFile>> for WorkspaceWithFiles<Utf8PathBuf> {
+impl From<WorkspaceWithFiles<LoadedFile>> for WorkspaceWithFiles<NormalizedPath> {
     fn from(workspace: WorkspaceWithFiles<LoadedFile>) -> Self {
-        workspace.map_files(Utf8PathBuf::from)
+        workspace.map_files(|file| file.path)
     }
 }
 
@@ -172,11 +175,7 @@ impl<F> From<&Workspace<F>> for Workspace<()> {
     fn from(workspace: &Workspace<F>) -> Self {
         Self {
             packages: workspace.packages.clone(),
-            roots: workspace
-                .roots
-                .iter()
-                .map(Root::from)
-                .collect(),
+            roots: workspace.roots.iter().map(Root::from).collect(),
             ignored_roots: workspace.ignored_roots.clone(),
         }
         .sorted()

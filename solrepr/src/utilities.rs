@@ -5,42 +5,21 @@ use lsp_types::Url;
 use ropey::Rope;
 use tree_sitter::Point;
 
+use crate::paths::NormalizedPath;
 use crate::workspace::Remapping;
 
-pub(crate) fn canonicalize_path(path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
-    let path = dunce::canonicalize(path).context("failed to canonicalize path")?;
-    Utf8PathBuf::from_path_buf(path)
-        .map_err(|path| anyhow::anyhow!("path is not valid UTF-8: {path:?}"))
-}
-
 #[cfg(test)]
-pub(crate) fn fixture_path(path: &str) -> Utf8PathBuf {
-    let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
-    canonicalize_path(&path).expect("fixture exists")
+pub(crate) fn fixture_path(path: &str) -> NormalizedPath {
+    NormalizedPath::new(Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path))
 }
 
-pub(crate) fn normalize_path(path: &Utf8Path) -> Utf8PathBuf {
-    if let Ok(path) = canonicalize_path(path) {
-        return path;
-    }
-
-    // canonicalizing can fail if file has not been saved to disk.
-    // In this case, we can still try to canonicalize the parent path then join the file name.
-    let (Some(file_name), Some(parent)) = (path.file_name(), path.parent()) else {
-        return path.to_path_buf();
-    };
-
-    let normalized_parent = canonicalize_path(parent).unwrap_or_else(|_| parent.to_path_buf());
-    normalized_parent.join(file_name)
-}
-
-pub(crate) fn to_utf8path(uri: &Url) -> anyhow::Result<Utf8PathBuf> {
+pub(crate) fn to_utf8path(uri: &Url) -> anyhow::Result<NormalizedPath> {
     let path = uri
         .to_file_path()
         .map_err(|_| anyhow::anyhow!("failed to convert URI to path"))?;
     let path =
         Utf8PathBuf::from_path_buf(path).map_err(|_| anyhow::anyhow!("path is not valid UTF-8"))?;
-    Ok(normalize_path(&path))
+    Ok(NormalizedPath::new(path))
 }
 
 pub(crate) fn to_url(path: &Utf8Path) -> Url {
@@ -49,7 +28,7 @@ pub(crate) fn to_url(path: &Utf8Path) -> Url {
 
 /// A document's path, or `None` when the client used a non-`file:` URI.
 /// Notifications have no reply, so this only logs.
-pub(crate) fn document_path(uri: &lsp_types::Url) -> Option<Utf8PathBuf> {
+pub(crate) fn document_path(uri: &lsp_types::Url) -> Option<NormalizedPath> {
     match to_utf8path(uri) {
         Ok(path) => Some(path),
         Err(error) => {
@@ -61,22 +40,22 @@ pub(crate) fn document_path(uri: &lsp_types::Url) -> Option<Utf8PathBuf> {
 
 ///Resolves to a new path relative to a base path
 pub(crate) fn resolve_path(
-    base: &Utf8PathBuf,
+    base: &Utf8Path,
     rel_path: impl AsRef<Utf8Path>,
-) -> anyhow::Result<Utf8PathBuf> {
+) -> anyhow::Result<NormalizedPath> {
     let resolved_path = base
         .parent()
         .context("Error: can't resolve path, base path has no parent")?
         .join(rel_path);
-    Ok(normalize_path(&resolved_path))
+    Ok(NormalizedPath::new(resolved_path))
 }
 
 /// Resolves a Solidity import string, checking remappings first, then falling back to relative resolution.
 pub(crate) fn resolve_import(
-    base: &Utf8PathBuf,
+    base: &Utf8Path,
     import_str: &str,
     remappings: &[Remapping],
-) -> anyhow::Result<Utf8PathBuf> {
+) -> anyhow::Result<NormalizedPath> {
     // Relative imports
     if import_str.starts_with("./") || import_str.starts_with("../") {
         return resolve_path(base, import_str);
@@ -93,7 +72,10 @@ pub(crate) fn resolve_import(
         })
         .max_by_key(|remapping| {
             (
-                remapping.context.as_ref().map_or(0, |context| context.as_str().len()),
+                remapping
+                    .context
+                    .as_ref()
+                    .map_or(0, |context| context.as_str().len()),
                 remapping.prefix.len(),
                 // A manifest can declare one prefix twice with different targets — Foundry's are relative to
                 // the package root and may miss the installed layout, while the resolver found the real one.
@@ -103,7 +85,7 @@ pub(crate) fn resolve_import(
 
     if let Some(remapping) = best_match {
         let suffix = &import_str[remapping.prefix.len()..];
-        return Ok(normalize_path(&remapping.target.join(suffix)));
+        return Ok(NormalizedPath::new(remapping.target.join(suffix)));
     }
 
     // Fallback: try relative resolution against the base file's parent
@@ -144,8 +126,8 @@ pub(crate) fn position_to_point(r: &Rope, position: Position) -> Point {
     Point {
         row: position.line as usize,
         column: r
-        .line(position.line as usize)
-        .utf16_cu_to_char(position.character as usize),
+            .line(position.line as usize)
+            .utf16_cu_to_char(position.character as usize),
     }
 }
 
@@ -174,8 +156,8 @@ pub(crate) fn log_info(message: impl Into<String>) {
     tracing::info!("{}", message.into());
 }
 
-/// Salsa events logger (for debug only): 
-/// `WillExecute` is a miss/recompute, `DidValidateMemoizedValue` is a hit. 
+/// Salsa events logger (for debug only):
+/// `WillExecute` is a miss/recompute, `DidValidateMemoizedValue` is a hit.
 /// The level is the knob — `debug` shows misses, `trace` adds hits and blocks.
 pub(crate) fn logger(event: salsa::Event) {
     use salsa::EventKind;
@@ -189,7 +171,10 @@ pub(crate) fn logger(event: salsa::Event) {
         EventKind::WillBlockOn { database_key, .. } => {
             tracing::trace!(query = ?database_key, "blocked")
         }
-        EventKind::WillIterateCycle { database_key, iteration_count, } => {
+        EventKind::WillIterateCycle {
+            database_key,
+            iteration_count,
+        } => {
             tracing::warn!(query = ?database_key, iteration_count = ?iteration_count, "cycle")
         }
         _ => {}
@@ -296,15 +281,17 @@ mod tests {
             Remapping {
                 context: None,
                 prefix: "@oz/".to_string(),
-                target: missing,
+                target: NormalizedPath::new(missing),
             },
         ];
 
         let base = root.join("Main.sol");
         let resolved = resolve_import(&base, "@oz/Dependency.sol", &remappings).expect("resolves");
-        assert_eq!(resolved, normalize_path(&root.join("Dependency.sol")));
+        assert_eq!(
+            resolved,
+            crate::paths::normalize_path(&root.join("Dependency.sol"))
+        );
     }
-
 
     #[test]
     fn test_print_tree() {
@@ -410,14 +397,14 @@ mod tests {
         let root_remapping = Remapping {
             context: None,
             prefix: "@openzeppelin/contracts/".to_string(),
-            target: Utf8PathBuf::from("/workspace/lib/openzeppelin-contracts/contracts"),
+            target: NormalizedPath::new("/workspace/lib/openzeppelin-contracts/contracts"),
         };
         let nested_remapping = Remapping {
-            context: Some(Utf8PathBuf::from(
+            context: Some(NormalizedPath::new(
                 "/workspace/lib/openzeppelin-contracts-upgradeable",
             )),
             prefix: "@openzeppelin/contracts/".to_string(),
-            target: Utf8PathBuf::from(
+            target: NormalizedPath::new(
                 "/workspace/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts",
             ),
         };

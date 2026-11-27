@@ -22,7 +22,6 @@ thread_local! {
     });
 }
 
-
 #[salsa::db]
 pub trait RootDb: salsa::Database {
     fn text(&self, file: FileId) -> Arc<str>;
@@ -39,11 +38,9 @@ pub trait RootDb: salsa::Database {
     fn resolve_to_file(&self, from: FileId, import_path: &str) -> Option<FileId>;
     fn is_ignored_path(&self, path: &Utf8Path) -> bool;
     fn imports(&self, file: File) -> &Imports;
-    fn imports_closure(&self, file:File) -> &[SourceUnit];
+    fn imports_closure(&self, file: File) -> &[SourceUnit];
     fn import_map(&self) -> &ImportMap;
 }
-
-
 
 #[salsa::db]
 impl RootDb for Db {
@@ -52,7 +49,7 @@ impl RootDb for Db {
     }
 
     fn file_source_root(&self, file: FileId) -> SourceRootId {
-        self.file_source_root(file).expect("file has no root")
+        self.file_source_root(file)
     }
 
     fn source_roots(&self) -> &[SourceRootId] {
@@ -88,8 +85,7 @@ impl RootDb for Db {
     }
 
     fn file_def_map(&self, file: File) -> Arc<DefMap> {
-        let root = self.file_source_root(file).unwrap();
-        self.root_def_map(root)
+        self.root_def_map(file.root(self))
     }
 
     fn resolve_to_file(&self, from: FileId, rel_path: &str) -> Option<FileId> {
@@ -100,11 +96,11 @@ impl RootDb for Db {
         self.is_ignored_path(path)
     }
 
-    fn imports(&self,file: File) -> &Imports {
+    fn imports(&self, file: File) -> &Imports {
         imports(self, file)
     }
 
-    fn imports_closure(&self,file: File) -> &[SourceUnit] {
+    fn imports_closure(&self, file: File) -> &[SourceUnit] {
         imports_closure(self, file)
     }
 
@@ -176,7 +172,6 @@ fn root_def_map_analysis_recover(
     value
 }
 
-
 /// The imports `file` declares, resolved.
 /// i.e. files that 'file' depend on.
 #[salsa::tracked(returns(ref))]
@@ -196,7 +191,19 @@ pub fn imports(db: &dyn RootDb, file: File) -> Imports {
     imports
 }
 
-/// The inversion of [`imports`], files that depends on 'file'.
+/// The inversion of [`imports`] for one root: for each file, its importers.
+#[salsa::tracked(returns(ref))]
+pub fn import_map_of(db: &dyn RootDb, root: SourceRootId) -> ImportMap {
+    let mut map = ImportMap::default();
+    for &file in root.files(db).iter() {
+        for &target in &imports(db, file).resolved {
+            map.insert(target, file);
+        }
+    }
+    map
+}
+
+/// Every local root's inversion, merged.
 ///
 /// Dependency roots are skipped: a dependency file cannot depend on a file in a non-dep root.
 #[salsa::tracked(returns(ref))]
@@ -206,11 +213,7 @@ pub fn import_map(db: &dyn RootDb) -> ImportMap {
         if root.is_dependency(db) {
             continue;
         }
-        for &file in root.files(db).iter() {
-            for &target in &imports(db, file).resolved {
-                map.insert(target, file);
-            }
-        }
+        map.merge(import_map_of(db, root));
     }
     map
 }
@@ -219,7 +222,7 @@ pub fn import_map(db: &dyn RootDb) -> ImportMap {
 /// root — the source map solc is handed.
 #[salsa::tracked(returns(ref))]
 pub fn imports_closure(db: &dyn RootDb, entry: File) -> Vec<SourceUnit> {
-    let base = db.package_config(db.file_source_root(entry)).root.clone();
+    let base = db.package_config(entry.root(db)).root.clone();
     let mut closure = vec![SourceUnit {
         name: source_unit_name(&base, entry.path(db)),
         file: entry,
@@ -258,4 +261,3 @@ pub fn def_range(db: &dyn RootDb, def: DefId) -> Option<NodeRange> {
     let name = node.node().child_by_field_id(FieldKind::NAME.into());
     Some(NodeRange::from(&name.unwrap_or(node.node())))
 }
-

@@ -103,9 +103,7 @@ impl LiveDocs {
     /// The identity of this open, or `None` when `file` is not in the diagnosed
     /// set. A reopen gets a fresh epoch.
     pub(crate) fn epoch(&self, file: &File) -> Option<u64> {
-        self.map
-            .get(file)
-            .map(|node_id| self.nodes[*node_id].epoch)
+        self.map.get(file).map(|node_id| self.nodes[*node_id].epoch)
     }
 
     /// The version the client last reported for `file`, or `None` when it is
@@ -223,17 +221,29 @@ impl Iterator for LiveDocIter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camino::Utf8PathBuf;
     use ropey::Rope;
 
-    use crate::salsa::Db;
+    use crate::paths::NormalizedPath;
+    use crate::salsa::{Db, SourceRootId};
+    use crate::workspace::PackageId;
+
+    fn file(db: &Db, name: &str) -> File {
+        let root = SourceRootId::builder(
+            NormalizedPath::new("/w"),
+            PackageId(NormalizedPath::new("/w")),
+            triomphe::Arc::from(Vec::new()),
+            false,
+        )
+        .new(db);
+        File::builder(Rope::from_str(""), NormalizedPath::new(name), root).new(db)
+    }
 
     #[test]
     fn maintains_mru_order_and_evicts_lru() {
         let db = Db::default();
-        let file_a = File::builder(Rope::from_str(""), Utf8PathBuf::from("a.sol")).new(&db);
-        let file_b = File::builder(Rope::from_str(""), Utf8PathBuf::from("b.sol")).new(&db);
-        let file_c = File::builder(Rope::from_str(""), Utf8PathBuf::from("c.sol")).new(&db);
+        let file_a = file(&db, "a.sol");
+        let file_b = file(&db, "b.sol");
+        let file_c = file(&db, "c.sol");
         let mut files = LiveDocs::with_capacity(2);
 
         assert_eq!(files.touch(file_a, 1), None);
@@ -249,8 +259,8 @@ mod tests {
     #[test]
     fn reuses_removed_nodes() {
         let db = Db::default();
-        let file_a = File::builder(Rope::from_str(""), Utf8PathBuf::from("a.sol")).new(&db);
-        let file_b = File::builder(Rope::from_str(""), Utf8PathBuf::from("b.sol")).new(&db);
+        let file_a = file(&db, "a.sol");
+        let file_b = file(&db, "b.sol");
         let mut files = LiveDocs::new();
 
         files.touch(file_a, 1);
@@ -268,8 +278,8 @@ mod tests {
     #[test]
     fn versions_track_the_document() {
         let db = Db::default();
-        let file_a = File::builder(Rope::from_str(""), Utf8PathBuf::from("a.sol")).new(&db);
-        let file_b = File::builder(Rope::from_str(""), Utf8PathBuf::from("b.sol")).new(&db);
+        let file_a = file(&db, "a.sol");
+        let file_b = file(&db, "b.sol");
         let mut files = LiveDocs::with_capacity(1);
 
         assert_eq!(files.version(&file_a), None);
@@ -296,8 +306,8 @@ mod tests {
     #[test]
     fn touching_an_evicted_document_retracks_it() {
         let db = Db::default();
-        let file_a = File::builder(Rope::from_str(""), Utf8PathBuf::from("a.sol")).new(&db);
-        let file_b = File::builder(Rope::from_str(""), Utf8PathBuf::from("b.sol")).new(&db);
+        let file_a = file(&db, "a.sol");
+        let file_b = file(&db, "b.sol");
         let mut files = LiveDocs::with_capacity(1);
 
         files.touch(file_a, 1);
