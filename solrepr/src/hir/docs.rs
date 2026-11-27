@@ -6,9 +6,9 @@ use crate::ast::{AstNode, NodeRange};
 use crate::hir::signatures::signature_of;
 use crate::ir::def_map::{DefId, DefNamespace};
 use crate::salsa::File;
+use crate::salsa::HirDb;
 use crate::salsa::interned_db::Id;
 use crate::salsa::root_db::RootDb;
-use crate::salsa::HirDb;
 
 #[salsa::tracked(lru = 100)]
 pub fn docs<'db>(db: &'db dyn HirDb, def: Id<'db>) -> Option<String> {
@@ -39,12 +39,12 @@ fn doc_tags<'db>(db: &'db dyn HirDb, def: Id<'db>) -> Option<Arc<DocTags>> {
 }
 
 /// The same-named member of the base `base_name` refers to, for `@inheritdoc`.
-/// `def`'s contract is found through `owner`; `base_name` is matched against
+/// `def`'s contract is found through `container`; `base_name` is matched against
 /// the linearized bases (`bases[0]` is the contract itself — skipped). The
 /// best same-namespace candidate wins on the number of positionally-equal
 /// parameter types, earlier declarations breaking ties.
 fn inherit_target(db: &dyn HirDb, def: DefId, base_name: &str) -> Option<DefId> {
-    let contract = db.owner(def)?;
+    let contract = db.container(def)?;
     if !matches!(contract, DefId::Contract(_) | DefId::Interface(_)) {
         return None;
     }
@@ -56,13 +56,7 @@ fn inherit_target(db: &dyn HirDb, def: DefId, base_name: &str) -> Option<DefId> 
         .iter()
         .skip(1)
         .copied()
-        .find(|&base| {
-            db.file_def_map(base.file())
-                .defs
-                .get(&base)
-                .and_then(|data| data.name.as_deref())
-                == Some(base_name)
-        })?;
+        .find(|&base| db.file_def_map(base.file()).defs.get(&base).and_then(|data| data.name.as_deref()) == Some(base_name))?;
 
     let defmap = db.file_def_map(base.file());
     let scope = defmap.defs.get(&base)?.child_scope?;
@@ -93,12 +87,7 @@ fn signature_match(db: &dyn HirDb, def: DefId, candidate: DefId) -> usize {
     if own.params.len() != other.params.len() {
         return 0;
     }
-    1 + own
-        .params
-        .iter()
-        .zip(other.params.iter())
-        .filter(|(a, b)| a == b)
-        .count()
+    1 + own.params.iter().zip(other.params.iter()).filter(|(a, b)| a == b).count()
 }
 
 /// Doc comments for a declaration at an exact range (e.g. struct fields, enum variants)
@@ -156,25 +145,12 @@ pub(crate) enum DocEntry {
 }
 
 impl DocTags {
-    
     pub(crate) fn merge_missing(&mut self, base: &DocTags) {
-        let has_notice = self
-            .entries
-            .iter()
-            .any(|e| matches!(e, DocEntry::Notice(_)));
+        let has_notice = self.entries.iter().any(|e| matches!(e, DocEntry::Notice(_)));
         let has_dev = self.entries.iter().any(|e| matches!(e, DocEntry::Dev(_)));
-        let has_title = self
-            .entries
-            .iter()
-            .any(|e| matches!(e, DocEntry::Title(_)));
-        let has_author = self
-            .entries
-            .iter()
-            .any(|e| matches!(e, DocEntry::Author(_)));
-        let has_return = self
-            .entries
-            .iter()
-            .any(|e| matches!(e, DocEntry::Return(_)));
+        let has_title = self.entries.iter().any(|e| matches!(e, DocEntry::Title(_)));
+        let has_author = self.entries.iter().any(|e| matches!(e, DocEntry::Author(_)));
+        let has_return = self.entries.iter().any(|e| matches!(e, DocEntry::Return(_)));
         let params: FxHashSet<String> = self
             .entries
             .iter()
@@ -290,4 +266,3 @@ pub(crate) fn format_doc(doc: &DocTags) -> String {
 pub(crate) fn normalize_doc(raw: &str) -> String {
     format_doc(&parse_doc(raw))
 }
-

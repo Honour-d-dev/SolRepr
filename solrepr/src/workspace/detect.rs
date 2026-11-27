@@ -10,9 +10,7 @@ use glob::glob;
 use rustc_hash::FxHashSet;
 
 use super::Remapping;
-use super::parse::{
-    parse_foundry_toml, parse_hardhat_config, parse_package_manifest, parse_remappings_txt,
-};
+use super::parse::{parse_foundry_toml, parse_hardhat_config, parse_package_manifest, parse_remappings_txt};
 use crate::paths::NormalizedPath;
 
 pub(super) const PRUNED_DIRS: [&str; 5] = [".git", "node_modules", "out", "artifacts", "cache"];
@@ -33,8 +31,7 @@ pub(crate) fn is_manifest(path: &Utf8Path) -> bool {
     let Some(name) = path.file_name() else {
         return false;
     };
-    matches!(name, "foundry.toml" | "remappings.txt" | "package.json")
-        || HARDHAT_CONFIGS.contains(&name)
+    matches!(name, "foundry.toml" | "remappings.txt" | "package.json") || HARDHAT_CONFIGS.contains(&name)
 }
 
 /// A package digested from its manifests: source roots, dev dirs, remappings
@@ -124,11 +121,7 @@ pub(super) fn package_descriptor(root: &Utf8Path, is_dependency: bool) -> Packag
 /// index from their package root; workspace packages try the conventional
 /// `contracts/` dir first, then the root itself.
 fn default_source_roots(root: &NormalizedPath, is_dependency: bool) -> Vec<NormalizedPath> {
-    let candidates: &[&str] = if is_dependency {
-        &[""]
-    } else {
-        &["contracts", ""]
-    };
+    let candidates: &[&str] = if is_dependency { &[""] } else { &["contracts", ""] };
     candidates
         .iter()
         .find_map(|dir| {
@@ -155,10 +148,7 @@ struct Manifests {
 
 impl Manifests {
     fn is_empty(&self) -> bool {
-        self.foundry_toml.is_none()
-            && self.hardhat_config.is_none()
-            && self.package_json.is_none()
-            && self.remappings_txt.is_none()
+        self.foundry_toml.is_none() && self.hardhat_config.is_none() && self.package_json.is_none() && self.remappings_txt.is_none()
     }
 }
 
@@ -167,9 +157,7 @@ impl Manifests {
 fn manifests_in(dir: &Utf8Path) -> Option<Manifests> {
     let manifests = Manifests {
         foundry_toml: existing_file(dir, "foundry.toml"),
-        hardhat_config: HARDHAT_CONFIGS
-            .iter()
-            .find_map(|name| existing_file(dir, name)),
+        hardhat_config: HARDHAT_CONFIGS.iter().find_map(|name| existing_file(dir, name)),
         package_json: existing_file(dir, "package.json"),
         remappings_txt: existing_file(dir, "remappings.txt"),
     };
@@ -178,45 +166,28 @@ fn manifests_in(dir: &Utf8Path) -> Option<Manifests> {
 
 /// The digested package at a manifest-bearing root: both configs' facts,
 /// resolved into one descriptor.
-fn manifest_package(
-    dir: &Utf8Path,
-    is_dependency: bool,
-    manifests: Manifests,
-) -> PackageDescriptor {
+fn manifest_package(dir: &Utf8Path, is_dependency: bool, manifests: Manifests) -> PackageDescriptor {
     let root = NormalizedPath::new(dir);
     let foundry = manifests.foundry_toml.as_ref().and_then(|path| {
         fs::read_to_string(path)
             .ok()
             .and_then(|text| parse_foundry_toml(&text, root.as_path()))
     });
-    let hardhat = manifests
-        .hardhat_config
-        .as_deref()
-        .map(parse_hardhat_config);
+    let hardhat = manifests.hardhat_config.as_deref().map(parse_hardhat_config);
     // `remappings.txt` overrides foundry.toml entirely — resolved here.
     let mut remappings = manifests
         .remappings_txt
         .as_deref()
         .and_then(parse_remappings_txt)
-        .unwrap_or_else(|| {
-            foundry
-                .as_ref()
-                .map(|foundry| foundry.remappings.clone())
-                .unwrap_or_default()
-        });
-    let manifest = manifests
-        .package_json
-        .as_deref()
-        .and_then(parse_package_manifest);
+        .unwrap_or_else(|| foundry.as_ref().map(|foundry| foundry.remappings.clone()).unwrap_or_default());
+    let manifest = manifests.package_json.as_deref().and_then(parse_package_manifest);
     let resolved_dependencies = manifest
         .as_ref()
         .map(|manifest| {
             manifest
                 .dependency_names
                 .iter()
-                .filter_map(|name| {
-                    resolve_node_package(&root, name).map(|root| (name.clone(), root))
-                })
+                .filter_map(|name| resolve_node_package(&root, name).map(|root| (name.clone(), root)))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -236,10 +207,7 @@ fn manifest_package(
     if let Some(foundry) = &foundry {
         // `contracts` is a conventional extra root, not a forge key.
         source_roots.extend(dirs_under(&root, [foundry.src.as_str(), "contracts"]));
-        dev_dirs.extend(dirs_under(
-            &root,
-            [foundry.test.as_str(), foundry.script.as_str()],
-        ));
+        dev_dirs.extend(dirs_under(&root, [foundry.test.as_str(), foundry.script.as_str()]));
     }
     if let Some(hardhat) = &hardhat {
         source_roots.extend(dirs_under(&root, &hardhat.sources));
@@ -297,10 +265,7 @@ fn manifest_package(
         .filter(|remapping| remapping.context.is_none())
         .map(|remapping| remapping.prefix.clone())
         .collect();
-    if foundry
-        .as_ref()
-        .is_some_and(|foundry| foundry.auto_detect_remappings)
-    {
+    if foundry.as_ref().is_some_and(|foundry| foundry.auto_detect_remappings) {
         synthesize_library_remappings(&foundry_libraries, &mut remappings, &mut claimed);
     }
     synthesize_library_remappings(&hardhat_libraries, &mut remappings, &mut claimed);
@@ -353,11 +318,7 @@ fn workspace_references(root: &NormalizedPath, patterns: &[String]) -> Vec<Packa
 /// `<dir-name>/ -> <child source dir>` per immediate child, for forge's
 /// auto-detected libraries and hardhat's vendored `imports`. The first
 /// remapping to claim a prefix wins.
-fn synthesize_library_remappings(
-    libraries: &[(String, NormalizedPath)],
-    remappings: &mut Vec<Remapping>,
-    claimed: &mut FxHashSet<String>,
-) {
+fn synthesize_library_remappings(libraries: &[(String, NormalizedPath)], remappings: &mut Vec<Remapping>, claimed: &mut FxHashSet<String>) {
     for (name, child) in libraries {
         let prefix = format!("{name}/");
         if !claimed.insert(prefix.clone()) {
@@ -400,11 +361,7 @@ fn expand_braces(pattern: &str) -> Vec<String> {
     let Some(close) = pattern[open..].find('}').map(|close| open + close) else {
         return vec![pattern.to_string()];
     };
-    let (head, alternates, tail) = (
-        &pattern[..open],
-        &pattern[open + 1..close],
-        &pattern[close + 1..],
-    );
+    let (head, alternates, tail) = (&pattern[..open], &pattern[open + 1..close], &pattern[close + 1..]);
     alternates
         .split(',')
         .flat_map(|alternate| expand_braces(&format!("{head}{alternate}{tail}")))
@@ -412,22 +369,14 @@ fn expand_braces(pattern: &str) -> Vec<String> {
 }
 
 /// The configured directories under `root` that exist.
-fn dirs_under<S: AsRef<str>>(
-    root: &NormalizedPath,
-    dirs: impl IntoIterator<Item = S>,
-) -> Vec<NormalizedPath> {
-    dirs.into_iter()
-        .filter_map(|dir| existing_dir(root, dir.as_ref()))
-        .collect()
+fn dirs_under<S: AsRef<str>>(root: &NormalizedPath, dirs: impl IntoIterator<Item = S>) -> Vec<NormalizedPath> {
+    dirs.into_iter().filter_map(|dir| existing_dir(root, dir.as_ref())).collect()
 }
 
 /// `(name, dir)` pairs for the immediate children of each configured
 /// directory that exists — the libraries a package can import from.
 fn libraries_under(root: &NormalizedPath, dirs: &[String]) -> Vec<(String, NormalizedPath)> {
-    dirs_under(root, dirs)
-        .iter()
-        .flat_map(library_children)
-        .collect()
+    dirs_under(root, dirs).iter().flat_map(library_children).collect()
 }
 
 /// Immediate child directories of a directory, sorted so iteration order is
@@ -450,8 +399,8 @@ fn library_children(dir: &NormalizedPath) -> Vec<(String, NormalizedPath)> {
     children
 }
 
-fn resolve_node_package(owner: &NormalizedPath, name: &str) -> Option<NormalizedPath> {
-    let mut current = Some(owner.as_path());
+fn resolve_node_package(package_root: &NormalizedPath, name: &str) -> Option<NormalizedPath> {
+    let mut current = Some(package_root.as_path());
     while let Some(directory) = current {
         let candidate = directory.join("node_modules").join(name);
         if candidate.join("package.json").is_file() {

@@ -2,11 +2,11 @@ use la_arena::{Arena, ArenaMap};
 use triomphe::Arc;
 
 use crate::hir::body_map::{Local, LocalId};
+use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::hir::exprs::ExprId;
 use crate::hir::item_data::{Field, FieldId, SemanticId, Variant, VariantId};
-use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::Resolution;
-use crate::hir::diagnostics::SemanticDiagnostic;
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::types::{Mutability, Ty, TyNameId, Type};
 use crate::salsa::HirDb;
 

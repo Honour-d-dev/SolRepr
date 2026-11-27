@@ -1,6 +1,6 @@
 //! Namespace-aware declaration access for names and members.
 //!
-//! The resolver supplies the lexical caller, declaring owner, access path and
+//! The resolver supplies the lexical caller, declarer, access path and
 //! declaration group. This module decides both whether a declaration belongs
 //! to that lookup namespace and whether its visibility permits access. A denied
 //! declaration is invisible and does not shadow later candidates.
@@ -21,25 +21,27 @@ pub enum MemberScan {
     /// No declaration belongs to the requested member set.
     Skip,
     Denied(Vec<AccessDenial>),
-    Hit { defs: Vec<DefId> },
+    Hit {
+        defs: Vec<DefId>,
+    },
 }
 
 /**
- * AccessChecker validates member access e.g In this soldidity code:
-  ```solidity
-   contract B { uint internal f; }
-   contract C is B {}
-  
-   contract D {
-       function g(C c) { 
-           c.f;
-       }
-   }
-  ```
- * For the `c.f` member access:
- * Container = D; owner = B
- * c.f is denied as `f` is not visible in `D` even though it is in `C`
- */
+* AccessChecker validates member access e.g In this soldidity code:
+ ```solidity
+  contract B { uint internal f; }
+  contract C is B {}
+
+  contract D {
+      function g(C c) {
+          c.f;
+      }
+  }
+ ```
+* For the `c.f` member access:
+* Container = D; declarer = B
+* c.f is denied as `f` is not visible in `D` even though it is in `C`
+*/
 pub struct AccessChecker<'db> {
     db: &'db dyn HirDb,
     container: DefId,
@@ -54,33 +56,29 @@ impl<'db> AccessChecker<'db> {
         self.container
     }
 
-    /// Whether `owner` is a base of the container — or the container itself.
-    fn is_container_or_base(&self, owner: DefId) -> bool {
-        self.container == owner || self.db.bases(self.container).contains(&owner)
+    /// Whether `declarer` is a base of the container — or the container itself.
+    fn is_container_or_base(&self, declarer: DefId) -> bool {
+        self.container == declarer || self.db.bases(self.container).contains(&declarer)
     }
 
-    /// Access kind when indexing members through `owner`'s type name.
-    pub fn type_access_kind(&self, owner: DefId) -> CallKind {
-        match owner {
+    /// Access kind when indexing members through `declarer`'s type name.
+    pub fn type_access_kind(&self, declarer: DefId) -> CallKind {
+        match declarer {
             DefId::Library(_) => CallKind::ViaType(ViaTypeKind::Library),
-            DefId::Contract(_) | DefId::Interface(_) if owner == self.container => {
-                CallKind::Base(BaseKind::SelfQualified)
-            }
-            DefId::Contract(_) | DefId::Interface(_) if self.is_container_or_base(owner) => {
-                CallKind::Base(BaseKind::Explicit)
-            }
+            DefId::Contract(_) | DefId::Interface(_) if declarer == self.container => CallKind::Base(BaseKind::SelfQualified),
+            DefId::Contract(_) | DefId::Interface(_) if self.is_container_or_base(declarer) => CallKind::Base(BaseKind::Explicit),
             _ => CallKind::ViaType(ViaTypeKind::NonLibrary),
         }
     }
 
     /// Applies membership [`Self::belongs_to_set`] and visibility [`Self::visible_in_set`] in one pass.
     /// Inaccessible declarations are returned as explanations only if no accessible overload exists.
-    pub fn scan(&self, path: CallKind, owner: DefId, namespace: &DefNamespace, defs: &[DefId]) -> MemberScan {
+    pub fn scan(&self, path: CallKind, declarer: DefId, namespace: &DefNamespace, defs: &[DefId]) -> MemberScan {
         let mut accessible = Vec::with_capacity(defs.len());
         let mut denials = Vec::new();
         for &def in defs {
             if self.belongs_to_set(path, namespace, def) {
-                match self.visible_in_set(path, owner, def) {
+                match self.visible_in_set(path, declarer, def) {
                     Some(denial) => denials.push(denial),
                     None => accessible.push(def),
                 }
@@ -90,7 +88,7 @@ impl<'db> AccessChecker<'db> {
         match (accessible.is_empty(), denials.is_empty()) {
             (false, _) => MemberScan::Hit { defs: accessible },
             (_, false) => MemberScan::Denied(denials),
-            _ => MemberScan::Skip,//both empty
+            _ => MemberScan::Skip, //both empty
         }
     }
     /// Membership check
@@ -99,24 +97,19 @@ impl<'db> AccessChecker<'db> {
             CallKind::Direct => true,
             CallKind::External => matches!(
                 (namespace, def),
-                (DefNamespace::Functions, DefId::Function(_))
-                    | (DefNamespace::Variables, DefId::Var(_))
+                (DefNamespace::Functions, DefId::Function(_)) | (DefNamespace::Variables, DefId::Var(_))
             ),
-            CallKind::ViaType(_) | CallKind::Base(BaseKind::SelfQualified | BaseKind::Explicit) => {
-                match namespace {
-                    DefNamespace::Types
-                    | DefNamespace::Functions
-                    | DefNamespace::Modifiers
-                    | DefNamespace::Events
-                    | DefNamespace::Errors => true,
-                    DefNamespace::Variables => {
-                        matches!(
-                            def,
-                            DefId::Var(id) if self.db.var_data(id).kind == VariableKind::Const
-                        )
-                    }
+            CallKind::ViaType(_) | CallKind::Base(BaseKind::SelfQualified | BaseKind::Explicit) => match namespace {
+                DefNamespace::Types | DefNamespace::Functions | DefNamespace::Modifiers | DefNamespace::Events | DefNamespace::Errors => {
+                    true
                 }
-            }
+                DefNamespace::Variables => {
+                    matches!(
+                        def,
+                        DefId::Var(id) if self.db.var_data(id).kind == VariableKind::Const
+                    )
+                }
+            },
             CallKind::Base(BaseKind::Super) => {
                 matches!((namespace, def), (DefNamespace::Functions, DefId::Function(_)))
             }
@@ -125,20 +118,17 @@ impl<'db> AccessChecker<'db> {
     }
 
     /// Visibility check
-    fn visible_in_set(&self, path: CallKind, owner: DefId, def: DefId) -> Option<AccessDenial> {
+    fn visible_in_set(&self, path: CallKind, declarer: DefId, def: DefId) -> Option<AccessDenial> {
         let vis = self.def_visibility(def)?;
-        if !matches!(owner, DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_)) {
+        if !matches!(declarer, DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_)) {
             return None;
         }
 
-        let is_base_of_container = self.is_container_or_base(owner);
+        let is_base_of_container = self.is_container_or_base(declarer);
         let inaccessible = match path {
             CallKind::External => !matches!(
                 (def, vis),
-                (
-                    DefId::Function(_),
-                    Visibility::Public | Visibility::External
-                ) | (DefId::Var(_), Visibility::Public)
+                (DefId::Function(_), Visibility::Public | Visibility::External) | (DefId::Var(_), Visibility::Public)
             ),
             CallKind::ViaType(_) | CallKind::Base(BaseKind::SelfQualified | BaseKind::Explicit) => {
                 match (def, vis) {
@@ -146,18 +136,14 @@ impl<'db> AccessChecker<'db> {
                     // when declared public. Private members never project here.
                     (DefId::Var(_), Visibility::Private) => true,
                     // `internal` members of a library inline into every caller
-                    (_, Visibility::Internal) => {
-                        !matches!(owner, DefId::Library(_)) && !is_base_of_container
-                    }
-                    (DefId::Var(_), _) => {
-                        !matches!(owner, DefId::Library(_)) && !is_base_of_container
-                    }
+                    (_, Visibility::Internal) => !matches!(declarer, DefId::Library(_)) && !is_base_of_container,
+                    (DefId::Var(_), _) => !matches!(declarer, DefId::Library(_)) && !is_base_of_container,
                     (_, Visibility::Private) => true,
                     (_, Visibility::Public | Visibility::External) => false,
                 }
             }
             CallKind::Direct => match vis {
-                Visibility::Private => self.container != owner,
+                Visibility::Private => self.container != declarer,
                 Visibility::Internal => !is_base_of_container,
                 Visibility::Public => false,
                 Visibility::External => true,
@@ -172,7 +158,6 @@ impl<'db> AccessChecker<'db> {
         inaccessible.then_some(AccessDenial { def, vis })
     }
 
-    
     fn def_visibility(&self, def: DefId) -> Option<Visibility> {
         match def {
             DefId::Function(id) => Some(self.db.function_data(id).vis),

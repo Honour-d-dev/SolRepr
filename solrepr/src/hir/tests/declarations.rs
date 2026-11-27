@@ -16,9 +16,7 @@ fn violations(db: &Db, file: File) -> Vec<(String, Violation)> {
         .iter()
         .filter_map(|diagnostic| match diagnostic {
             SemanticDiagnostic::IllegalMember {
-                declaration,
-                violation,
-                ..
+                declaration, violation, ..
             } => Some((def_name(db, *declaration), *violation)),
             _ => None,
         })
@@ -113,34 +111,19 @@ fn modifier_body_requires_the_placeholder() {
     assert_eq!(codes_of("empty"), vec![DiagnosticCode::InferenceFailure]);
     assert!(codes_of("ok").is_empty(), "{:?}", codes_of("ok"));
     assert!(codes_of("nested").is_empty(), "{:?}", codes_of("nested"));
-    assert!(
-        codes_of("afterReturn").is_empty(),
-        "{:?}",
-        codes_of("afterReturn")
-    );
+    assert!(codes_of("afterReturn").is_empty(), "{:?}", codes_of("afterReturn"));
     // `_` as a declaration name is reserved, not the placeholder.
-    assert_eq!(
-        codes_of("declaredName"),
-        vec![DiagnosticCode::InferenceFailure]
-    );
+    assert_eq!(codes_of("declaredName"), vec![DiagnosticCode::InferenceFailure]);
     // Whitespace and comments around `_` are fine.
     assert!(codes_of("spaced").is_empty(), "{:?}", codes_of("spaced"));
     assert!(codes_of("commented").is_empty(), "{:?}", codes_of("commented"));
     // `_` inside a string or a comment is not the placeholder.
-    assert_eq!(
-        codes_of("inString"),
-        vec![DiagnosticCode::InferenceFailure]
-    );
-    assert_eq!(
-        codes_of("inComment"),
-        vec![DiagnosticCode::InferenceFailure]
-    );
+    assert_eq!(codes_of("inString"), vec![DiagnosticCode::InferenceFailure]);
+    assert_eq!(codes_of("inComment"), vec![DiagnosticCode::InferenceFailure]);
     // The placeholder error points at the body; 6408 is a membership violation
     // and is asserted above.
     assert_eq!(codes_of("iface"), vec![DiagnosticCode::InferenceFailure]);
 }
-
-
 
 /// Locals become visible in declaration order, not by byte offset.
 #[test]
@@ -159,8 +142,7 @@ fn locals_follow_declaration_order() {
         "a local is visible after its declaration"
     );
     assert!(
-        codes(&named_function_inference(&db, file, "before"))
-            .contains(&DiagnosticCode::UnresolvedName),
+        codes(&named_function_inference(&db, file, "before")).contains(&DiagnosticCode::UnresolvedName),
         "a local is not visible in its own initializer"
     );
 }
@@ -192,9 +174,7 @@ fn initializer_sees_an_outer_binding() {
 /// `Inference` output identical even though the query re-runs.
 #[test]
 fn inference_is_stable_under_reflow() {
-    let (mut db, file) = make_test_db(
-        r#"contract C { function f() external { uint x = "bad"; } }"#,
-    );
+    let (mut db, file) = make_test_db(r#"contract C { function f() external { uint x = "bad"; } }"#);
     let DefId::Function(id) = find_function(&db, file, "f") else {
         panic!("fixture function should exist");
     };
@@ -216,10 +196,7 @@ fn inference_is_stable_under_reflow() {
         before == after,
         "a reflow outside the function must not change its inference result"
     );
-    assert!(
-        before_data == db.function_data(id),
-        "item content must not change under a reflow"
-    );
+    assert!(before_data == db.function_data(id), "item content must not change under a reflow");
     assert!(
         before_body == db.body_map(BodyOwnerId::Function(id)),
         "body content must not change under a reflow"
@@ -285,66 +262,42 @@ fn source_maps_cover_every_allocated_id() {
     let root = db.ast(file).root();
     let ast_id_map = db.ast_id_map(file);
 
-    let struct_node = find_first_kind(root.node(), NodeKind::STRUCT_DEFINITION)
-        .expect("fixture should declare a struct");
+    let struct_node = find_first_kind(root.node(), NodeKind::STRUCT_DEFINITION).expect("fixture should declare a struct");
     let struct_id = StructId {
         file,
-        id: ast_id_map
-            .id_of_node::<Struct>(struct_node)
-            .expect("struct should have an AstId"),
+        id: ast_id_map.id_of_node::<Struct>(struct_node).expect("struct should have an AstId"),
     };
     let struct_data = db.struct_data(struct_id);
     let struct_map = db.source_map(DefId::Struct(struct_id));
     for (field, _) in struct_data.fields.iter() {
-        assert!(
-            struct_map.field_ranges.get(field).is_some(),
-            "field {field:?}"
-        );
+        assert!(struct_map.field_ranges.get(field).is_some(), "field {field:?}");
     }
 
-    let enum_node = find_first_kind(root.node(), NodeKind::ENUM_DEFINITION)
-        .expect("fixture should declare an enum");
+    let enum_node = find_first_kind(root.node(), NodeKind::ENUM_DEFINITION).expect("fixture should declare an enum");
     let enum_id = EnumId {
         file,
-        id: ast_id_map
-            .id_of_node::<Enum>(enum_node)
-            .expect("enum should have an AstId"),
+        id: ast_id_map.id_of_node::<Enum>(enum_node).expect("enum should have an AstId"),
     };
     let enum_data = db.enum_data(enum_id);
     let enum_map = db.source_map(DefId::Enum(enum_id));
     for (variant, _) in enum_data.variants.iter() {
-        assert!(
-            enum_map.variant_ranges.get(variant).is_some(),
-            "variant {variant:?}"
-        );
+        assert!(enum_map.variant_ranges.get(variant).is_some(), "variant {variant:?}");
     }
 
-    let event_node = find_first_kind(root.node(), NodeKind::EVENT_DEFINITION)
-        .expect("fixture should declare an event");
+    let event_node = find_first_kind(root.node(), NodeKind::EVENT_DEFINITION).expect("fixture should declare an event");
     let event_id = EventId {
         file,
-        id: ast_id_map
-            .id_of_node::<Event>(event_node)
-            .expect("event should have an AstId"),
+        id: ast_id_map.id_of_node::<Event>(event_node).expect("event should have an AstId"),
     };
     let event_data = db.event_data(event_id);
     let event_map = db.source_map(DefId::Event(event_id));
     for (local, _) in event_data.parameters.iter() {
-        assert!(
-            event_map.local_ranges.get(local).is_some(),
-            "event param {local:?}"
-        );
+        assert!(event_map.local_ranges.get(local).is_some(), "event param {local:?}");
     }
 
     let DefId::Modifier(modifier_id) = find_modifier(&db, file, "m") else {
         panic!("fixture should declare a modifier");
     };
     let modifier = db.modifier_data(modifier_id);
-    assert_eq!(
-        modifier.has_body,
-        db.source_map(DefId::Modifier(modifier_id))
-            .body_range
-            .is_some(),
-        "`has_body` and `body_range` come from the same node"
-    );
+    assert!(modifier.has_body, "the modifier declares a body");
 }

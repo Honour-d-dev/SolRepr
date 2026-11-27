@@ -15,9 +15,7 @@ use super::detect::{PackageDescriptor, PackageReference, find_package_roots, pac
 ///
 /// Breadth-first, so an ancestor's claim on a library name skips the nested
 /// copy (duplicate OpenZeppelin under `lib/`) while unclaimed ones survive.
-pub(super) fn discover_package_graph(
-    root: &Utf8Path,
-) -> (Vec<PackageDescriptor>, Vec<NormalizedPath>) {
+pub(super) fn discover_package_graph(root: &Utf8Path) -> (Vec<PackageDescriptor>, Vec<NormalizedPath>) {
     let mut queue = VecDeque::from(find_package_roots(root, false));
     let mut discovered = Vec::new();
     let mut ignored = Vec::new();
@@ -47,9 +45,7 @@ pub(super) fn discover_package_graph(
                     }
                 }
                 PackageReference::Library { name, root } => {
-                    let ancestors = ancestors.get_or_insert_with(|| {
-                        ancestor_library_names(descriptor.root.as_path(), &owned_libraries)
-                    });
+                    let ancestors = ancestors.get_or_insert_with(|| ancestor_library_names(descriptor.root.as_path(), &owned_libraries));
                     if ancestors.contains(name) {
                         ignored.push(root.clone());
                         continue;
@@ -91,15 +87,10 @@ pub(super) fn discover_package_graph(
 /// Library directory names claimed by the packages enclosing `package_root`.
 /// A strict ancestor relationship is required, so a package never claims a
 /// library against itself.
-fn ancestor_library_names(
-    package_root: &Utf8Path,
-    owned_libraries: &FxHashMap<NormalizedPath, Vec<String>>,
-) -> FxHashSet<String> {
+fn ancestor_library_names(package_root: &Utf8Path, owned_libraries: &FxHashMap<NormalizedPath, Vec<String>>) -> FxHashSet<String> {
     owned_libraries
         .iter()
-        .filter(|(owner, _)| {
-            package_root != owner.as_path() && package_root.starts_with(owner.as_path())
-        })
+        .filter(|(ancestor, _)| package_root != ancestor.as_path() && package_root.starts_with(ancestor.as_path()))
         .flat_map(|(_, names)| names.iter().cloned())
         .collect()
 }

@@ -15,13 +15,9 @@ fn struct_field_access_resolves_field_type() {
     );
     let inference = function_inference(&db, file);
     let field_result = expr_results(&inference).any(|(_, ty, resolution)| {
-        matches!(resolution, Some(Resolution::Field(_)))
-            && matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256)))
+        matches!(resolution, Some(Resolution::Field(_))) && matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256)))
     });
-    assert!(
-        field_result,
-        "expected s.x to resolve to the uint field type"
-    );
+    assert!(field_result, "expected s.x to resolve to the uint field type");
 }
 
 #[test]
@@ -38,13 +34,9 @@ fn library_function_is_accessible_through_types() {
     );
     let inference = named_function_inference(&db, file, "f");
     let call_result = expr_results(&inference).any(|(_, ty, resolution)| {
-        matches!(resolution, Some(Resolution::Callable(_)))
-            && matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256)))
+        matches!(resolution, Some(Resolution::Callable(_))) && matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256)))
     });
-    assert!(
-        call_result,
-        "expected L.add(1, 2) to resolve and type as uint"
-    );
+    assert!(call_result, "expected L.add(1, 2) to resolve and type as uint");
 }
 
 #[test]
@@ -77,11 +69,7 @@ fn getters_match_the_documented_complex_example() {
     assert!(
         inference.diagnostics.is_empty(),
         "unexpected: {:?}",
-        inference
-            .diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>()
+        inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
     );
 
     let getter_signatures: Vec<String> = expr_results(&inference)
@@ -127,11 +115,7 @@ fn getters_unwrap_copy_and_resolve_like_external_functions() {
             "#,
     );
     let inference = named_function_inference(&db, file, "f");
-    assert!(
-        inference.diagnostics.is_empty(),
-        "unexpected: {:?}",
-        codes(&inference)
-    );
+    assert!(inference.diagnostics.is_empty(), "unexpected: {:?}", codes(&inference));
     assert!(
         expr_results(&inference).any(|(_, _, resolution)| {
             let Some(Resolution::Callable(callable)) = resolution else {
@@ -143,9 +127,8 @@ fn getters_unwrap_copy_and_resolve_like_external_functions() {
             let Some(DefId::Var(id)) = callable.def() else {
                 return false;
             };
-            db.getter_signature(id).is_some_and(|fnty| {
-                fnty.display(&db) == "function(uint256, address) external view returns (bool)"
-            })
+            db.getter_signature(id)
+                .is_some_and(|fnty| fnty.display(&db) == "function(uint256, address) external view returns (bool)")
         }),
         "nested mappings should unwrap to one parameter per key"
     );
@@ -153,20 +136,21 @@ fn getters_unwrap_copy_and_resolve_like_external_functions() {
     // a copy, never a storage reference.
     assert!(
         expr_results(&inference).any(|(_, ty, resolution)| {
-            matches!(resolution, Some(Resolution::Callable(c)) if c.is_getter())
-                && matches!(ty.kind(&db), TyKind::Ref(_, Location::Memory))
+            matches!(resolution, Some(Resolution::Callable(c)) if c.is_getter()) && matches!(ty.kind(&db), TyKind::Ref(_, Location::Memory))
         }),
         "`this.storageString()` should be a `string memory` copy"
     );
     assert!(
-        expr_results(&inference)
-            .any(|(_, ty, _)| { matches!(ty.kind(&db), TyKind::Ref(_, Location::Storage(_))) }),
+        expr_results(&inference).any(|(_, ty, _)| { matches!(ty.kind(&db), TyKind::Ref(_, Location::Storage(_))) }),
         "a bare `storageString` reference should stay `string storage`"
     );
-    assert!(expr_results(&inference).any(|(_, ty, resolution)| {
-        matches!(resolution, Some(Resolution::Callable(callable)) if callable.is_getter())
-            && matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256)))
-    }), "expected this.x() to resolve to the public getter");
+    assert!(
+        expr_results(&inference).any(|(_, ty, resolution)| {
+            matches!(resolution, Some(Resolution::Callable(callable)) if callable.is_getter())
+                && matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256)))
+        }),
+        "expected this.x() to resolve to the public getter"
+    );
 }
 
 #[test]
@@ -186,10 +170,7 @@ fn state_reference_member_inherits_storage_location() {
             && matches!(ty.kind(&db), TyKind::Ref(inner, Location::Storage(_))
                 if matches!(inner.kind(&db), TyKind::Array { .. }))
     });
-    assert!(
-        member,
-        "expected s.v to inherit the storage location of the state variable"
-    );
+    assert!(member, "expected s.v to inherit the storage location of the state variable");
 }
 
 /// Errors and events carry `.selector` (an `anonymous` event has none), and
@@ -221,9 +202,11 @@ fn error_and_event_members_follow_their_access_paths() {
         codes(&inference)
     );
     let anon = named_function_inference(&db, file, "g");
-    assert!(anon.diagnostics.iter().any(|d| {
-        matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "selector")
-    }));
+    assert!(
+        anon.diagnostics
+            .iter()
+            .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "selector") })
+    );
 
     let cases = [
         (
@@ -248,11 +231,7 @@ fn error_and_event_members_follow_their_access_paths() {
     for (source, label) in cases {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{label}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{label}: {:?}", codes(&inference));
         assert!(
             expr_results(&inference).any(|(_, _, resolution)| {
                 matches!(resolution, Some(Resolution::Callable(c))
@@ -281,11 +260,7 @@ fn function_members_are_external_only() {
             "#,
     );
     let inference = named_function_inference(&db, file, "g");
-    assert!(
-        inference.diagnostics.is_empty(),
-        "unexpected: {:?}",
-        codes(&inference)
-    );
+    assert!(inference.diagnostics.is_empty(), "unexpected: {:?}", codes(&inference));
 
     let (db, file) = make_test_db(
         r#"
@@ -300,9 +275,12 @@ fn function_members_are_external_only() {
     );
     let inference = named_function_inference(&db, file, "g");
     for member in ["selector", "address"] {
-        assert!(inference.diagnostics.iter().any(|d| {
-            matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member)
-        }));
+        assert!(
+            inference
+                .diagnostics
+                .iter()
+                .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member) })
+        );
     }
 }
 
@@ -344,44 +322,37 @@ fn member_tables_follow_their_hosts() {
     for (source, member) in cases {
         let (db, file) = make_test_db(source);
         let ok = named_function_inference(&db, file, "ok");
-        assert!(!ok.diagnostics.iter().any(|d| {
-            matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member)
-        }));
+        assert!(
+            !ok.diagnostics
+                .iter()
+                .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member) })
+        );
         let bad = named_function_inference(&db, file, "bad");
-        assert!(bad.diagnostics.iter().any(|d| {
-            matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member)
-        }));
+        assert!(
+            bad.diagnostics
+                .iter()
+                .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member) })
+        );
     }
 }
 
 #[test]
 fn string_concat_resolves_through_types() {
-    let (db, file) =
-        make_test_db(r#"contract C { function f() external { string.concat("a", "b"); } }"#);
+    let (db, file) = make_test_db(r#"contract C { function f() external { string.concat("a", "b"); } }"#);
     let inference = named_function_inference(&db, file, "f");
     assert!(
         inference.diagnostics.is_empty(),
         "{:?}",
-        inference
-            .diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>()
+        inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
     );
 }
 
 #[test]
 fn locals_shadow_builtins() {
-    let (db, file) = make_test_db(
-        r#"contract C { function f() external { uint256 msg = 1; uint256 y = msg; } }"#,
-    );
+    let (db, file) = make_test_db(r#"contract C { function f() external { uint256 msg = 1; uint256 y = msg; } }"#);
     let inference = named_function_inference(&db, file, "f");
-    let use_of_msg = expr_results(&inference)
-        .any(|(_, _, resolution)| matches!(resolution, Some(Resolution::Local(_))));
-    assert!(
-        use_of_msg,
-        "use of `msg` should resolve to the local, not the builtin"
-    );
+    let use_of_msg = expr_results(&inference).any(|(_, _, resolution)| matches!(resolution, Some(Resolution::Local(_))));
+    assert!(use_of_msg, "use of `msg` should resolve to the local, not the builtin");
 }
 
 /// `super` resolves through the declaring contract's C3 tail — the next
@@ -411,22 +382,22 @@ fn super_members_follow_the_declaring_c3() {
     let b = find_contract(&db, file, "B");
     assert!(expr_results(&inference).any(|(_, _, resolution)| {
         matches!(resolution, Some(Resolution::Callable(callable))
-            if callable.def().is_some_and(|def| db.owner(def) == Some(b)))
+            if callable.def().is_some_and(|def| db.container(def) == Some(b)))
     }));
 
     let h = named_function_inference(&db, file, "h");
     assert!(
-        !h.diagnostics.iter().any(|d| {
-            matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "callMe")
-        }),
+        !h.diagnostics
+            .iter()
+            .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "callMe") }),
         "{:?}",
         codes(&h),
     );
     let bad = named_function_inference(&db, file, "bad");
     assert!(
-        bad.diagnostics.iter().any(|d| {
-            matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "value")
-        }),
+        bad.diagnostics
+            .iter()
+            .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "value") }),
         "{:?}",
         codes(&bad),
     );
@@ -492,16 +463,15 @@ fn using_extensions_attach_to_convertible_receivers() {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
         assert!(
-            !inference.diagnostics.iter().any(|d| {
-                matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member)
-            }),
+            !inference
+                .diagnostics
+                .iter()
+                .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member) }),
             "{source}: {:?}",
             codes(&inference),
         );
         assert!(
-            expr_results(&inference).any(|(_, _, resolution)| {
-                matches!(resolution, Some(Resolution::Callable(c)) if c.bound() == 1)
-            }),
+            expr_results(&inference).any(|(_, _, resolution)| { matches!(resolution, Some(Resolution::Callable(c)) if c.bound() == 1) }),
             "{source}: expected a using-attached callable",
         );
     }
@@ -520,9 +490,12 @@ fn using_extensions_attach_to_convertible_receivers() {
             "#,
     );
     let inference = named_function_inference(&db, file, "f");
-    assert!(inference.diagnostics.iter().any(|d| {
-        matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "ext")
-    }));
+    assert!(
+        inference
+            .diagnostics
+            .iter()
+            .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "ext") })
+    );
 
     // A same-named declaration member collides into an ambiguity rather than
     // shadowing — for the call and the bare access alike.
@@ -600,9 +573,10 @@ fn unavailable_members_are_reported() {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
         assert!(
-            inference.diagnostics.iter().any(|d| {
-                matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member)
-            }),
+            inference
+                .diagnostics
+                .iter()
+                .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if m == member) }),
             "{source}: {:?}",
             codes(&inference),
         );
@@ -648,11 +622,7 @@ fn library_function_values_have_a_selector() {
     for (source, kind) in cases {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{source}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{source}: {:?}", codes(&inference));
         assert!(
             expr_results(&inference).any(|(_, _, resolution)| {
                 matches!(resolution, Some(Resolution::Callable(c))
@@ -674,11 +644,7 @@ fn contract_qualified_members_resolve() {
     for source in fixtures {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{source}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{source}: {:?}", codes(&inference));
     }
 }
 
@@ -712,11 +678,7 @@ fn base_and_super_calls_follow_the_access_matrix() {
     let (db, file) = make_test_db(&bodies("A"));
     for name in ["ok_inter", "ok_pub"] {
         let inference = named_function_inference(&db, file, name);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{name}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
     }
     let ext = named_function_inference(&db, file, "bad_ext");
     assert!(
@@ -729,9 +691,10 @@ fn base_and_super_calls_follow_the_access_matrix() {
     );
     let priv_ = named_function_inference(&db, file, "bad_priv");
     assert!(
-        priv_.diagnostics.iter().any(|d| {
-            matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "priv")
-        }),
+        priv_
+            .diagnostics
+            .iter()
+            .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "priv") }),
         "bad_priv: {:?}",
         codes(&priv_)
     );
@@ -739,18 +702,15 @@ fn base_and_super_calls_follow_the_access_matrix() {
     let (db, file) = make_test_db(&bodies("super"));
     for name in ["ok_inter", "ok_pub"] {
         let inference = named_function_inference(&db, file, name);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{name}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
     }
     for (name, member) in [("bad_ext", "ext"), ("bad_priv", "priv")] {
         let inference = named_function_inference(&db, file, name);
         assert!(
-            inference.diagnostics.iter().any(|d| {
-                matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if *m == member)
-            }),
+            inference
+                .diagnostics
+                .iter()
+                .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if *m == member) }),
             "{name}: {:?}",
             codes(&inference)
         );
@@ -778,8 +738,7 @@ fn inherited_calls_resolve_through_one_candidate_set() {
     let inference = named_function_inference(&db, file, "g");
     assert!(inference.diagnostics.is_empty(), "{:?}", codes(&inference));
     assert!(
-        expr_results(&inference)
-            .any(|(_, ty, _)| { matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256))) }),
+        expr_results(&inference).any(|(_, ty, _)| { matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256))) }),
         "the accessible `f(bool)` should be selected"
     );
 
@@ -800,11 +759,7 @@ fn inherited_calls_resolve_through_one_candidate_set() {
 
     for function in ["bare", "throughValue"] {
         let inference = named_function_inference(&db, file, function);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{function}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{function}: {:?}", codes(&inference));
         let selected_uint256 = expr_results(&inference).any(|(_, ty, resolution)| {
             if !matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256))) {
                 return false;
@@ -816,18 +771,13 @@ fn inherited_calls_resolve_through_one_candidate_set() {
                 return false;
             };
             db.function_signature(id).is_some_and(|signature| {
-                signature.params.first().is_some_and(|parameter| {
-                    matches!(
-                        parameter.ty().kind(&db),
-                        TyKind::Primitive(Primitive::Uint(256))
-                    )
-                })
+                signature
+                    .params
+                    .first()
+                    .is_some_and(|parameter| matches!(parameter.ty().kind(&db), TyKind::Primitive(Primitive::Uint(256))))
             })
         });
-        assert!(
-            selected_uint256,
-            "{function} should select the uint256 declaration"
-        );
+        assert!(selected_uint256, "{function} should select the uint256 declaration");
     }
 }
 
@@ -883,9 +833,10 @@ fn contract_value_members_follow_the_access_matrix() {
     for (name, member) in [("bad_inter", "inter"), ("bad_priv", "priv")] {
         let inference = named_function_inference(&db, file, name);
         assert!(
-            inference.diagnostics.iter().any(|d| {
-                matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if *m == member)
-            }),
+            inference
+                .diagnostics
+                .iter()
+                .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member: m, .. } if *m == member) }),
             "{name}: {:?}",
             codes(&inference)
         );
@@ -927,17 +878,20 @@ fn base_path_function_members() {
 
     let bad = named_function_inference(&db, file, "bad");
     assert!(
-        bad.diagnostics.iter().any(|d| {
-            matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "address")
-        }),
+        bad.diagnostics
+            .iter()
+            .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "address") }),
         "{:?}",
         codes(&bad)
     );
 
     let own_selector = named_function_inference(&db, file, "bad_own_selector");
-    assert!(own_selector.diagnostics.iter().any(|d| {
-        matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "selector")
-    }));
+    assert!(
+        own_selector
+            .diagnostics
+            .iter()
+            .any(|d| { matches!(d, SemanticDiagnostic::UnresolvedMember { member, .. } if member == "selector") })
+    );
 
     let non_invocable = named_function_inference(&db, file, "bad_call");
     assert!(non_invocable.diagnostics.iter().any(|d| {
@@ -972,40 +926,15 @@ fn resolver_failures_accumulate_until_inference_finalization() {
         .diagnostics
         .iter()
         .filter_map(|diagnostic| match diagnostic {
-            SemanticDiagnostic::UnresolvedMember {
-                member, denials, ..
-            } => Some((member.as_str(), denials.as_slice())),
+            SemanticDiagnostic::UnresolvedMember { member, denials, .. } => Some((member.as_str(), denials.as_slice())),
             _ => None,
         })
         .collect();
 
     assert_eq!(misses.len(), 3, "{:?}", codes(&inference));
-    assert_eq!(
-        misses
-            .iter()
-            .find(|(name, _)| *name == "internalOnly")
-            .unwrap()
-            .1
-            .len(),
-        1
-    );
-    assert_eq!(
-        misses
-            .iter()
-            .find(|(name, _)| *name == "privateOnly")
-            .unwrap()
-            .1
-            .len(),
-        1
-    );
-    assert!(
-        misses
-            .iter()
-            .find(|(name, _)| *name == "unknown")
-            .unwrap()
-            .1
-            .is_empty()
-    );
+    assert_eq!(misses.iter().find(|(name, _)| *name == "internalOnly").unwrap().1.len(), 1);
+    assert_eq!(misses.iter().find(|(name, _)| *name == "privateOnly").unwrap().1.len(), 1);
+    assert!(misses.iter().find(|(name, _)| *name == "unknown").unwrap().1.is_empty());
 
     let resolutions = expr_results(&inference)
         .filter_map(|(_, _, resolution)| resolution)
@@ -1018,13 +947,13 @@ fn resolver_failures_accumulate_until_inference_finalization() {
     )));
 }
 
-/// A constant read through a *type name* follows the owner's scoping, not the
+/// A constant read through a *type name* follows the def's scoping, not the
 /// declared visibility. A contract constant is reachable only inside the
 /// contract and its bases; a library's members inline into every caller, so
 /// both `public` and `internal` constants are reachable from anywhere and only
 /// `private` is not. Verified against solc 0.8.33.
 #[test]
-fn qualified_constants_follow_the_owner_kind() {
+fn qualified_constants_follow_the_def_kind() {
     let allowed = [
         r#"library L { uint public constant X = 1; } contract C { function f() external pure returns (uint) { return L.X; } }"#,
         r#"library L { uint internal constant X = 1; } contract C { function f() external pure returns (uint) { return L.X; } }"#,
@@ -1033,11 +962,7 @@ fn qualified_constants_follow_the_owner_kind() {
     for source in allowed {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{source}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{source}: {:?}", codes(&inference));
     }
 
     let denied = [
@@ -1067,14 +992,8 @@ fn access_denial_names_a_visibility_only_when_it_explains() {
         r#"contract B { uint public constant X = 1; } contract C { function f() external pure returns (uint) { return B.X; } }"#,
     );
     let messages = related_messages(&db, file);
-    assert!(
-        messages.iter().any(|message| message == "`X` is not visible here"),
-        "{messages:?}"
-    );
-    assert!(
-        !messages.iter().any(|message| message.contains("declared public")),
-        "{messages:?}"
-    );
+    assert!(messages.iter().any(|message| message == "`X` is not visible here"), "{messages:?}");
+    assert!(!messages.iter().any(|message| message.contains("declared public")), "{messages:?}");
 
     let (db, file) = make_test_db(
         r#"library L { uint private constant X = 1; } contract C { function f() external pure returns (uint) { return L.X; } }"#,

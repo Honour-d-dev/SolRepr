@@ -1,11 +1,11 @@
 use super::{helper::*, resolver_helpers::*};
 use crate::hir::diagnostics::SemanticDiagnostic;
+use crate::hir::linearize::Linearizer;
+use crate::hir::resolution::*;
+use crate::hir::resolver::*;
+use crate::hir::types::{BaseKind, CallKind, Ty, TyKind};
 use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::HirDb;
-use crate::hir::resolver::*;
-use crate::hir::resolution::*;
-use crate::hir::types::{BaseKind, CallKind, Ty, TyKind};
-use crate::hir::linearize::Linearizer;
 
 /// The declaration-phase constructor never loads its container's body map,
 /// so signature inference cannot depend on body edits through the resolver.
@@ -54,13 +54,9 @@ fn module_namespace_member_keeps_its_natural_call_kind() {
         contract C { function f() external {} }
         "#,
     );
-    let resolver = Resolver::build(
-        &db,
-        find_function(&db, file, "f"),
-    );
+    let resolver = Resolver::build(&db, find_function(&db, file, "f"));
     let module = Ty::new(&db, TyKind::Module(file));
-    let Some(Resolution::Callable(callable)) = lookup_member(&resolver, module, &"free".into())
-    else {
+    let Some(Resolution::Callable(callable)) = lookup_member(&resolver, module, &"free".into()) else {
         panic!("a file-scope free function should resolve through the module namespace");
     };
     assert!(matches!(callable.kind(), CallKind::Direct));
@@ -69,7 +65,7 @@ fn module_namespace_member_keeps_its_natural_call_kind() {
 
 /// The tag on a reference reached through a type name is the *access path*;
 /// whether it may be invoked is a separate question, decided by the
-/// declaration kind and the owner together. Verified against solc 0.8.33: a
+/// declaration kind and the receiver type together. Verified against solc 0.8.33: a
 /// function through an *unrelated* contract name is declaration-only ("Cannot
 /// call function via contract type name"), while a self-qualified `C.fn`
 /// inside `C` is an ordinary internal call; a modifier through a library name
@@ -97,15 +93,12 @@ fn type_namespace_reference_tag_and_invocability_match_solc() {
         }
         "#,
     );
-    let resolver = Resolver::build(
-        &db,
-        find_function(&db, file, "probe"),
-    );
+    let resolver = Resolver::build(&db, find_function(&db, file, "probe"));
     let ty = |name: &str| match resolver.resolve_name(&name.into(), None, 0) {
         Some(Resolution::Type(ty)) => ty.ty(),
         _ => panic!("{name} should resolve to a type"),
     };
-    let callable = |owner: Ty, name: &str| match lookup_member(&resolver, owner, &name.into()) {
+    let callable = |receiver: Ty, name: &str| match lookup_member(&resolver, receiver, &name.into()) {
         Some(Resolution::Callable(c)) => c,
         _ => panic!("{name} should resolve to a callable"),
     };
@@ -114,7 +107,7 @@ fn type_namespace_reference_tag_and_invocability_match_solc() {
     let this_contract = types_receiver(&db, ty("C"));
 
     // The tag records the access path, whatever the member is.
-    for (owner, member) in [
+    for (receiver, member) in [
         (lib, "fn"),
         (lib, "mod"),
         (lib, "LErr"),
@@ -125,7 +118,7 @@ fn type_namespace_reference_tag_and_invocability_match_solc() {
         (contract, "CEv"),
     ] {
         assert!(
-            matches!(callable(owner, member).kind(), CallKind::ViaType(_)),
+            matches!(callable(receiver, member).kind(), CallKind::ViaType(_)),
             "`{member}` should be tagged by its access path",
         );
     }
@@ -133,21 +126,12 @@ fn type_namespace_reference_tag_and_invocability_match_solc() {
     // Self-qualified and ancestor-qualified declarations retain a base-access
     // tag; invocation behavior is derived from this tag and declaration facts.
     assert!(
-        matches!(
-            callable(this_contract, "fn").kind(),
-            CallKind::Base(BaseKind::SelfQualified)
-        ),
+        matches!(callable(this_contract, "fn").kind(), CallKind::Base(BaseKind::SelfQualified)),
         "self-qualified `C.fn` retains its type-qualified route",
     );
 
-    assert!(
-        callable(lib, "fn").is_invocable(&db),
-        "L.fn() is a delegatecall"
-    );
-    assert!(
-        !callable(contract, "fn").is_invocable(&db),
-        "X.fn() is declaration-only"
-    );
+    assert!(callable(lib, "fn").is_invocable(&db), "L.fn() is a delegatecall");
+    assert!(!callable(contract, "fn").is_invocable(&db), "X.fn() is declaration-only");
     assert!(
         callable(this_contract, "fn").is_invocable(&db),
         "C.fn() inside C is a self-qualified internal call"
@@ -161,15 +145,9 @@ fn type_namespace_reference_tag_and_invocability_match_solc() {
         "X.mod is the normal way to name a modifier"
     );
     assert!(callable(lib, "LErr").is_invocable(&db), "revert L.LErr(..)");
-    assert!(
-        callable(contract, "CErr").is_invocable(&db),
-        "revert C.CErr(..)"
-    );
+    assert!(callable(contract, "CErr").is_invocable(&db), "revert C.CErr(..)");
     assert!(callable(lib, "LEv").is_invocable(&db), "emit L.LEv(..)");
-    assert!(
-        callable(contract, "CEv").is_invocable(&db),
-        "emit C.CEv(..)"
-    );
+    assert!(callable(contract, "CEv").is_invocable(&db), "emit C.CEv(..)");
 }
 
 /// The C3 pass reports an `InheritanceFailure` for an unresolved base and
@@ -212,8 +190,7 @@ fn using_candidates_are_filtered_by_receiver_convertibility() {
     let resolver = Resolver::build(&db, f);
     let c = contract_type(&db, file, "C");
 
-    let Resolution::Callable(callable) = lookup_member(&resolver, c, &"accepts".into()).unwrap()
-    else {
+    let Resolution::Callable(callable) = lookup_member(&resolver, c, &"accepts".into()).unwrap() else {
         panic!("accepts should resolve to a callable");
     };
     assert_eq!(callable.bound(), 1);
@@ -251,10 +228,7 @@ fn using_candidates_are_filtered_by_receiver_convertibility() {
         })
         .collect();
     assert!(names.iter().any(|n| n == "safeTransfer"), "got {names:?}");
-    assert!(
-        !names.iter().any(|n| n == "transferAndCallRelaxed"),
-        "got {names:?}"
-    );
+    assert!(!names.iter().any(|n| n == "transferAndCallRelaxed"), "got {names:?}");
 }
 
 /// solc's keyword table is spelling-exact — `uint08` is a legal identifier, not
@@ -265,10 +239,7 @@ fn noncanonical_primitive_spellings_resolve_to_declarations() {
     let (db, file) = make_test_db("contract C { bool uint08; function probe() external {} }");
     let resolver = Resolver::build(&db, find_function(&db, file, "probe"));
     assert!(
-        matches!(
-            resolver.resolve_name(&"uint08".into(), None, 0),
-            Some(Resolution::Var(_))
-        ),
+        matches!(resolver.resolve_name(&"uint08".into(), None, 0), Some(Resolution::Var(_))),
         "uint08 is the state variable, not uint8"
     );
 }

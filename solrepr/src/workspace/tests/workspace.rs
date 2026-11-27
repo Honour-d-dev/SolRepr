@@ -1,9 +1,6 @@
 use crate::paths::NormalizedPath;
 use crate::utilities::fixture_path;
-use crate::workspace::{
-    Package, PackageId, RootWithFiles, WorkspaceWithFiles, discover_workspace, discover_workspaces,
-    workspace_roots,
-};
+use crate::workspace::{Package, PackageId, RootWithFiles, WorkspaceWithFiles, discover_workspace, discover_workspaces, workspace_roots};
 use camino::Utf8PathBuf;
 use lsp_types::{InitializeParams, Url};
 
@@ -88,10 +85,7 @@ fn workspace_roots_fall_back_to_the_working_directory() {
 fn one_folder_skips_the_merge() {
     let root = fixture_path("fixtures/workspaces/foundry/nested");
 
-    assert_eq!(
-        discover_workspaces(std::slice::from_ref(&root)),
-        discover_workspace(&root)
-    );
+    assert_eq!(discover_workspaces(std::slice::from_ref(&root)), discover_workspace(&root));
 }
 
 /// Folders nest and share dependencies, so a merge dedupes by identity and lets
@@ -117,18 +111,14 @@ fn merging_folders_dedupes_shared_facts() {
     let merged = WorkspaceWithFiles::merge([outer, inner]);
 
     assert_eq!(
-        merged
-            .roots
-            .iter()
-            .map(|root| root.path.as_str())
-            .collect::<Vec<_>>(),
-        vec!["/proj", "/proj/lib/dep"],
+        merged.roots.iter().map(|root| root.path.clone()).collect::<Vec<_>>(),
+        vec![NormalizedPath::new("/proj"), NormalizedPath::new("/proj/lib/dep")],
         "both folders contribute their roots, and a shared path is kept once"
     );
     assert_eq!(merged.packages.len(), 2, "a package is kept once per root");
     assert_eq!(
         merged.ignored_roots,
-        vec![Utf8PathBuf::from("/proj/lib/other")],
+        vec![NormalizedPath::new("/proj/lib/other")],
         "a directory another folder opened is not ignored"
     );
 }
@@ -137,29 +127,18 @@ fn merging_folders_dedupes_shared_facts() {
 fn nested_duplicate_library_is_skipped_but_unique_transitive_dependency_is_kept() {
     let root = fixture_path("fixtures/workspaces/foundry/nested");
     let discovered = discover_workspace(&root);
-    let package_roots: Vec<_> = discovered
-        .packages
-        .iter()
-        .map(|package| package.root.clone())
-        .collect();
+    let package_roots: Vec<_> = discovered.packages.iter().map(|package| package.root.clone()).collect();
 
     // root, dependencies/duplicate, dependencies/dep-a, dependencies/dep-a/lib/unique, dependencies/plain, dependencies/fs
     assert_eq!(discovered.packages.len(), 6);
+    assert!(package_roots.iter().any(|root| root.ends_with("dependencies/dep-a/lib/unique")));
+    assert!(!package_roots.iter().any(|root| root.ends_with("dependencies/dep-a/lib/duplicate")));
     assert!(
-        package_roots
+        !discovered
+            .roots
             .iter()
-            .any(|root| root.ends_with("dependencies/dep-a/lib/unique"))
+            .any(|source| { source.path.ends_with("dependencies/dep-a/lib/duplicate/src") })
     );
-    assert!(
-        !package_roots
-            .iter()
-            .any(|root| root.ends_with("dependencies/dep-a/lib/duplicate"))
-    );
-    assert!(!discovered.roots.iter().any(|source| {
-        source
-            .path
-            .ends_with("dependencies/dep-a/lib/duplicate/src")
-    }));
     // The skipped copy stays on the ignored list — out of the
     // compilation unit but tracked so opened files there stay silent.
     assert!(
@@ -175,12 +154,7 @@ fn nested_duplicate_library_is_skipped_but_unique_transitive_dependency_is_kept(
         .iter()
         .find(|package| package.root == root)
         .expect("root package");
-    assert!(
-        root_package
-            .remappings
-            .iter()
-            .any(|remapping| remapping.prefix == "dep-a/")
-    );
+    assert!(root_package.remappings.iter().any(|remapping| remapping.prefix == "dep-a/"));
 }
 
 #[test]
@@ -222,12 +196,7 @@ fn standalone_fixture_gets_a_frameworkless_package_and_source_root() {
     let source = &discovered.roots[0];
     assert_eq!(source.package_id, PackageId(root.clone()));
     assert!(!source.is_dependency);
-    assert!(
-        source
-            .files
-            .iter()
-            .any(|file| file.ends_with("StandaloneFixture.sol"))
-    );
+    assert!(source.files.iter().any(|file| file.ends_with("StandaloneFixture.sol")));
 }
 
 #[test]
@@ -242,20 +211,10 @@ fn container_root_indexes_loose_files_without_swallowing_nested_packages() {
         .iter()
         .find(|source| source.path == root)
         .expect("a frameworkless source root at the container root");
-    assert!(
-        root_source
-            .files
-            .iter()
-            .any(|file| file.ends_with("Loose.sol"))
-    );
+    assert!(root_source.files.iter().any(|file| file.ends_with("Loose.sol")));
     // The nested package's files stay under its own source root.
     assert!(!root_source.files.iter().any(|file| file.ends_with("P.sol")));
-    assert!(
-        discovered
-            .roots
-            .iter()
-            .any(|source| source.path.ends_with("a/b/inner/src"))
-    );
+    assert!(discovered.roots.iter().any(|source| source.path.ends_with("a/b/inner/src")));
 }
 
 #[test]
@@ -268,19 +227,11 @@ fn remappings_only_root_keeps_remappings_and_indexes_vendored_files() {
         .iter()
         .find(|package| package.root == root)
         .expect("the remappings.txt root is a package");
-    assert!(
-        package
-            .remappings
-            .iter()
-            .any(|remapping| remapping.prefix == "dep/")
-    );
+    assert!(package.remappings.iter().any(|remapping| remapping.prefix == "dep/"));
     // The remapping is resolution data only: `vendor/dep` is inside the root's
     // own source tree, so it is indexed there and never becomes a package.
     assert!(
-        discovered
-            .packages
-            .iter()
-            .all(|package| package.root == root),
+        discovered.packages.iter().all(|package| package.root == root),
         "a remapping never creates a package: {:?}",
         discovered.packages
     );
@@ -350,11 +301,7 @@ fn npm_workspace_globs_discover_all_members() {
 
     // root + 6 members via *, {a,b}, literal, and ** patterns.
     assert_eq!(discovered.packages.len(), 7);
-    let members: Vec<_> = discovered
-        .packages
-        .iter()
-        .map(|package| package.root.clone())
-        .collect();
+    let members: Vec<_> = discovered.packages.iter().map(|package| package.root.clone()).collect();
     for member in [
         "packages/core",
         "packages/utils",
@@ -363,17 +310,10 @@ fn npm_workspace_globs_discover_all_members() {
         "solitary",
         "deep/nested/tooling",
     ] {
-        assert!(
-            members.iter().any(|root| root.ends_with(member)),
-            "{member} not discovered"
-        );
+        assert!(members.iter().any(|root| root.ends_with(member)), "{member} not discovered");
     }
     // Packages under node_modules are npm deps, never workspace members.
-    assert!(
-        !members
-            .iter()
-            .any(|root| root.components().any(|c| c.as_str() == "node_modules"))
-    );
+    assert!(!members.iter().any(|root| root.components().any(|c| c.as_str() == "node_modules")));
 }
 
 /// A file selected as the workspace root discovers its parent directory
@@ -389,9 +329,7 @@ fn file_root_discovers_the_parent_package() {
         .find(|package| package.root.ends_with("vendor"))
         .expect("the file's parent directory is a package");
     assert!(
-        proj.remappings
-            .iter()
-            .any(|remapping| remapping.prefix == "dep/"),
+        proj.remappings.iter().any(|remapping| remapping.prefix == "dep/"),
         "the parent's remappings.txt is read"
     );
     assert!(
@@ -416,12 +354,7 @@ fn manifestless_library_child_is_a_named_dependency() {
         .find(|source| source.is_dependency && source.path.ends_with("dependencies/plain"))
         .expect("the manifestless library is a dependency source root");
     assert!(dependency.path.ends_with("dependencies/plain"));
-    assert!(
-        dependency
-            .files
-            .iter()
-            .any(|file| file.ends_with("Plain.sol"))
-    );
+    assert!(dependency.files.iter().any(|file| file.ends_with("Plain.sol")));
 }
 
 /// Manifestless intermediate directories stay transparent: discovery
@@ -435,12 +368,7 @@ fn nested_manifest_keeps_container_dirs_transparent() {
     // The nested package and the frameworkless root — the intermediate
     // a/b directories never became packages.
     assert_eq!(discovered.packages.len(), 2);
-    assert!(
-        discovered
-            .packages
-            .iter()
-            .any(|package| package.root.ends_with("a/b/inner"))
-    );
+    assert!(discovered.packages.iter().any(|package| package.root.ends_with("a/b/inner")));
     let source = discovered
         .roots
         .iter()
@@ -471,12 +399,7 @@ fn remapping_into_a_source_dir_resolves_to_the_package_root() {
         .iter()
         .find(|source| source.is_dependency && source.path.ends_with("dependencies/fs"))
         .expect("dependencies/fs is a dependency source root");
-    assert!(
-        dependency
-            .files
-            .iter()
-            .any(|file| file.ends_with("Lib.sol"))
-    );
+    assert!(dependency.files.iter().any(|file| file.ends_with("Lib.sol")));
 }
 
 #[test]
@@ -512,18 +435,8 @@ fn dependency_dev_dirs_are_ignored_and_not_indexed() {
     let root = fixture_path("fixtures/workspaces/foundry/dev_dirs");
     let discovered = discover_workspace(&root);
 
-    assert!(
-        discovered
-            .ignored_roots
-            .iter()
-            .any(|root| root.ends_with("lib/dep/test"))
-    );
-    assert!(
-        discovered
-            .ignored_roots
-            .iter()
-            .any(|root| root.ends_with("lib/dep/script"))
-    );
+    assert!(discovered.ignored_roots.iter().any(|root| root.ends_with("lib/dep/test")));
+    assert!(discovered.ignored_roots.iter().any(|root| root.ends_with("lib/dep/script")));
 
     let dep = discovered
         .roots
@@ -544,18 +457,12 @@ fn a_source_root_names_its_package_by_path() {
     let discovered = discover_workspace(&root);
 
     assert!(
-        discovered
-            .roots
-            .iter()
-            .any(|source| source.path != source.package_id.0),
+        discovered.roots.iter().any(|source| source.path != source.package_id.0),
         "a foundry package's source root is its src dir, not its package root"
     );
     for source in &discovered.roots {
         assert!(
-            discovered
-                .packages
-                .iter()
-                .any(|package| package.root == source.package_id.0),
+            discovered.packages.iter().any(|package| package.root == source.package_id.0),
             "{} names a package that is not in the workspace",
             source.path
         );
@@ -572,15 +479,9 @@ fn a_remapping_into_the_packages_own_sources_is_not_a_package() {
     let root = fixture_path("fixtures/workspaces/foundry/self_remap");
     let discovered = discover_workspace(&root);
 
-    let package_roots = discovered
-        .packages
-        .iter()
-        .map(|package| package.root.clone())
-        .collect::<Vec<_>>();
+    let package_roots = discovered.packages.iter().map(|package| package.root.clone()).collect::<Vec<_>>();
     assert!(
-        !package_roots
-            .iter()
-            .any(|package| package.ends_with("lib/dep/contracts")),
+        !package_roots.iter().any(|package| package.ends_with("lib/dep/contracts")),
         "the source dir is not a package of its own: {package_roots:?}"
     );
 
@@ -603,9 +504,9 @@ fn a_remapping_into_the_packages_own_sources_is_not_a_package() {
         .find(|package| package.root.ends_with("lib/dep"))
         .expect("dep is a package");
     assert!(
-        dep.remappings.iter().any(|remapping| {
-            remapping.prefix == "@dep/" && remapping.target.ends_with("lib/dep/contracts")
-        }),
+        dep.remappings
+            .iter()
+            .any(|remapping| { remapping.prefix == "@dep/" && remapping.target.ends_with("lib/dep/contracts") }),
         "the remapping survives: {:?}",
         dep.remappings
     );

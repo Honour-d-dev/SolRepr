@@ -4,8 +4,8 @@ use crate::hir::exprs::Expr;
 use crate::hir::resolver::Resolver;
 use crate::hir::tests::helper::*;
 use crate::ir::def_map::DefId;
-use crate::salsa::hir_db::owner_at;
-use crate::salsa::{File, HirDb, RootDb, Db};
+use crate::salsa::hir_db::container_at;
+use crate::salsa::{Db, File, HirDb, RootDb};
 use lsp_types::{CompletionItem as LspCompletionItem, CompletionTriggerKind};
 
 /// Drive the dot-completion path the way `completion()` does, using a
@@ -14,13 +14,13 @@ fn dot_labels(db: &Db, file: File, marker: &str) -> Vec<String> {
     let text = db.text(file);
     let offset = (text.find(marker).expect("marker") + marker.len()) as u32;
     let node = db.named_node_at(file, offset).expect("node at marker");
-    let owner = owner_at(db, file, offset).unwrap();
-    let resolver = Resolver::build(db, owner);
-    let kind = detect_ctx(&node, offset, CompletionTriggerKind::INVOKED, None).expect("owner");
+    let container = container_at(db, file, offset).unwrap();
+    let resolver = Resolver::build(db, container);
+    let kind = detect_ctx(&node, offset, CompletionTriggerKind::INVOKED, None).expect("container");
     let CompletionContextKind::DotAccess { receiver_node } = kind else {
         panic!("expected dot access at {marker:?}");
     };
-    complete_dot(db, &resolver, owner, &receiver_node)
+    complete_dot(db, &resolver, container, &receiver_node)
         .into_iter()
         .map(|item| item.label)
         .collect()
@@ -47,42 +47,20 @@ const FIXTURE: &str = r#"
 fn dot_completion_on_interface_value() {
     let (db, file) = make_test_db(FIXTURE);
     let labels = dot_labels(&db, file, "alpha.");
-    assert!(
-        labels.iter().any(|l| l.starts_with("transfer")),
-        "got {labels:?}"
-    );
-    assert!(
-        labels.iter().any(|l| l.starts_with("safeTransfer")),
-        "got {labels:?}"
-    );
+    assert!(labels.iter().any(|l| l.starts_with("transfer")), "got {labels:?}");
+    assert!(labels.iter().any(|l| l.starts_with("safeTransfer")), "got {labels:?}");
     // A library function whose first parameter is a *subtype* must not be
     // attached to the supertype receiver.
-    assert!(
-        !labels
-            .iter()
-            .any(|l| l.starts_with("transferAndCallRelaxed")),
-        "got {labels:?}"
-    );
+    assert!(!labels.iter().any(|l| l.starts_with("transferAndCallRelaxed")), "got {labels:?}");
 }
 
 #[test]
 fn dot_completion_on_cast_receiver() {
     let (db, file) = make_test_db(FIXTURE);
     let labels = dot_labels(&db, file, "IERC20(beta).");
-    assert!(
-        labels.iter().any(|l| l.starts_with("transfer")),
-        "got {labels:?}"
-    );
-    assert!(
-        labels.iter().any(|l| l.starts_with("safeTransfer")),
-        "got {labels:?}"
-    );
-    assert!(
-        !labels
-            .iter()
-            .any(|l| l.starts_with("transferAndCallRelaxed")),
-        "got {labels:?}"
-    );
+    assert!(labels.iter().any(|l| l.starts_with("transfer")), "got {labels:?}");
+    assert!(labels.iter().any(|l| l.starts_with("safeTransfer")), "got {labels:?}");
+    assert!(!labels.iter().any(|l| l.starts_with("transferAndCallRelaxed")), "got {labels:?}");
 }
 
 #[test]
@@ -115,13 +93,13 @@ fn dot_completion_elides_the_bound_receiver_parameter() {
     let text = db.text(file);
     let offset = (text.find("alpha.").expect("marker") + "alpha.".len()) as u32;
     let node = db.named_node_at(file, offset).expect("node at marker");
-    let owner = owner_at(&db, file, offset).unwrap();
-    let resolver = Resolver::build(&db, owner);
-    let kind = detect_ctx(&node, offset, CompletionTriggerKind::INVOKED, None).expect("owner");
+    let container = container_at(&db, file, offset).unwrap();
+    let resolver = Resolver::build(&db, container);
+    let kind = detect_ctx(&node, offset, CompletionTriggerKind::INVOKED, None).expect("container");
     let CompletionContextKind::DotAccess { receiver_node } = kind else {
         panic!("expected dot access");
     };
-    let items = complete_dot(&db, &resolver, owner, &receiver_node);
+    let items = complete_dot(&db, &resolver, container, &receiver_node);
 
     let attached = items
         .iter()
@@ -129,10 +107,7 @@ fn dot_completion_elides_the_bound_receiver_parameter() {
         .expect("attached `safeTransfer` should be offered");
     assert_eq!(attached.label, "safeTransfer(address, uint256)");
     assert_eq!(
-        attached
-            .label_details
-            .as_ref()
-            .and_then(|details| details.description.as_deref()),
+        attached.label_details.as_ref().and_then(|details| details.description.as_deref()),
         Some("function (address, uint256) "),
         "the bound `IERC20 token` receiver must not appear in the signature"
     );
@@ -177,9 +152,9 @@ fn bare_completion_lists_accessible_inherited_members() {
     );
     let text = db.text(file);
     let offset = (text.find("marker").expect("marker") + "marker".len()) as u32;
-    let owner = owner_at(&db, file, offset).unwrap();
-    let resolver = Resolver::build(&db, owner);
-    let labels: Vec<String> = complete_expr(&db, &resolver, owner, offset)
+    let container = container_at(&db, file, offset).unwrap();
+    let resolver = Resolver::build(&db, container);
+    let labels: Vec<String> = complete_expr(&db, &resolver, container, offset)
         .into_iter()
         .map(|item| item.label)
         .collect();
@@ -192,9 +167,7 @@ fn bare_completion_lists_accessible_inherited_members() {
     }
     for denied in ["p", "ext"] {
         assert!(
-            !labels
-                .iter()
-                .any(|l| l == denied || *l == format!("{denied}()")),
+            !labels.iter().any(|l| l == denied || *l == format!("{denied}()")),
             "inaccessible `{denied}` must not be offered"
         );
     }
@@ -209,32 +182,20 @@ fn group_items(db: &Db, file: File, marker: &str) -> Vec<LspCompletionItem> {
     let text = db.text(file);
     let offset = (text.find(marker).expect("marker") + marker.len()) as u32;
     let node = db.named_node_at(file, offset).expect("node at marker");
-    let owner = owner_at(db, file, offset).unwrap();
-    match detect_ctx(&node, offset, CompletionTriggerKind::INVOKED, None)
-        .expect("a braced group at the marker")
-    {
+    let container = container_at(db, file, offset).unwrap();
+    match detect_ctx(&node, offset, CompletionTriggerKind::INVOKED, None).expect("a braced group at the marker") {
         CompletionContextKind::BracedGroup {
             kind,
             callee_node,
             existing,
             insert_separator,
-        } => complete_braced_group(
-            db,
-            owner,
-            kind,
-            &callee_node,
-            &existing,
-            insert_separator,
-        ),
+        } => complete_braced_group(db, container, kind, &callee_node, &existing, insert_separator),
         other => panic!("expected a braced group, got {other:?}"),
     }
 }
 
 fn group_labels(db: &Db, file: File, marker: &str) -> Vec<String> {
-    group_items(db, file, marker)
-        .into_iter()
-        .map(|item| item.label)
-        .collect()
+    group_items(db, file, marker).into_iter().map(|item| item.label).collect()
 }
 
 /// Whether the cursor at `marker` is a braced-group key position.
@@ -571,9 +532,9 @@ fn local_completion_separates_its_type_hint() {
     let text = db.text(file);
     let marker = "/*here*/";
     let offset = (text.find(marker).expect("marker") + marker.len()) as u32;
-    let owner = owner_at(&db, file, offset).expect("owner");
-    let resolver = Resolver::build(&db, owner);
-    let item = complete_expr(&db, &resolver, owner, offset)
+    let container = container_at(&db, file, offset).expect("container");
+    let resolver = Resolver::build(&db, container);
+    let item = complete_expr(&db, &resolver, container, offset)
         .into_iter()
         .find(|item| item.label == "amount")
         .expect("the local should be offered");
@@ -585,4 +546,3 @@ fn local_completion_separates_its_type_hint() {
         "the type hint must not be glued to the label"
     );
 }
-

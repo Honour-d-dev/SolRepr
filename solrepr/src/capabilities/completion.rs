@@ -6,20 +6,20 @@ use crate::hir::body_map::{BodyOwnerId, Local, LocalId};
 use crate::hir::builtins::Builtin;
 use crate::hir::exprs::Name;
 use crate::hir::item_data::SemanticId;
-use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, Resolution};
 use crate::hir::resolver::Resolver;
-use crate::hir::types::{Primitive, Ty, TyKind, EXTERNAL_CALL_OPTIONS, option_type};
-use crate::ir::def_map::{DefId, DefNamespace, TypeDefId};
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::syntax_store::{callee_at, semantic_at};
-use crate::salsa::hir_db::owner_at;
-use crate::salsa::{HirDb, Db};
+use crate::hir::types::{EXTERNAL_CALL_OPTIONS, Primitive, Ty, TyKind, option_type};
+use crate::ir::def_map::{DefId, DefNamespace, TypeDefId};
+use crate::salsa::hir_db::container_at;
+use crate::salsa::{Db, HirDb};
 use crate::utilities::{log_info, print_tree, to_utf8path};
 use anyhow::{Context as _, Result};
 use lsp_server::{Request, Response};
 use lsp_types::{
-    CompletionItem as LspCompletionItem, CompletionItemKind, CompletionItemLabelDetails,
-    CompletionList, CompletionParams, CompletionResponse, CompletionTriggerKind, InsertTextFormat,
+    CompletionItem as LspCompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionList, CompletionParams,
+    CompletionResponse, CompletionTriggerKind, InsertTextFormat,
 };
 use rustc_hash::FxHashSet;
 
@@ -71,17 +71,18 @@ pub fn completion(db: &Db, request: Request) -> Result<Response> {
     }
     let position = params.text_document_position.position;
 
-    let trigger_kind = params.context.as_ref()
+    let trigger_kind = params
+        .context
+        .as_ref()
         .map(|c| c.trigger_kind)
         .unwrap_or(CompletionTriggerKind::INVOKED);
 
-    let trigger_character = params.context.as_ref()
-        .and_then(|c| c.trigger_character.as_deref());
+    let trigger_character = params.context.as_ref().and_then(|c| c.trigger_character.as_deref());
 
     let (file, offset) = db.convert(&path, position).context("document is not loaded")?;
     let node = db.named_node_at(file, offset).context("No node at cursor")?;
-    let owner = owner_at(db, file, offset).context("no owner at cursor")?;
-    let resolver = Resolver::build(db, owner);
+    let container = container_at(db, file, offset).context("no container at cursor")?;
+    let resolver = Resolver::build(db, container);
     log_info(format!(
         "completion request for {} : {}",
         node.node().kind(),
@@ -91,23 +92,14 @@ pub fn completion(db: &Db, request: Request) -> Result<Response> {
     let kind = detect_ctx(&node, offset, trigger_kind, trigger_character).context("unable to detect completion context")?;
 
     let items = match kind {
-        CompletionContextKind::DotAccess { receiver_node } => {
-            complete_dot(db, &resolver, owner, &receiver_node)
-        }
-        CompletionContextKind::Expr => complete_expr(db, &resolver, owner, offset),
+        CompletionContextKind::DotAccess { receiver_node } => complete_dot(db, &resolver, container, &receiver_node),
+        CompletionContextKind::Expr => complete_expr(db, &resolver, container, offset),
         CompletionContextKind::BracedGroup {
             kind,
             callee_node,
             existing,
             insert_separator,
-        } => complete_braced_group(
-            db,
-            owner,
-            kind,
-            &callee_node,
-            &existing,
-            insert_separator,
-        ),
+        } => complete_braced_group(db, container, kind, &callee_node, &existing, insert_separator),
     };
 
     let result = CompletionResponse::List(CompletionList {
@@ -131,8 +123,7 @@ pub(crate) fn detect_ctx(
     if let Some(braced) = braced_group(node, offset) {
         return Some(braced);
     }
-    let dot = extract_receiver(node)
-        .map(|receiver_node| CompletionContextKind::DotAccess { receiver_node });
+    let dot = extract_receiver(node).map(|receiver_node| CompletionContextKind::DotAccess { receiver_node });
     match trigger_kind {
         CompletionTriggerKind::TRIGGER_CHARACTER if trigger_character == Some(".") => dot,
         _ => dot.or(Some(CompletionContextKind::Expr)),
@@ -140,13 +131,8 @@ pub(crate) fn detect_ctx(
 }
 
 // MARK: Dot completions
-pub(crate) fn complete_dot(
-    db: &Db,
-    resolver: &Resolver,
-    owner: DefId,
-    receiver_node: &AstNode,
-) -> Vec<LspCompletionItem> {
-    let Some(receiver) = infer_receiver(db, owner, receiver_node) else {
+pub(crate) fn complete_dot(db: &Db, resolver: &Resolver, container: DefId, receiver_node: &AstNode) -> Vec<LspCompletionItem> {
+    let Some(receiver) = infer_receiver(db, container, receiver_node) else {
         return Vec::new();
     };
     resolver
@@ -164,8 +150,7 @@ pub(crate) fn complete_dot(
 fn braced_group(node: &AstNode, offset: u32) -> Option<CompletionContextKind> {
     let ast = node.ast();
     let (group, kind, callee, brace) = find_braced_group(node, offset)?;
-    let (at_key, insert_separator, existing) =
-        scan_group_entries(group, ast.source(), brace, offset);
+    let (at_key, insert_separator, existing) = scan_group_entries(group, ast.source(), brace, offset);
     at_key.then_some(CompletionContextKind::BracedGroup {
         kind,
         callee_node: callee,
@@ -177,10 +162,7 @@ fn braced_group(node: &AstNode, offset: u32) -> Option<CompletionContextKind> {
 /// Walk from the cursor node (or an immediately adjacent `call_argument` /
 /// `call_options` descendant when tree-sitter places a zero-width missing `}`
 /// at `offset`) up to the enclosing braced group.
-fn find_braced_group(
-    node: &AstNode,
-    offset: u32,
-) -> Option<(tree_sitter::Node<'_>, GroupKind, AstNode, u32)> {
+fn find_braced_group(node: &AstNode, offset: u32) -> Option<(tree_sitter::Node<'_>, GroupKind, AstNode, u32)> {
     let start = child_group_at(node.node(), offset).unwrap_or_else(|| node.node());
     let mut current = Some(start);
     while let Some(cand) = current {
@@ -223,10 +205,7 @@ fn child_group_at(node: tree_sitter::Node<'_>, offset: u32) -> Option<tree_sitte
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.start_byte() as u32 <= offset && offset <= child.end_byte() as u32 {
-            if matches!(
-                child.kind_id().into(),
-                NodeKind::CALL_ARGUMENT | NodeKind::CALL_OPTIONS
-            ) {
+            if matches!(child.kind_id().into(), NodeKind::CALL_ARGUMENT | NodeKind::CALL_OPTIONS) {
                 return Some(child);
             }
             if let Some(found) = child_group_at(child, offset) {
@@ -253,10 +232,7 @@ fn open_brace_before(node: tree_sitter::Node<'_>, offset: u32) -> Option<u32> {
 
 /// When an unclosed `{` folds into an `ERROR` node, locate the last unmatched
 /// `"{"` child before `offset` and the callee node immediately preceding `"("`/`"{"`.
-fn error_braced_group(
-    error: tree_sitter::Node<'_>,
-    offset: u32,
-) -> Option<(GroupKind, tree_sitter::Node<'_>, u32)> {
+fn error_braced_group(error: tree_sitter::Node<'_>, offset: u32) -> Option<(GroupKind, tree_sitter::Node<'_>, u32)> {
     let mut cursor = error.walk();
     let mut prev = None;
     let mut prev2 = None;
@@ -302,12 +278,7 @@ fn named_arg_call_node(parent: tree_sitter::Node<'_>) -> Option<tree_sitter::Nod
 /// 1. whether `offset` is in a key position (not after `:` inside an entry),
 /// 2. whether completing here should append `: $0`,
 /// 3. the set of keys already written in this group.
-fn scan_group_entries(
-    group: tree_sitter::Node<'_>,
-    source: &str,
-    brace: u32,
-    offset: u32,
-) -> (bool, bool, FxHashSet<Name>) {
+fn scan_group_entries(group: tree_sitter::Node<'_>, source: &str, brace: u32, offset: u32) -> (bool, bool, FxHashSet<Name>) {
     let mut existing = FxHashSet::default();
     let mut at_key = true;
     let mut insert_separator = true;
@@ -319,10 +290,7 @@ fn scan_group_entries(
         if start <= brace || child.kind_id() == NodeKind::COMMENT {
             continue;
         }
-        if matches!(
-            child.kind_id().into(),
-            NodeKind::CALL_STRUCT_ARGUMENT | NodeKind::NAMED_ARGUMENT
-        ) {
+        if matches!(child.kind_id().into(), NodeKind::CALL_STRUCT_ARGUMENT | NodeKind::NAMED_ARGUMENT) {
             let colon_end = child
                 .children(&mut child.walk())
                 .find(|c| c.kind() == ":")
@@ -355,19 +323,17 @@ fn scan_group_entries(
 
 pub(crate) fn complete_braced_group(
     db: &Db,
-    owner: DefId,
+    container: DefId,
     kind: GroupKind,
     callee_node: &AstNode,
     existing: &FxHashSet<Name>,
     insert_separator: bool,
 ) -> Vec<LspCompletionItem> {
-    let Some(callee) = infer_callee(db, owner, callee_node) else {
+    let Some(callee) = infer_callee(db, container, callee_node) else {
         return Vec::new();
     };
     let (keys, item_kind) = match (kind, callee) {
-        (GroupKind::NamedArgs, CalleeKind::Callables(callables)) => {
-            (callable_keys(db, &callables), CompletionItemKind::FIELD)
-        }
+        (GroupKind::NamedArgs, CalleeKind::Callables(callables)) => (callable_keys(db, &callables), CompletionItemKind::FIELD),
         (GroupKind::NamedArgs, CalleeKind::Struct(id)) => {
             let data = db.struct_data(id);
             let keys = data
@@ -388,11 +354,8 @@ pub(crate) fn complete_braced_group(
             };
             (option_keys(options), CompletionItemKind::PROPERTY)
         }
-        (GroupKind::CallOptions, CalleeKind::ExternalFnPtr) => {
-            (option_keys(EXTERNAL_CALL_OPTIONS), CompletionItemKind::PROPERTY)
-        }
-        (GroupKind::NamedArgs, CalleeKind::ExternalFnPtr)
-        | (GroupKind::CallOptions, CalleeKind::Struct(_)) => return Vec::new(),
+        (GroupKind::CallOptions, CalleeKind::ExternalFnPtr) => (option_keys(EXTERNAL_CALL_OPTIONS), CompletionItemKind::PROPERTY),
+        (GroupKind::NamedArgs, CalleeKind::ExternalFnPtr) | (GroupKind::CallOptions, CalleeKind::Struct(_)) => return Vec::new(),
     };
     key_items(keys, existing, item_kind, insert_separator)
 }
@@ -455,10 +418,10 @@ fn key_items(
 /// this reads the *callee's* resolution — the call is only its remapped range.
 /// `None` when the callee has no recorded resolution: an unresolved name, or a
 /// value of function type, whose parameter names are not knowable.
-fn infer_callee(db: &Db, owner: DefId, callee_node: &AstNode) -> Option<CalleeKind> {
+fn infer_callee(db: &Db, container: DefId, callee_node: &AstNode) -> Option<CalleeKind> {
     let range = NodeRange::from(&callee_node.node());
-    let id = callee_at(db, owner, range)?;
-    let inference = db.inference(owner);
+    let id = callee_at(db, container, range)?;
+    let inference = db.inference(container);
     if let Some(resolution) = inference.expr_resolution(id) {
         match resolution {
             Resolution::Callable(callable) => {
@@ -491,14 +454,11 @@ fn infer_callee(db: &Db, owner: DefId, callee_node: &AstNode) -> Option<CalleeKi
 }
 
 fn valid_member_expr(node: &tree_sitter::Node) -> bool {
-    node.kind_id() == NodeKind::INCOMPLETE_MEMBER_EXPRESSION
-        || node.kind_id() == NodeKind::MEMBER_EXPRESSION
+    node.kind_id() == NodeKind::INCOMPLETE_MEMBER_EXPRESSION || node.kind_id() == NodeKind::MEMBER_EXPRESSION
 }
 
 fn find_missing_member_property<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
-    if node.kind_id() == NodeKind::MISSING_MEMBER_PROPERTY
-        || (node.kind_id() == NodeKind::IDENTIFIER && node.is_missing())
-    {
+    if node.kind_id() == NodeKind::MISSING_MEMBER_PROPERTY || (node.kind_id() == NodeKind::IDENTIFIER && node.is_missing()) {
         return Some(node);
     }
 
@@ -521,26 +481,21 @@ fn extract_receiver(node: &AstNode) -> Option<AstNode> {
         .or_else(|| valid_member_expr(&current).then_some(current))
         .or_else(|| current.parent().filter(valid_member_expr))?;
 
-    member
-        .child_by_field_id(FieldKind::OBJECT.into())
-        .map(|n| node.upcast(n))
+    member.child_by_field_id(FieldKind::OBJECT.into()).map(|n| node.upcast(n))
 }
 
 /// Resolve and infer the receiver expression for dot completion.
-fn infer_receiver(db: &Db, owner: DefId, receiver_node: &AstNode) -> Option<Ty> {
+fn infer_receiver(db: &Db, container: DefId, receiver_node: &AstNode) -> Option<Ty> {
     let range = NodeRange::from(&receiver_node.node());
-    let inference = db.inference(owner);
-    let id = semantic_at(db, owner, range)?;
+    let inference = db.inference(container);
+    let id = semantic_at(db, container, range)?;
     Some(match id {
         SemanticId::Type(ty_ref_id) => Ty::new(db, TyKind::Type(inference.ty(ty_ref_id))),
         _ => inference.sem_ty(id),
     })
 }
 
-fn completion_item_for_resolution(
-    db: &Db,
-    resolution: Resolution,
-) -> Option<LspCompletionItem> {
+fn completion_item_for_resolution(db: &Db, resolution: Resolution) -> Option<LspCompletionItem> {
     match resolution {
         // A public state-variable getter — present it as a zero-argument
         // method call.
@@ -583,22 +538,11 @@ fn completion_item_for_resolution(
             }
             let builtin = callable.builtin()?;
             let sig = builtin.call_sig(db);
-            let params = sig
-                .params
-                .iter()
-                .map(|ty| ty.display(db))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let params = sig.params.iter().map(|ty| ty.display(db)).collect::<Vec<_>>().join(", ");
             let ret = match sig.returns.as_ref() {
                 [] => String::new(),
                 [single] => format!(" returns {}", single.display(db)),
-                many => format!(
-                    " returns ({})",
-                    many.iter()
-                        .map(|ty| ty.display(db))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
+                many => format!(" returns ({})", many.iter().map(|ty| ty.display(db)).collect::<Vec<_>>().join(", ")),
             };
             let label = if sig.params.is_empty() {
                 format!("{}()", builtin.name())
@@ -615,15 +559,13 @@ fn completion_item_for_resolution(
                 filter_text: Some(builtin.name().to_string()),
                 insert_text: Some(format!("{}($0)", builtin.name())),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
-                documentation: Some(lsp_types::Documentation::String(
-                    builtin.doc(db).to_string(),
-                )),
+                documentation: Some(lsp_types::Documentation::String(builtin.doc(db).to_string())),
                 ..Default::default()
             })
         }
-        Resolution::Callables(callables) => callables.into_iter().find_map(|callable| {
-            completion_item_for_resolution(db, Resolution::Callable(callable))
-        }),
+        Resolution::Callables(callables) => callables
+            .into_iter()
+            .find_map(|callable| completion_item_for_resolution(db, Resolution::Callable(callable))),
         Resolution::Field(field) => {
             if let Some((DefId::Struct(struct_id), field_id)) = field.struct_field() {
                 let data = db.struct_data(struct_id);
@@ -647,9 +589,7 @@ fn completion_item_for_resolution(
                     detail: Some(" (builtin)".to_string()),
                     description: Some(builtin.ty(db).display(db)),
                 }),
-                documentation: Some(lsp_types::Documentation::String(
-                    builtin.doc(db).to_string(),
-                )),
+                documentation: Some(lsp_types::Documentation::String(builtin.doc(db).to_string())),
                 ..Default::default()
             })
         }
@@ -671,31 +611,20 @@ fn completion_item_for_resolution(
 
 // MARK: Expr completions
 
-pub(crate) fn complete_expr(
-    db: &Db,
-    resolver: &Resolver,
-    owner: DefId,
-    offset: u32,
-) -> Vec<LspCompletionItem> {
+pub(crate) fn complete_expr(db: &Db, resolver: &Resolver, container: DefId, offset: u32) -> Vec<LspCompletionItem> {
     let mut acc = Vec::new();
 
     // 1. Locals (if inside a function/modifier body)
     if let Some(body) = resolver.body() {
-        let local_ranges = match owner {
-            DefId::Function(id) => {
-                Some(db.body_source_map(BodyOwnerId::Function(id)))
-            }
-            DefId::Modifier(id) => Some(
-                db.body_source_map(BodyOwnerId::Modifier(id)),
-            ),
+        let local_ranges = match container {
+            DefId::Function(id) => Some(db.body_source_map(BodyOwnerId::Function(id))),
+            DefId::Modifier(id) => Some(db.body_source_map(BodyOwnerId::Modifier(id))),
             _ => None,
         };
         for (local_id, local) in body.locals.iter() {
-            let visible = local_ranges.as_ref().is_some_and(|map| {
-                map.local_ranges
-                    .get(local_id)
-                    .is_some_and(|range| range.start <= offset)
-            });
+            let visible = local_ranges
+                .as_ref()
+                .is_some_and(|map| map.local_ranges.get(local_id).is_some_and(|range| range.start <= offset));
             if visible {
                 acc.push(completion_item_for_local(local, &body.syntax_store));
             }
@@ -703,10 +632,9 @@ pub(crate) fn complete_expr(
     }
 
     // 2. Def-map scope walk (contracts, functions, types, events, errors, vars)
-    acc.extend(iterate_scope(db, resolver, owner, |name, def_id, _namespace, bound| {
+    acc.extend(iterate_scope(db, resolver, container, |name, def_id, _namespace, bound| {
         let kind = completion_kind_for_def(&def_id);
-        let (label, insert_text, filter_text) =
-            callable_completion_text(db, &def_id, name, bound);
+        let (label, insert_text, filter_text) = callable_completion_text(db, &def_id, name, bound);
         let insert_text_format = insert_text.as_ref().map(|_| InsertTextFormat::SNIPPET);
         Some(LspCompletionItem {
             label,
@@ -724,12 +652,12 @@ pub(crate) fn complete_expr(
     acc.extend(completion_builtins(db, resolver));
 
     // 4. Declaration snippets where the current container permits them.
-    acc.extend(complete_item_list(owner));
+    acc.extend(complete_item_list(container));
 
     acc
 }
 
-fn complete_item_list(owner: DefId) -> Vec<LspCompletionItem> {
+fn complete_item_list(container: DefId) -> Vec<LspCompletionItem> {
     let keywords = [
         ("contract", "contract $1 {\n\t$0\n}"),
         ("interface", "interface $1 {\n\t$0\n}"),
@@ -748,11 +676,8 @@ fn complete_item_list(owner: DefId) -> Vec<LspCompletionItem> {
         ("type", "type $1 is $2;"),
     ];
 
-    let is_file = matches!(owner, DefId::File(_));
-    let is_container = matches!(
-        owner,
-        DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_)
-    );
+    let is_file = matches!(container, DefId::File(_));
+    let is_container = matches!(container, DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_));
     if !is_file && !is_container {
         return Vec::new();
     }
@@ -761,10 +686,7 @@ fn complete_item_list(owner: DefId) -> Vec<LspCompletionItem> {
         .iter()
         .filter(|(keyword, _)| {
             if is_file {
-                !matches!(
-                    *keyword,
-                    "constructor" | "fallback" | "receive" | "modifier" | "mapping"
-                )
+                !matches!(*keyword, "constructor" | "fallback" | "receive" | "modifier" | "mapping")
             } else {
                 !matches!(*keyword, "contract" | "interface" | "library")
             }
@@ -785,23 +707,23 @@ fn complete_item_list(owner: DefId) -> Vec<LspCompletionItem> {
 fn iterate_scope(
     db: &Db,
     resolver: &Resolver,
-    owner: DefId,
+    container: DefId,
     mut f: impl FnMut(&Name, DefId, &DefNamespace, usize) -> Option<LspCompletionItem>,
 ) -> Vec<LspCompletionItem> {
     let mut acc = Vec::new();
     let mut seen: rustc_hash::FxHashSet<Name> = rustc_hash::FxHashSet::default();
 
     // Walk def-map scopes from container upward
-    let defmap = resolver.def_map(&owner);
-    if let Some(data) = defmap.defs.get(&owner) {
+    let defmap = resolver.def_map(&container);
+    if let Some(data) = defmap.defs.get(&container) {
         let start = data.child_scope.unwrap_or(data.scope);
         let mut scope_id = start;
 
         loop {
             let scope = &defmap.scopes[scope_id];
             match scope.owner {
-                owner @ (DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_)) => {
-                    for (name, result) in resolver.direct_members_of(owner) {
+                member_container @ (DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_)) => {
+                    for (name, result) in resolver.direct_members_of(member_container) {
                         if seen.contains(&name) {
                             continue;
                         }
@@ -809,9 +731,7 @@ fn iterate_scope(
                         for resolution in result.completion_resolutions() {
                             let (def, bound) = match resolution {
                                 Resolution::Var(def) => (Some(def), 0),
-                                Resolution::Callable(callable) => {
-                                    (callable.def(), callable.bound() as usize)
-                                }
+                                Resolution::Callable(callable) => (callable.def(), callable.bound() as usize),
                                 Resolution::Type(ty) => (ty.def_id(db), 0),
                                 Resolution::Module(file) => (Some(DefId::File(file)), 0),
                                 _ => (None, 0),
@@ -864,9 +784,7 @@ fn dedupe_items(items: Vec<LspCompletionItem>) -> Vec<LspCompletionItem> {
         .filter(|item| {
             seen.insert((
                 item.label.clone(),
-                item.label_details
-                    .as_ref()
-                    .and_then(|details| details.description.clone()),
+                item.label_details.as_ref().and_then(|details| details.description.clone()),
             ))
         })
         .collect()
@@ -915,32 +833,17 @@ fn callable_params(db: &Db, def_id: &DefId, bound: usize) -> Option<String> {
         }
         DefId::Modifier(id) => {
             let data = db.modifier_data(*id);
-            let ids: Vec<LocalId> = data
-                .parameters
-                .iter()
-                .map(|(id, _)| id)
-                .skip(bound)
-                .collect();
+            let ids: Vec<LocalId> = data.parameters.iter().map(|(id, _)| id).skip(bound).collect();
             format_param_types(&data.parameters, &ids, &data.syntax_store)
         }
         DefId::Event(id) => {
             let data = db.event_data(*id);
-            let ids: Vec<LocalId> = data
-                .parameters
-                .iter()
-                .map(|(id, _)| id)
-                .skip(bound)
-                .collect();
+            let ids: Vec<LocalId> = data.parameters.iter().map(|(id, _)| id).skip(bound).collect();
             format_param_types(&data.parameters, &ids, &data.syntax_store)
         }
         DefId::Error(id) => {
             let data = db.error_data(*id);
-            let ids: Vec<LocalId> = data
-                .parameters
-                .iter()
-                .map(|(id, _)| id)
-                .skip(bound)
-                .collect();
+            let ids: Vec<LocalId> = data.parameters.iter().map(|(id, _)| id).skip(bound).collect();
             format_param_types(&data.parameters, &ids, &data.syntax_store)
         }
         _ => return None,
@@ -951,22 +854,14 @@ fn callable_params(db: &Db, def_id: &DefId, bound: usize) -> Option<String> {
 /// `detail` is rendered right after the label (e.g. `(address, uint256)` for functions).
 /// `description` is rendered faded at the end (e.g. the containing contract name).
 /// `bound` drops the receiver parameter an attached (`using`) function carries.
-fn label_details_for_def(
-    db: &Db,
-    def_id: &DefId,
-    bound: usize,
-) -> Option<CompletionItemLabelDetails> {
+fn label_details_for_def(db: &Db, def_id: &DefId, bound: usize) -> Option<CompletionItemLabelDetails> {
     match def_id {
         DefId::Function(id) => {
             let data = db.function_data(*id);
             let params = callable_params(db, def_id, bound).unwrap_or_default();
             let ret = format_param_types(&data.parameters, &data.rets, &data.syntax_store);
             let mut_str = data.mutability.as_str();
-            let ret_str = if ret.is_empty() {
-                String::new()
-            } else {
-                format!(" returns {ret}")
-            };
+            let ret_str = if ret.is_empty() { String::new() } else { format!(" returns {ret}") };
             Some(CompletionItemLabelDetails {
                 detail: Some(" (function)".to_string()),
                 description: Some(format!("function ({params}) {mut_str}{ret_str}")),
@@ -1039,11 +934,7 @@ fn label_details_for_def(
 }
 
 /// Format parameter types only as `type, type` (for label details).
-fn format_param_types(
-    arena: &la_arena::Arena<Local>,
-    ids: &[LocalId],
-    store: &SyntaxStore,
-) -> String {
+fn format_param_types(arena: &la_arena::Arena<Local>, ids: &[LocalId], store: &SyntaxStore) -> String {
     ids.iter()
         .map(|id| store.types[*arena[*id].ty_ref()].to_string(&store.types))
         .collect::<Vec<_>>()
@@ -1072,12 +963,7 @@ fn completion_item_for_local(local: &Local, store: &SyntaxStore) -> LspCompletio
 /// overloads stay distinct; `bound` drops the receiver parameters a
 /// `using`-attached function already carries. `insert_text` is a snippet
 /// `name($0)` so the cursor lands inside the parens.
-fn callable_label_and_insert(
-    db: &Db,
-    def_id: &DefId,
-    name: &str,
-    bound: usize,
-) -> (String, String) {
+fn callable_label_and_insert(db: &Db, def_id: &DefId, name: &str, bound: usize) -> (String, String) {
     let label = format!("{name}({})", callable_params(db, def_id, bound).unwrap_or_default());
     let insert_text = format!("{name}($0)");
     (label, insert_text)
@@ -1088,12 +974,7 @@ fn callable_label_and_insert(
 /// For callables (functions, modifiers, events, errors): label gets parens,
 /// insert_text is a snippet, filter_text is the bare name.
 /// For everything else: label is the bare name, no insert_text, no filter_text.
-fn callable_completion_text(
-    db: &Db,
-    def_id: &DefId,
-    name: &Name,
-    bound: usize,
-) -> (String, Option<String>, Option<String>) {
+fn callable_completion_text(db: &Db, def_id: &DefId, name: &Name, bound: usize) -> (String, Option<String>, Option<String>) {
     match def_id {
         DefId::Function(_) | DefId::Modifier(_) | DefId::Event(_) | DefId::Error(_) => {
             let name_str = name.to_string();
@@ -1171,4 +1052,3 @@ fn completion_builtins(db: &Db, resolver: &Resolver) -> Vec<LspCompletionItem> {
 
     acc
 }
-

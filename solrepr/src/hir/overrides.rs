@@ -1,7 +1,7 @@
 //! Contract-level override analysis.
 //!
 //! Builds declaration-to-base override facts and validates own declarations,
-//! similar to solc's `OverrideChecker`(`OverrideGraph`, and `CutVertexFinder`). 
+//! similar to solc's `OverrideChecker`(`OverrideGraph`, and `CutVertexFinder`).
 //! Effective slots, inherited conflicts, and implementation obligations are folded once by `MemberMap`.
 
 use la_arena::Arena;
@@ -9,11 +9,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast::{FunctionKind, HasBases};
 use crate::hir::analysis::Analysis;
+use crate::hir::diagnostics::{DiagnosticSink, SemanticDiagnostic};
 use crate::hir::exprs::Name;
 use crate::hir::item_data::OverrideSpecifier;
 use crate::hir::resolution::Resolution;
 use crate::hir::resolver::Resolver;
-use crate::hir::diagnostics::{DiagnosticSink, SemanticDiagnostic};
 use crate::hir::signatures::OverrideSignature;
 use crate::hir::types::{TyName, TyNameId, Visibility};
 use crate::ir::def_map::DefId;
@@ -31,7 +31,7 @@ pub enum DeclKind {
 #[derive(Clone, PartialEq, Eq)]
 pub struct OverrideEntry {
     pub decl: DefId,
-    pub owner: DefId,
+    pub declarer: DefId,
     pub kind: DeclKind,
     pub is_virtual: bool,
     pub implemented: bool,
@@ -61,11 +61,7 @@ impl Overrides {
     /// The declarations this contract exposes to its children for a signature.
     /// its own when it declares any, else the inherited set.
     pub fn exposed(&self) -> &[DefId] {
-        if self.own.is_empty() {
-            &self.inherited
-        } else {
-            &self.own
-        }
+        if self.own.is_empty() { &self.inherited } else { &self.own }
     }
 }
 
@@ -88,7 +84,7 @@ impl OverrideFacts {
             return Box::new([]);
         };
         let mut all: Vec<DefId> = overrides.own.iter().chain(&overrides.inherited).copied().collect();
-        
+
         let mut i = 0;
         while i < all.len() {
             if let Some(entry) = self.known.get(&all[i]) {
@@ -104,18 +100,13 @@ impl OverrideFacts {
     }
 
     pub fn owes_implementation(&self, def: DefId) -> bool {
-        self.known
-            .get(&def)
-            .is_some_and(OverrideEntry::owes_implementation)
+        self.known.get(&def).is_some_and(OverrideEntry::owes_implementation)
     }
 
     /// Resolve one inherited slot against the override graph
     /// A cut vertex covers the declarations it overrides. An unimplemented
     /// cut vertex is unresolved, so it still owes an implementation.
-    pub fn resolve_slot(
-        &self,
-        signature: &OverrideSignature,
-    ) -> (Box<[&OverrideEntry]>, FxHashSet<DefId>) {
+    pub fn resolve_slot(&self, signature: &OverrideSignature) -> (Box<[&OverrideEntry]>, FxHashSet<DefId>) {
         let Some(overrides) = self.by_sig.get(signature) else {
             return (Box::new([]), FxHashSet::default());
         };
@@ -242,13 +233,8 @@ impl<'db> OverrideAnalyzer<'db> {
                     }
                 }
             }
-            self.known.extend(
-                base_analysis
-                    .data
-                    .known
-                    .iter()
-                    .map(|(decl, entry)| (*decl, entry.clone())),
-            );
+            self.known
+                .extend(base_analysis.data.known.iter().map(|(decl, entry)| (*decl, entry.clone())));
         }
     }
 
@@ -257,7 +243,7 @@ impl<'db> OverrideAnalyzer<'db> {
             let Some(sig) = OverrideSignature::of(self.db, declaration.def) else {
                 let entry = OverrideEntry {
                     decl: declaration.def,
-                    owner: self.container,
+                    declarer: self.container,
                     kind: declaration.kind,
                     is_virtual: declaration.is_virtual,
                     implemented: declaration.implemented,
@@ -266,13 +252,7 @@ impl<'db> OverrideAnalyzer<'db> {
                 self.known.insert(declaration.def, entry);
                 continue;
             };
-            let inherited: Box<[DefId]> = self
-                .slots
-                .entry(sig.clone())
-                .or_default()
-                .1
-                .as_slice()
-                .into();
+            let inherited: Box<[DefId]> = self.slots.entry(sig.clone()).or_default().1.as_slice().into();
             if self.complete {
                 self.check_declaration(&declaration, &inherited);
             }
@@ -286,7 +266,7 @@ impl<'db> OverrideAnalyzer<'db> {
             own.push(declaration.def);
             let entry = OverrideEntry {
                 decl: declaration.def,
-                owner: self.container,
+                declarer: self.container,
                 kind: declaration.kind,
                 is_virtual: declaration.is_virtual,
                 implemented: declaration.implemented,
@@ -298,11 +278,7 @@ impl<'db> OverrideAnalyzer<'db> {
 
     fn own_declarations(&mut self) -> Box<[OwnDeclaration]> {
         let defmap = self.db.file_def_map(self.container.file());
-        let Some(scope) = defmap
-            .defs
-            .get(&self.container)
-            .and_then(|data| data.child_scope)
-        else {
+        let Some(scope) = defmap.defs.get(&self.container).and_then(|data| data.child_scope) else {
             return Box::new([]);
         };
         let mut defs: Box<[DefId]> = defmap.scopes[scope]
@@ -311,9 +287,7 @@ impl<'db> OverrideAnalyzer<'db> {
             .flat_map(|member| member.defs.iter().copied())
             .collect();
         defs.sort_by_key(|def| def_range(self.db, *def).map_or(0, |range| range.start));
-        defs.iter()
-            .filter_map(|&def| self.own_declaration(def))
-            .collect()
+        defs.iter().filter_map(|&def| self.own_declaration(def)).collect()
     }
 
     fn own_declaration(&mut self, def: DefId) -> Option<OwnDeclaration> {
@@ -323,10 +297,7 @@ impl<'db> OverrideAnalyzer<'db> {
                 if data.kind == FunctionKind::Constructor {
                     return None;
                 }
-                let (listed, unresolved) = self.listed_contracts(
-                    &data.syntax_store.types,
-                    data.override_specifier.as_ref(),
-                );
+                let (listed, unresolved) = self.listed_contracts(def, &data.syntax_store.types, data.override_specifier.as_ref());
                 Some(OwnDeclaration {
                     def,
                     kind: DeclKind::Function,
@@ -339,10 +310,7 @@ impl<'db> OverrideAnalyzer<'db> {
             }
             DefId::Modifier(id) => {
                 let data = self.db.modifier_data(id);
-                let (listed, unresolved) = self.listed_contracts(
-                    &data.syntax_store.types,
-                    data.override_specifier.as_ref(),
-                );
+                let (listed, unresolved) = self.listed_contracts(def, &data.syntax_store.types, data.override_specifier.as_ref());
                 Some(OwnDeclaration {
                     def,
                     kind: DeclKind::Modifier,
@@ -358,10 +326,7 @@ impl<'db> OverrideAnalyzer<'db> {
                 if data.vis != Visibility::Public {
                     return None;
                 }
-                let (listed, unresolved) = self.listed_contracts(
-                    &data.syntax_store.types,
-                    data.override_specifier.as_ref(),
-                );
+                let (listed, unresolved) = self.listed_contracts(def, &data.syntax_store.types, data.override_specifier.as_ref());
                 Some(OwnDeclaration {
                     def,
                     kind: DeclKind::Getter,
@@ -385,6 +350,7 @@ impl<'db> OverrideAnalyzer<'db> {
     /// something that is not a contract is ignored, as solc ignores it.
     fn listed_contracts(
         &mut self,
+        declaration: DefId,
         types: &Arena<TyName>,
         specifier: Option<&OverrideSpecifier>,
     ) -> (Option<Box<[DefId]>>, bool) {
@@ -402,14 +368,14 @@ impl<'db> OverrideAnalyzer<'db> {
             };
             match self.resolver.resolve_path(&segments) {
                 Some(Resolution::Type(ty)) => {
-                    if let Some(def @ (DefId::Contract(_) | DefId::Interface(_))) = ty.def_id(self.db)
-                    {
+                    if let Some(def @ (DefId::Contract(_) | DefId::Interface(_))) = ty.def_id(self.db) {
                         listed.push(def);
                     }
                 }
                 _ => {
                     unresolved = true;
                     self.sink.push(SemanticDiagnostic::UnresolvedType {
+                        def: declaration,
                         ty_ref_id: ty_ref,
                         name: segments.last().cloned().unwrap_or_default(),
                     });
@@ -454,15 +420,10 @@ impl<'db> OverrideAnalyzer<'db> {
 
     fn check_declaration(&mut self, declaration: &OwnDeclaration, inherited: &[DefId]) {
         let def = declaration.def;
-        let candidates: Box<[&OverrideEntry]> = inherited
-            .iter()
-            .filter_map(|def| self.known.get(def))
-            .collect();
+        let candidates: Box<[&OverrideEntry]> = inherited.iter().filter_map(|def| self.known.get(def)).collect();
         if candidates.is_empty() {
             if declaration.marked {
-                self.sink.push(SemanticDiagnostic::UnnecessaryOverride {
-                    declaration: def,
-                });
+                self.sink.push(SemanticDiagnostic::UnnecessaryOverride { declaration: def });
             }
             return;
         }
@@ -478,9 +439,7 @@ impl<'db> OverrideAnalyzer<'db> {
         }
 
         let incompatible = candidates.iter().find_map(|candidate| {
-            let mismatch = OverrideSignature::compatibility(self.db, def, candidate.decl)?
-                .first()
-                .copied()?;
+            let mismatch = OverrideSignature::compatibility(self.db, def, candidate.decl)?.first().copied()?;
             Some((candidate.decl, mismatch))
         });
         if let Some((base, mismatch)) = incompatible {
@@ -504,13 +463,13 @@ impl<'db> OverrideAnalyzer<'db> {
             });
         }
 
-        let mut owners: Vec<DefId> = Vec::new();
+        let mut declarers: Vec<DefId> = Vec::new();
         for candidate in &candidates {
-            if !owners.contains(&candidate.owner) {
-                owners.push(candidate.owner);
+            if !declarers.contains(&candidate.declarer) {
+                declarers.push(candidate.declarer);
             }
         }
-        let single_interface = owners.len() == 1 && matches!(owners[0], DefId::Interface(_));
+        let single_interface = declarers.len() == 1 && matches!(declarers[0], DefId::Interface(_));
         if !declaration.marked && !single_interface {
             self.sink.push(SemanticDiagnostic::MissingOverride {
                 declaration: def,
@@ -520,10 +479,10 @@ impl<'db> OverrideAnalyzer<'db> {
 
         // A bare `override` names nothing, so it cannot satisfy more than one
         // overridden contract — the list is mandatory there, optional for one.
-        if declaration.marked && declaration.listed.is_none() && owners.len() > 1 {
+        if declaration.marked && declaration.listed.is_none() && declarers.len() > 1 {
             self.sink.push(SemanticDiagnostic::OverrideListMismatch {
                 declaration: def,
-                expected: owners.clone(),
+                expected: declarers.clone(),
             });
         }
 
@@ -534,11 +493,11 @@ impl<'db> OverrideAnalyzer<'db> {
             && !declaration.unresolved
         {
             let distinct: FxHashSet<DefId> = listed.iter().copied().collect();
-            let owner_set: FxHashSet<DefId> = owners.iter().copied().collect();
-            if distinct.len() != listed.len() || distinct != owner_set {
+            let declarer_set: FxHashSet<DefId> = declarers.iter().copied().collect();
+            if distinct.len() != listed.len() || distinct != declarer_set {
                 self.sink.push(SemanticDiagnostic::OverrideListMismatch {
                     declaration: def,
-                    expected: owners,
+                    expected: declarers,
                 });
             }
         }
@@ -661,5 +620,3 @@ fn cut_vertices(adjacency: &[Vec<usize>]) -> FxHashSet<usize> {
     cvf.cuts.remove(&TOP);
     cvf.cuts
 }
-
-

@@ -3,22 +3,19 @@ use lsp_server::{Request, Response};
 use lsp_types::{HoverContents, HoverParams, MarkupContent, MarkupKind};
 
 use crate::ast::{
-    ContractId, EnumId, ErrorId, EventId, FunctionId, FunctionKind, InterfaceId, LibraryId,
-    ModifierId, NodeRange, StructId, VarId,
+    ContractId, EnumId, ErrorId, EventId, FunctionId, FunctionKind, InterfaceId, LibraryId, ModifierId, NodeRange, StructId, VarId,
 };
 use crate::hir::body_map::{BodyOwnerId, Local, LocalId};
 use crate::hir::builtins::ParamSchema;
 use crate::hir::exprs::{Expr, ExprId, Literal};
 use crate::hir::item_data::{EnumData, Field, FieldId, SemanticId, VarData, VariantId};
-use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::resolution::{Callable, Resolution};
-use crate::hir::types::{
-    Location, Mutability, RefKind, Ty, TyKind, TyName, VariableKind, Visibility,
-};
-use crate::ir::def_map::DefId;
+use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::syntax_store::semantic_at;
-use crate::salsa::hir_db::owner_at;
-use crate::salsa::{File, HirDb, RootDb, Db};
+use crate::hir::types::{Location, Mutability, RefKind, Ty, TyKind, TyName, VariableKind, Visibility};
+use crate::ir::def_map::DefId;
+use crate::salsa::hir_db::container_at;
+use crate::salsa::{Db, File, HirDb, RootDb};
 use crate::utilities::{log_info, to_url, to_utf8path};
 
 pub fn code_block(code: &str) -> String {
@@ -69,23 +66,23 @@ pub(crate) struct Hover<'db> {
 
 impl<'db> Hover<'db> {
     fn hover_target(&self, def_id: &DefId, range: NodeRange) -> anyhow::Result<String> {
-        let owner = *def_id;
-        let inference = self.db.inference(owner);
-        let id = semantic_at(self.db, owner, range).context("No inference found")?;
+        let def = *def_id;
+        let inference = self.db.inference(def);
+        let id = semantic_at(self.db, def, range).context("No inference found")?;
         match id {
             SemanticId::Expr(expr) => inference
                 .expr_resolution(expr)
                 .and_then(|resolution| self.hover_resolution(resolution)),
-            SemanticId::Local(local) => self.hover_local(owner, local),
-            SemanticId::Field(field) => self.hover_field(owner, field),
-            SemanticId::Variant(variant) => self.hover_variant(owner, variant),
+            SemanticId::Local(local) => self.hover_local(def, local),
+            SemanticId::Field(field) => self.hover_field(def, field),
+            SemanticId::Variant(variant) => self.hover_variant(def, variant),
             SemanticId::Type(ty) => self.hover_ty(inference.ty(ty).ty()),
         }
         .context("No resolution found")
     }
 
-    fn hover_local(&self, owner: DefId, local_id: LocalId) -> Option<String> {
-        match owner {
+    fn hover_local(&self, def: DefId, local_id: LocalId) -> Option<String> {
+        match def {
             DefId::Function(id) => {
                 let body = self.db.body_map(BodyOwnerId::Function(id));
                 Some(self.format_local(&body.locals[local_id], &body.syntax_store))
@@ -106,36 +103,31 @@ impl<'db> Hover<'db> {
         }
     }
 
-    fn hover_field(&self, owner: DefId, field_id: FieldId) -> Option<String> {
-        let DefId::Struct(struct_id) = owner else {
+    fn hover_field(&self, def: DefId, field_id: FieldId) -> Option<String> {
+        let DefId::Struct(struct_id) = def else {
             return None;
         };
         let struct_data = self.db.struct_data(struct_id);
-        let (file, _) = owner.file_and_id();
+        let (file, _) = def.file_and_id();
         let range = self
             .db
-            .source_map(owner)
+            .source_map(def)
             .field_ranges
             .get(field_id)
             .copied()
             .unwrap_or(NodeRange { start: 0, end: 0 });
-        Some(self.format_field(
-            &struct_data.fields[field_id],
-            &struct_data.syntax_store,
-            file,
-            range,
-        ))
+        Some(self.format_field(&struct_data.fields[field_id], &struct_data.syntax_store, file, range))
     }
 
-    fn hover_variant(&self, owner: DefId, variant_id: VariantId) -> Option<String> {
-        let DefId::Enum(enum_id) = owner else {
+    fn hover_variant(&self, def: DefId, variant_id: VariantId) -> Option<String> {
+        let DefId::Enum(enum_id) = def else {
             return None;
         };
         let enum_data = self.db.enum_data(enum_id);
-        let (file, _) = owner.file_and_id();
+        let (file, _) = def.file_and_id();
         let range = self
             .db
-            .source_map(owner)
+            .source_map(def)
             .variant_ranges
             .get(variant_id)
             .copied()
@@ -184,11 +176,9 @@ impl<'db> Hover<'db> {
                     .collect::<Vec<_>>();
                 (!hovers.is_empty()).then(|| hovers.join("\n---\n"))
             }
-            Resolution::Variant(variant) => {
-                self.hover_variant(DefId::Enum(variant.enum_id), variant.id)
-            }
+            Resolution::Variant(variant) => self.hover_variant(DefId::Enum(variant.enum_id), variant.id),
             Resolution::Field(field) => match field.struct_field() {
-                Some((owner, field_id)) => self.hover_field(owner, field_id),
+                Some((struct_def, field_id)) => self.hover_field(struct_def, field_id),
                 None => field.builtin_field().map(|builtin| {
                     Self::format_with_doc(
                         &format!("{} {}", builtin.ty(self.db).display(self.db), builtin.name()),
@@ -226,10 +216,7 @@ impl<'db> Hover<'db> {
             DefId::File(_) => Ok("File".into()),
             DefId::Udvt(id) => {
                 let data = self.db.udvt_data(*id);
-                Ok(code_block(&format!(
-                    "type {} is {}",
-                    data.name, data.underlying
-                )))
+                Ok(code_block(&format!("type {} is {}", data.name, data.underlying)))
             }
             DefId::Contract(id) => self.hover_contract(id),
             DefId::Library(id) => self.hover_library(id),
@@ -241,16 +228,10 @@ impl<'db> Hover<'db> {
             DefId::Event(id) => self.hover_event(id),
             DefId::Error(id) => self.hover_error(id),
             DefId::Var(id) => self.hover_var(id),
-            DefId::Import(_) | DefId::Using(_) => {
-                Err(anyhow::anyhow!("declaration has no hover signature"))
-            }
+            DefId::Import(_) | DefId::Using(_) => Err(anyhow::anyhow!("declaration has no hover signature")),
         };
 
-        Ok(HoverInfo::declaration(
-            self.def_title(def_id),
-            def_body?,
-            self.def_link(def_id),
-        ))
+        Ok(HoverInfo::declaration(self.def_title(def_id), def_body?, self.def_link(def_id)))
     }
 
     pub(crate) fn hover_var(&self, var_id: &VarId) -> anyhow::Result<String> {
@@ -265,7 +246,7 @@ impl<'db> Hover<'db> {
         if let k @ (VariableKind::Const | VariableKind::Immutable) = var_data.kind {
             parts.push(k.to_string().to_lowercase());
         }
-        
+
         parts.push(var_data.name.as_str().to_string());
         let sig = parts.join(" ");
         let sig = if var_data.kind == VariableKind::Const {
@@ -276,21 +257,11 @@ impl<'db> Hover<'db> {
         Ok(Self::format_with_doc(&sig, doc))
     }
 
-    fn constant_signature(
-        &self,
-        var_id: VarId,
-        var_data: &VarData,
-        signature: &str,
-    ) -> String {
+    fn constant_signature(&self, var_id: VarId, var_data: &VarData, signature: &str) -> String {
         // The folded value when one is available; an opaque constant
         // (`keccak256`, `type(I).interfaceId`) or an error falls back to the
         // initializer's source text.
-        if let Some(rendered) = self
-            .db
-            .const_value(var_id)
-            .ok()
-            .and_then(|value| value.render())
-        {
+        if let Some(rendered) = self.db.const_value(var_id).ok().and_then(|value| value.render()) {
             return format!("{signature} = {rendered}");
         }
         let Some(init) = var_data.init else {
@@ -325,8 +296,7 @@ impl<'db> Hover<'db> {
             .iter()
             .map(|id| {
                 let local = &fn_data.parameters[*id];
-                let ty =
-                    fn_data.syntax_store.types[*local.ty_ref()].to_string(&fn_data.syntax_store.types);
+                let ty = fn_data.syntax_store.types[*local.ty_ref()].to_string(&fn_data.syntax_store.types);
                 format!("{} {}", ty, local.name())
             })
             .collect::<Vec<_>>()
@@ -353,11 +323,7 @@ impl<'db> Hover<'db> {
                 fn_data.vis.as_str(),
                 fn_data.mutability.as_str()
             ),
-            FunctionKind::Constructor => format!(
-                "constructor({params}) {} {}",
-                fn_data.vis.as_str(),
-                fn_data.mutability.as_str()
-            ),
+            FunctionKind::Constructor => format!("constructor({params}) {} {}", fn_data.vis.as_str(), fn_data.mutability.as_str()),
             FunctionKind::Fallback => {
                 let mutability = if fn_data.mutability == Mutability::Payable {
                     "payable "
@@ -377,8 +343,7 @@ impl<'db> Hover<'db> {
             .parameters
             .iter()
             .map(|(_, local)| {
-                let ty = mod_data.syntax_store.types[*local.ty_ref()]
-                    .to_string(&mod_data.syntax_store.types);
+                let ty = mod_data.syntax_store.types[*local.ty_ref()].to_string(&mod_data.syntax_store.types);
                 format!("{} {}", ty, local.name())
             })
             .collect::<Vec<_>>()
@@ -394,8 +359,7 @@ impl<'db> Hover<'db> {
             .fields
             .iter()
             .map(|(_, field)| {
-                let ty = struct_data.syntax_store.types[field.ty_ref]
-                    .to_string(&struct_data.syntax_store.types);
+                let ty = struct_data.syntax_store.types[field.ty_ref].to_string(&struct_data.syntax_store.types);
                 format!("{} {};", ty, field.name)
             })
             .collect::<Vec<_>>();
@@ -430,8 +394,7 @@ impl<'db> Hover<'db> {
             .parameters
             .iter()
             .map(|(_, p)| {
-                let ty = event_data.syntax_store.types[*p.ty_ref()]
-                    .to_string(&event_data.syntax_store.types);
+                let ty = event_data.syntax_store.types[*p.ty_ref()].to_string(&event_data.syntax_store.types);
                 format!("{} {}", ty, p.name())
             })
             .collect::<Vec<_>>()
@@ -447,8 +410,7 @@ impl<'db> Hover<'db> {
             .parameters
             .iter()
             .map(|(_, p)| {
-                let ty = error_data.syntax_store.types[*p.ty_ref()]
-                    .to_string(&error_data.syntax_store.types);
+                let ty = error_data.syntax_store.types[*p.ty_ref()].to_string(&error_data.syntax_store.types);
                 format!("{} {}", ty, p.name())
             })
             .collect::<Vec<_>>()
@@ -461,12 +423,8 @@ impl<'db> Hover<'db> {
     fn format_base(expr_id: ExprId, store: &SyntaxStore) -> Option<String> {
         match &store.exprs[expr_id] {
             Expr::Ident(name) => Some(name.to_string()),
-            Expr::Member { obj, prop } => {
-                Some(format!("{}.{prop}", Self::format_base(*obj, store)?))
-            }
-            Expr::Call { callee, .. } | Expr::ModifierInv(callee) => {
-                Self::format_base(*callee, store)
-            }
+            Expr::Member { obj, prop } => Some(format!("{}.{prop}", Self::format_base(*obj, store)?)),
+            Expr::Call { callee, .. } | Expr::ModifierInv(callee) => Self::format_base(*callee, store),
             _ => None,
         }
     }
@@ -518,11 +476,7 @@ impl<'db> Hover<'db> {
         }
         let builtin = callable.builtin()?;
         let sig = builtin.call_sig(self.db);
-        let mut params = sig
-            .params
-            .iter()
-            .map(|ty| ty.display(self.db))
-            .collect::<Vec<_>>();
+        let mut params = sig.params.iter().map(|ty| ty.display(self.db)).collect::<Vec<_>>();
         if builtin.schema() != ParamSchema::Fixed {
             params.push("…".into());
         }
@@ -531,11 +485,7 @@ impl<'db> Hover<'db> {
             [] => String::new(),
             returns => format!(
                 " returns ({})",
-                returns
-                    .iter()
-                    .map(|ty| ty.display(self.db))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                returns.iter().map(|ty| ty.display(self.db)).collect::<Vec<_>>().join(", ")
             ),
         };
         Some(
@@ -553,9 +503,7 @@ impl<'db> Hover<'db> {
         let ty = store.types[*local.ty_ref()].to_string(&store.types);
         let footer = match local.location(&store.types) {
             Some(Location::Storage(RefKind::Pointer)) => Some("storage pointer"),
-            _ if matches!(&store.types[*local.ty_ref()], TyName::Fn(_)) => {
-                Some("function pointer")
-            }
+            _ if matches!(&store.types[*local.ty_ref()], TyName::Fn(_)) => Some("function pointer"),
             _ => None,
         };
         HoverInfo {
@@ -567,13 +515,7 @@ impl<'db> Hover<'db> {
         .render()
     }
 
-    fn format_field(
-        &self,
-        field: &Field,
-        store: &SyntaxStore,
-        file: File,
-        range: NodeRange,
-    ) -> String {
+    fn format_field(&self, field: &Field, store: &SyntaxStore, file: File, range: NodeRange) -> String {
         let ty = store.types[field.ty_ref].to_string(&store.types);
         let doc = self.db.inline_docs(file, range);
         HoverInfo {
@@ -585,13 +527,7 @@ impl<'db> Hover<'db> {
         .render()
     }
 
-    pub(crate) fn format_variant(
-        &self,
-        enum_data: &EnumData,
-        variant_id: VariantId,
-        file: File,
-        range: NodeRange,
-    ) -> String {
+    pub(crate) fn format_variant(&self, enum_data: &EnumData, variant_id: VariantId, file: File, range: NodeRange) -> String {
         let variant = &enum_data.variants[variant_id];
         let doc = self.db.inline_docs(file, range);
         HoverInfo {
@@ -744,10 +680,7 @@ impl<'db> Hover<'db> {
         let (file, Some(ast_id)) = def_id.file_and_id() else {
             return None;
         };
-        let node = self
-            .db
-            .ast_id_map(file)
-            .get_node(&self.db.root(file), ast_id)?;
+        let node = self.db.ast_id_map(file).get_node(&self.db.root(file), ast_id)?;
         Some(self.range_link(file, NodeRange::from(&node.node())))
     }
 
@@ -765,7 +698,7 @@ impl<'db> Hover<'db> {
     }
 }
 
-    pub fn hover(db: &Db, request: Request) -> anyhow::Result<Response> {
+pub fn hover(db: &Db, request: Request) -> anyhow::Result<Response> {
     let params: HoverParams = serde_json::from_value(request.params)?;
     let path = to_utf8path(&params.text_document_position_params.text_document.uri)?;
     log_info(format!("Hover request for {path}"));
@@ -778,17 +711,13 @@ impl<'db> Hover<'db> {
     }
 
     let position = params.text_document_position_params.position;
-    let (file, offset) = db
-        .convert(&path, position)
-        .context("document is not loaded")?;
-    let node = db
-        .named_node_at(file, offset)
-        .context("No node at cursor")?;
-    let owner = owner_at(db, file, offset).context("no owner at cursor")?;
+    let (file, offset) = db.convert(&path, position).context("document is not loaded")?;
+    let node = db.named_node_at(file, offset).context("No node at cursor")?;
+    let def = container_at(db, file, offset).context("no container at cursor")?;
 
     let range = NodeRange::from(&node.node());
     let hover = Hover { db };
-    let hover_str = hover.hover_target(&owner, range)?;
+    let hover_str = hover.hover_target(&def, range)?;
 
     let result = lsp_types::Hover {
         contents: HoverContents::Markup(MarkupContent {

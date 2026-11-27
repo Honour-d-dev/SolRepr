@@ -12,7 +12,7 @@ use super::Inferer;
 
 impl<'db, 'store> Inferer<'db, 'store> {
     pub(super) fn check_definition(&mut self) {
-        if let DefId::Modifier(id) = self.owner {
+        if let DefId::Modifier(id) = self.def {
             self.check_modifier_body(id);
         }
     }
@@ -22,11 +22,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn check_modifier_body(&mut self, id: ModifierId) {
         let data = self.db.modifier_data(id);
         if data.has_body && !data.has_placeholder {
-            self.fail(
-                DiagnosticAnchor::Body(self.owner),
-                "modifier body does not contain `_`",
-                (),
-            );
+            self.fail_at(DiagnosticAnchor::def(self.def), "modifier body does not contain `_`", ());
         }
     }
 }

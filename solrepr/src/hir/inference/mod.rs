@@ -14,14 +14,12 @@ use usage::UsageContext;
 
 use crate::hir::diagnostics::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Name, UnaryOp};
-use crate::hir::item_data::VarData;
+use crate::hir::item_data::{SemanticId, VarData};
 use crate::hir::resolution::{Field as ResolvedField, Resolution};
 use crate::hir::resolver::Resolver;
-use crate::hir::syntax_store::OwnerStore;
+use crate::hir::syntax_store::SemanticStore;
 use crate::hir::types::Primitive::FixedBytes;
-use crate::hir::types::{
-    LiteralKind, Location, Mutability, Primitive, RefKind, Ty, TyKind, Type, VariableKind,
-};
+use crate::hir::types::{LiteralKind, Location, Mutability, Primitive, RefKind, Ty, TyKind, Type, VariableKind};
 use crate::ir::def_map::{DefId, TypeDefId};
 use crate::salsa::HirDb;
 
@@ -37,19 +35,19 @@ macro_rules! return_invalid {
 }
 pub(crate) use return_invalid;
 
-/// The single inference context: the owner, its name-resolution context, and
+/// The single inference context: the def, its name-resolution context, and
 /// the accumulated tables. It reads content only — never a source map — so a
 /// reflow cannot invalidate inference. Implementation is split across the
 /// sibling namespaces by responsibility, all `impl Inferer`.
 pub struct Inferer<'db, 'store> {
     db: &'db dyn HirDb,
-    owner: DefId,
-    input: OwnerStore<'store>,
+    def: DefId,
+    input: SemanticStore<'store>,
     tables: Inference,
     sink: DiagnosticSink,
     resolver: Resolver<'db>,
 
-    /// The mutability the owner declares. A modifier declares none but still
+    /// The mutability the def declares. A modifier declares none but still
     /// accumulates an effect for the functions that inline it.
     mutability: Option<Mutability>,
     /// Accumulated state-mutability effect (`Pure < View < NonPayable`).
@@ -59,21 +57,21 @@ pub struct Inferer<'db, 'store> {
 }
 
 impl<'db, 'store> Inferer<'db, 'store> {
-    pub fn run(db: &'db dyn HirDb, owner: DefId, input: OwnerStore<'store>) -> Inference {
+    pub fn run(db: &'db dyn HirDb, def: DefId, input: SemanticStore<'store>) -> Inference {
         // No source map means a declaration-context query: declaring scopes only.
         let resolver = if input.expr_scopes.is_some() {
-            Resolver::build(db, owner)
+            Resolver::build(db, def)
         } else {
-            Resolver::for_declaration(db, owner)
+            Resolver::for_declaration(db, def)
         };
         let mut inferer = Self {
             db,
-            owner,
+            def,
             input,
             tables: Inference::empty(),
             sink: DiagnosticSink::default(),
             resolver,
-            mutability: match owner {
+            mutability: match def {
                 DefId::Function(id) => Some(db.function_data(id).mutability),
                 _ => None,
             },
@@ -83,9 +81,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         inferer.check_definition();
         inferer.infer_all();
 
-        inferer
-            .sink
-            .extend(inferer.resolver.finish_diagnostics().iter());
+        inferer.sink.extend(inferer.resolver.finish_diagnostics().iter());
         inferer.tables.effect = inferer.effective_mutability;
         inferer.tables.diagnostics = inferer.sink.finish();
         inferer.tables
@@ -130,11 +126,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
     }
 
     #[inline]
-    fn is_owner(&self, def: DefId) -> bool {
-        def == self.owner
+    fn is_current(&self, def: DefId) -> bool {
+        def == self.def
     }
 
-    /// Can cycle — callers must check [`Self::is_owner`] first.
+    /// Can cycle — callers must check [`Self::is_current`] first.
     fn inference(&self, def: DefId) -> Arc<Inference> {
         self.db.inference(def)
     }
@@ -144,7 +140,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
         recovery
     }
 
-    fn fail<R>(&mut self, anchor: DiagnosticAnchor, message: impl Into<String>, recovery: R) -> R {
+    fn fail<R>(&mut self, id: SemanticId, message: impl Into<String>, recovery: R) -> R {
+        self.fail_at(DiagnosticAnchor::token(self.def, id), message, recovery)
+    }
+
+    fn fail_at<R>(&mut self, anchor: DiagnosticAnchor, message: impl Into<String>, recovery: R) -> R {
         self.report(
             SemanticDiagnostic::InferenceFailure {
                 anchor,
@@ -169,6 +169,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         if actual.implicitly_converts_to(expected, self.db).is_none() {
             return self.report(
                 SemanticDiagnostic::TypeMismatch {
+                    def: self.def,
                     expr,
                     expected,
                     actual,
@@ -205,12 +206,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     self.db.var_data(id)
                 } else {
                     return self.fail(
-                        DiagnosticAnchor::Expr(expr),
+                        SemanticId::Expr(expr),
                         "variable resolution points to a non-variable",
                         Ty::invalid(self.db),
                     );
                 };
-                let ty = if self.is_owner(var_def) {
+                let ty = if self.is_current(var_def) {
                     // The declaration-site occurrence is the only entry point for a
                     // variable's declaration checks; any other self-resolution
                     // (`uint a = a`) is an illegal self-read.
@@ -218,7 +219,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                         self.check_var_declaration(var_def, &data)
                     } else {
                         return self.fail(
-                            DiagnosticAnchor::Expr(expr),
+                            SemanticId::Expr(expr),
                             "a variable's declaration cannot reference the variable itself",
                             Ty::invalid(self.db),
                         );
@@ -239,28 +240,22 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Resolution::This(def) => match TypeDefId::try_from(*def) {
                 Ok(id) if id.is_contract_like() => Ty::new(self.db, TyKind::TypeDef(id)),
                 _ => self.fail(
-                    DiagnosticAnchor::Expr(expr),
+                    SemanticId::Expr(expr),
                     "`this` does not name a contract, interface, or library",
                     Ty::invalid(self.db),
                 ),
             },
             Resolution::Super(def) => match def {
                 DefId::Contract(id) => Ty::new(self.db, TyKind::Super(*id)),
-                _ => self.fail(
-                    DiagnosticAnchor::Expr(expr),
-                    "super resolution is not a contract",
-                    Ty::invalid(self.db),
-                ),
+                _ => self.fail(SemanticId::Expr(expr), "super resolution is not a contract", Ty::invalid(self.db)),
             },
             Resolution::Literal(literal) => literal.ty(self.db),
-            Resolution::Variant(variant) => {
-                Ty::new(self.db, TyKind::TypeDef(variant.enum_id.into()))
-            }
+            Resolution::Variant(variant) => Ty::new(self.db, TyKind::TypeDef(variant.enum_id.into())),
             Resolution::Field(field) => match field {
                 ResolvedField::Builtin(builtin) => builtin.ty(self.db).ty(),
                 ResolvedField::Struct(owner, field_id) => {
                     let (owner, field_id) = (*owner, *field_id);
-                    let field_ty = if self.is_owner(owner) {
+                    let field_ty = if self.is_current(owner) {
                         let fields = self.input.fields.expect("a struct owner has a field arena");
                         self.lower_type(fields[field_id].ty_ref, false)
                     } else {
@@ -281,17 +276,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
         };
         // The initializer is checked against the type the variable *binds* — a state variable's
         // slot, so an array initializer is a copy into storage.
-        let declared = self
-            .lower_type(data.ty_ref, false)
-            .upcast_from_kind(self.db, data.kind);
+        let declared = self.lower_type(data.ty_ref, false).upcast_from_kind(self.db, data.kind);
         // solc's constant-type rule (9259) is terminal: it replaces the initializer and
         // uninitialized checks.
-        if data.kind == VariableKind::Const
-            && !declared.is_invalid(self.db)
-            && !declared.peel_loc(self.db).kind(self.db).is_constant_type()
+        if data.kind == VariableKind::Const && !declared.is_invalid(self.db) && !declared.peel_loc(self.db).kind(self.db).is_constant_type()
         {
-            return self.fail(
-                DiagnosticAnchor::Def(var_def),
+            return self.fail_at(
+                DiagnosticAnchor::def(var_def),
                 "Only constants of value type and byte array type are implemented.",
                 declared,
             );
@@ -300,7 +291,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         // owns that rule (`ir::membership`) and drops the name, so the
         // declaration already carries its diagnostic; the initializer is not
         // worth checking on a declaration that cannot exist.
-        if let Some(DefId::Interface(_)) = self.db.owner(var_def) {
+        if let Some(DefId::Interface(_)) = self.db.container(var_def) {
             return declared;
         }
         match data.init {
@@ -311,31 +302,16 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 {
                     // The query drops the failing expression, so re-evaluate on the
                     // error path to anchor a nested failure where it happened.
-                    let error = self
-                        .eval_const(init)
-                        .err()
-                        .unwrap_or(ConstError { expr: init, kind });
+                    let error = self.eval_const(init).err().unwrap_or(ConstError { expr: init, kind });
                     // An untypeable initializer already owns its diagnostic; report
                     // only what the type level cannot see (cycles, fold errors).
-                    if !init_ty.is_invalid(self.db)
-                        || !matches!(
-                            error.kind,
-                            ConstErrorKind::NotConstant | ConstErrorKind::Foreign
-                        )
-                    {
-                        self.report_const_error(
-                            error,
-                            "initial value must be a compile-time constant",
-                        );
+                    if !init_ty.is_invalid(self.db) || !matches!(error.kind, ConstErrorKind::NotConstant | ConstErrorKind::Foreign) {
+                        self.report_const_error(error, "initial value must be a compile-time constant");
                     }
                 }
             }
             None if data.kind == VariableKind::Const => {
-                self.fail(
-                    DiagnosticAnchor::Def(var_def),
-                    "Uninitialized \"constant\" variable.",
-                    (),
-                );
+                self.fail_at(DiagnosticAnchor::def(var_def), "Uninitialized \"constant\" variable.", ());
             }
             None => {}
         }
@@ -356,19 +332,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn infer_expr_uncached(&mut self, expr: ExprId) -> Ty {
         match self.input.store.exprs[expr].clone() {
             Expr::Ident(name) => {
-                let scope = self
-                    .input
-                    .expr_scopes
-                    .and_then(|map| map.get(expr).copied());
-                let order = self
-                    .input
-                    .expr_orders
-                    .and_then(|map| map.get(expr).copied())
-                    .unwrap_or_default();
+                let scope = self.input.expr_scopes.and_then(|map| map.get(expr).copied());
+                let order = self.input.expr_orders.and_then(|map| map.get(expr).copied()).unwrap_or_default();
                 let is_self_name = self.input.store.name == Some(expr);
-                let resolved =
-                    self.resolver
-                        .resolve_name_at(&name, scope, order, expr, is_self_name);
+                let resolved = self.resolver.resolve_name_at(&name, scope, order, expr, is_self_name);
                 let Some(resolution) = resolved else {
                     return Ty::invalid(self.db);
                 };
@@ -389,7 +356,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     && self.eval_const(right).is_ok_and(|value| value.is_zero())
                 {
                     self.fail(
-                        DiagnosticAnchor::Expr(expr),
+                        SemanticId::Expr(expr),
                         if matches!(op, BinaryOp::Mod) {
                             "Modulo by zero."
                         } else {
@@ -408,10 +375,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     | BinaryOp::Gt
                     | BinaryOp::Le
                     | BinaryOp::Ge => Ty::primitive(self.db, Primitive::Boolean),
-                    _ => match (
-                        Self::is_literal(self.db, left_type),
-                        Self::is_literal(self.db, right_type),
-                    ) {
+                    _ => match (Self::is_literal(self.db, left_type), Self::is_literal(self.db, right_type)) {
                         // Arithmetic over two literals folds to a literal kind, so the value's fitness decides the
                         // conversion: `5 / 2` is `Rational`, `2 ** 256` needs 257 bits.
                         (true, true) => self
@@ -420,21 +384,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
                             .unwrap_or(left_type),
                         // One literal, one typed operand: the typed side is the result. Shifts and `**` are the
                         // exception — their result follows the left operand.
-                        (true, false)
-                            if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Pow) =>
-                        {
-                            let negative = matches!(
-                                left_type.kind(self.db),
-                                TyKind::Literal(LiteralKind::Int { neg: true, .. })
-                            );
-                            Ty::primitive(
-                                self.db,
-                                if negative {
-                                    Primitive::Int(256)
-                                } else {
-                                    Primitive::Uint(256)
-                                },
-                            )
+                        (true, false) if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Pow) => {
+                            let negative = matches!(left_type.kind(self.db), TyKind::Literal(LiteralKind::Int { neg: true, .. }));
+                            Ty::primitive(self.db, if negative { Primitive::Int(256) } else { Primitive::Uint(256) })
                         }
                         (true, false) => right_type,
                         //@TODO the common type for two typed operands; the left
@@ -455,6 +407,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 } else {
                     self.report(
                         SemanticDiagnostic::TypeMismatch {
+                            def: self.def,
                             expr: els,
                             expected: then_ty,
                             actual: else_ty,
@@ -500,15 +453,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
                         Ty::primitive(self.db, Primitive::Uint(256)),
                         Ty::primitive(self.db, Primitive::Int(256)),
                     ];
-                    if wide
-                        .iter()
-                        .all(|target| rhs_ty.implicitly_converts_to(*target, self.db).is_none())
-                    {
-                        return self.fail(
-                            DiagnosticAnchor::Expr(rhs),
-                            "shift operand must be an integer",
-                            Ty::invalid(self.db),
-                        );
+                    if wide.iter().all(|target| rhs_ty.implicitly_converts_to(*target, self.db).is_none()) {
+                        return self.fail(SemanticId::Expr(rhs), "shift operand must be an integer", Ty::invalid(self.db));
                     }
                     return lhs_ty;
                 }
@@ -532,11 +478,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     }
                     kind => {
                         let Some(index) = index else {
-                            return self.fail(
-                                DiagnosticAnchor::Expr(expr),
-                                "array access requires an index",
-                                Ty::invalid(self.db),
-                            );
+                            return self.fail(SemanticId::Expr(expr), "array access requires an index", Ty::invalid(self.db));
                         };
                         // The index is rvalue even when the access is in lvalue,
                         // so a state read there still counts.
@@ -545,21 +487,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
                         match kind {
                             TyKind::Array { elem, .. } => match base_type.loc(self.db) {
                                 Some(loc) => elem.upcast_from(self.db, loc).ty(),
-                                None => self.fail(
-                                    DiagnosticAnchor::Expr(expr),
-                                    "array has no data location",
-                                    Ty::invalid(self.db),
-                                ),
+                                None => self.fail(SemanticId::Expr(expr), "array has no data location", Ty::invalid(self.db)),
                             },
-                            TyKind::Mapping { value, .. } => value
-                                .upcast_from(self.db, Location::Storage(RefKind::Reference))
-                                .ty(),
-                            TyKind::Primitive(Primitive::Bytes)
-                            | TyKind::Primitive(FixedBytes(_)) => {
-                                Ty::primitive(self.db, FixedBytes(1))
-                            }
+                            TyKind::Mapping { value, .. } => value.upcast_from(self.db, Location::Storage(RefKind::Reference)).ty(),
+                            TyKind::Primitive(Primitive::Bytes) | TyKind::Primitive(FixedBytes(_)) => Ty::primitive(self.db, FixedBytes(1)),
                             ty => self.fail(
-                                DiagnosticAnchor::Expr(expr),
+                                SemanticId::Expr(expr),
                                 format!("type `{}` cannot be indexed", ty.display(self.db)),
                                 Ty::invalid(self.db),
                             ),
@@ -577,11 +510,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 }
                 // solc's TypeType check — a type name can't be sliced.
                 if matches!(base_ty.kind(self.db), TyKind::Type(_)) {
-                    return self.fail(
-                        DiagnosticAnchor::Expr(expr),
-                        "Types cannot be sliced.",
-                        Ty::invalid(self.db),
-                    );
+                    return self.fail(SemanticId::Expr(expr), "Types cannot be sliced.", Ty::invalid(self.db));
                 }
                 // A nested slice unwraps to the array it slices.
                 let array_ty = match base_ty.kind(self.db) {
@@ -590,20 +519,18 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 };
                 let kind = array_ty.peel_loc(self.db).kind(self.db);
                 match kind {
-                    TyKind::Array { .. }
-                    | TyKind::Primitive(Primitive::Bytes | Primitive::String) => {}
+                    TyKind::Array { .. } | TyKind::Primitive(Primitive::Bytes | Primitive::String) => {}
                     _ => {
                         return self.fail(
-                            DiagnosticAnchor::Expr(expr),
+                            SemanticId::Expr(expr),
                             "Index range access is only possible for arrays and array slices.",
                             Ty::invalid(self.db),
                         );
                     }
                 }
-                if array_ty.loc(self.db) != Some(Location::Calldata) || !kind.is_dynamically_sized()
-                {
+                if array_ty.loc(self.db) != Some(Location::Calldata) || !kind.is_dynamically_sized() {
                     self.fail(
-                        DiagnosticAnchor::Expr(expr),
+                        SemanticId::Expr(expr),
                         "Index range access is only supported for dynamic calldata arrays.",
                         (),
                     );
@@ -611,7 +538,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     && elem.is_dynamically_encoded(self.db)
                 {
                     self.fail(
-                        DiagnosticAnchor::Expr(expr),
+                        SemanticId::Expr(expr),
                         "Index range access is not supported for arrays with dynamically encoded base types.",
                         (),
                     );
@@ -633,7 +560,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                             Some(common) => Some(common),
                             None => {
                                 return self.fail(
-                                    DiagnosticAnchor::Expr(expr),
+                                    SemanticId::Expr(expr),
                                     "Unable to deduce common type for array elements.",
                                     Ty::invalid(self.db),
                                 );
@@ -643,14 +570,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 }
                 let Some(common) = common else {
                     return self.fail(
-                        DiagnosticAnchor::Expr(expr),
+                        SemanticId::Expr(expr),
                         "Unable to deduce common type for array elements.",
                         Ty::invalid(self.db),
                     );
                 };
                 let Some(elem) = common.narrow(self.db) else {
                     return self.fail(
-                        DiagnosticAnchor::Expr(expr),
+                        SemanticId::Expr(expr),
                         "Unable to deduce nameable type for array elements. Try adding explicit type conversion for the first element.",
                         Ty::invalid(self.db),
                     );
@@ -669,11 +596,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 match self.tables.expr_resolution(expr) {
                     Some(Resolution::Field(ResolvedField::Struct(..))) => {
                         let Some(loc) = obj_ty.loc(self.db) else {
-                            return self.fail(
-                                DiagnosticAnchor::Expr(expr),
-                                "struct has no data location",
-                                Ty::invalid(self.db),
-                            );
+                            return self.fail(SemanticId::Expr(expr), "struct has no data location", Ty::invalid(self.db));
                         };
                         ty.upcast_from(self.db, loc)
                     }
@@ -686,7 +609,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 match inner_ty.kind(self.db) {
                     TyKind::Type(name) => self.infer_resolution(expr, Resolution::MetaType(name)),
                     _ => self.fail(
-                        DiagnosticAnchor::Expr(expr),
+                        SemanticId::Expr(expr),
                         "metatype expression requires a type name",
                         Ty::invalid(self.db),
                     ),
@@ -706,15 +629,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Expr::Return(value) => {
                 if let Some(value) = value {
                     self.check_return(value);
-                } else if self
-                    .owner_returns()
-                    .is_some_and(|returns| !returns.is_empty())
-                {
-                    self.fail(
-                        DiagnosticAnchor::Expr(expr),
-                        "return arguments required",
-                        (),
-                    );
+                } else if self.def_returns().is_some_and(|returns| !returns.is_empty()) {
+                    self.fail(SemanticId::Expr(expr), "return arguments required", ());
                 }
                 Ty::void(self.db)
             }
@@ -728,20 +644,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     if let Some(elem) = elem {
                         // Each component of a destructuring target is its own lvalue.
                         let context = match self.context {
-                            UsageContext::Lvalue(value) => {
-                                UsageContext::Lvalue(self.tuple_component(value, index))
-                            }
+                            UsageContext::Lvalue(value) => UsageContext::Lvalue(self.tuple_component(value, index)),
                             other => other,
                         };
                         let elem_ty = self.infer_in(elem, context);
                         match elem_ty.kind(self.db) {
                             TyKind::Invalid => return Ty::invalid(self.db),
                             TyKind::Void => {
-                                return self.fail(
-                                    DiagnosticAnchor::Expr(elem),
-                                    "tuple component cannot be empty",
-                                    Ty::invalid(self.db),
-                                );
+                                return self.fail(SemanticId::Expr(elem), "tuple component cannot be empty", Ty::invalid(self.db));
                             }
                             _ => components.push(Some(elem_ty)),
                         }
@@ -762,9 +672,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 Ty::void(self.db)
             }
             Expr::Path(path) => {
-                let Some(file) = self.db.resolve_to_file(self.owner.file(), &path) else {
+                let Some(file) = self.db.resolve_to_file(self.def.file(), &path) else {
                     return self.fail(
-                        DiagnosticAnchor::Expr(expr),
+                        SemanticId::Expr(expr),
                         format!("unable to resolve path `{path}`"),
                         Ty::invalid(self.db),
                     );
@@ -787,12 +697,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         self.check_positional_call(call, callee, args, &arg_types)
     }
 
-    fn infer_named_call_expr(
-        &mut self,
-        call: ExprId,
-        callee: ExprId,
-        args: &[(Name, ExprId)],
-    ) -> Ty {
+    fn infer_named_call_expr(&mut self, call: ExprId, callee: ExprId, args: &[(Name, ExprId)]) -> Ty {
         self.infer_in(callee, UsageContext::Callee);
         if let Some(invalid) = self.check_duplicate_named(call, args) {
             return invalid;

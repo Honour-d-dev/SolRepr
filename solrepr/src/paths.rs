@@ -121,8 +121,7 @@ impl From<NormalizedPath> for Utf8PathBuf {
 
 pub(crate) fn canonicalize_path(path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
     let path = dunce::canonicalize(path).context("failed to canonicalize path")?;
-    Utf8PathBuf::from_path_buf(path)
-        .map_err(|path| anyhow::anyhow!("path is not valid UTF-8: {path:?}"))
+    Utf8PathBuf::from_path_buf(path).map_err(|path| anyhow::anyhow!("path is not valid UTF-8: {path:?}"))
 }
 
 pub(crate) fn normalize_path(path: &Utf8Path) -> Utf8PathBuf {
@@ -130,12 +129,27 @@ pub(crate) fn normalize_path(path: &Utf8Path) -> Utf8PathBuf {
         return path;
     }
 
-    // canonicalizing can fail if file has not been saved to disk.
-    // In this case, we can still try to canonicalize the parent path then join the file name.
-    let (Some(file_name), Some(parent)) = (path.file_name(), path.parent()) else {
+    // Canonicalizing can fail when the file has not been saved to disk.
+    let Some(parent) = path.parent() else {
         return path.to_path_buf();
     };
+    let Ok(normalized_parent) = canonicalize_path(parent) else {
+        return path.to_path_buf();
+    };
+    normalized_parent.join(path.file_name().unwrap_or_default())
+}
 
-    let normalized_parent = canonicalize_path(parent).unwrap_or_else(|_| parent.to_path_buf());
-    normalized_parent.join(file_name)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_path_keeps_one_separator_style() {
+        let path = format!("/solrepr_missing_{}/child.sol", std::process::id());
+        let normalized = normalize_path(Utf8Path::new(&path));
+        assert!(
+            !(normalized.as_str().contains('/') && normalized.as_str().contains('\\')),
+            "normalizing a missing path mixed separators: {normalized}"
+        );
+    }
 }

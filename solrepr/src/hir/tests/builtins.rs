@@ -1,13 +1,13 @@
 use crate::hir::builtins::*;
-use crate::hir::types::{Callee, Location, Primitive, Ty, TyKind, Type};
-use crate::salsa::HirDb;
-use crate::hir::types::RefKind;
 use crate::hir::resolution::Resolution;
 use crate::hir::resolver::Resolver;
 use crate::hir::tests::helper::*;
+use crate::hir::types::RefKind;
 use crate::hir::types::{CallKind, ViaTypeKind};
+use crate::hir::types::{Callee, Location, Primitive, Ty, TyKind, Type};
 use crate::ir::def_map::DefId;
-use crate::salsa::{File, Db};
+use crate::salsa::HirDb;
+use crate::salsa::{Db, File};
 use num_bigint::BigInt;
 use std::borrow::Cow;
 
@@ -23,11 +23,7 @@ fn names(members: &[Builtin]) -> Vec<&str> {
 /// The removed `BuiltinDb::member` as a test helper — production callers
 /// enumerate `members` and match by name.
 fn member(builtins: BuiltinDb<'_>, ty: Ty, name: &str, ctx: MemberNamespace) -> Option<Builtin> {
-    builtins
-        .members(ty, ctx)
-        .iter()
-        .find(|m| m.name() == name)
-        .copied()
+    builtins.members(ty, ctx).iter().find(|m| m.name() == name).copied()
 }
 
 #[test]
@@ -36,10 +32,7 @@ fn member_namespace_splits_bytes_types_and_values() {
     let resolver = resolver_for(&db, file);
     let bytes = Ty::primitive(&db, Primitive::Bytes);
 
-    assert_eq!(
-        names(&resolver.builtins().members(bytes, MemberNamespace::Types)),
-        ["concat"]
-    );
+    assert_eq!(names(&resolver.builtins().members(bytes, MemberNamespace::Types)), ["concat"]);
     let value = resolver.builtins().members(bytes, MemberNamespace::Values);
     assert!(names(&value).contains(&"length"));
     assert!(!names(&value).contains(&"concat"));
@@ -58,12 +51,7 @@ fn member_namespace_udvt_wrap_unwrap() {
     let ns_names = names(&ns);
     assert!(ns_names.contains(&"wrap"), "got {ns_names:?}");
     assert!(ns_names.contains(&"unwrap"), "got {ns_names:?}");
-    assert!(
-        resolver
-            .builtins()
-            .members(udvt, MemberNamespace::Values)
-            .is_empty()
-    );
+    assert!(resolver.builtins().members(udvt, MemberNamespace::Values).is_empty());
 }
 
 #[test]
@@ -72,12 +60,8 @@ fn global_object_members_are_types_only() {
     let resolver = resolver_for(&db, file);
     let msg = Ty::new(&db, TyKind::Builtin(BuiltinTy::Msg));
 
-    assert!(
-        member(resolver.builtins(), msg, "sender", MemberNamespace::Types).is_some()
-    );
-    assert!(
-        member(resolver.builtins(), msg, "sender", MemberNamespace::Values).is_none()
-    );
+    assert!(member(resolver.builtins(), msg, "sender", MemberNamespace::Types).is_some());
+    assert!(member(resolver.builtins(), msg, "sender", MemberNamespace::Values).is_none());
 }
 
 #[test]
@@ -85,26 +69,12 @@ fn resolve_global_finds_builtin_functions() {
     let (db, file) = make_test_db("contract C { function f() external {} }");
     let resolver = resolver_for(&db, file);
 
+    assert_eq!(resolver.builtins().resolve_global(&"msg".into()).map(Builtin::name), Some("msg"));
     assert_eq!(
-        resolver
-            .builtins()
-            .resolve_global(&"msg".into())
-            .map(Builtin::name),
-        Some("msg")
-    );
-    assert_eq!(
-        resolver
-            .builtins()
-            .resolve_global(&"keccak256".into())
-            .map(Builtin::name),
+        resolver.builtins().resolve_global(&"keccak256".into()).map(Builtin::name),
         Some("keccak256")
     );
-    assert!(
-        resolver
-            .builtins()
-            .resolve_global(&"nope".into())
-            .is_none()
-    );
+    assert!(resolver.builtins().resolve_global(&"nope".into()).is_none());
 }
 
 #[test]
@@ -113,34 +83,21 @@ fn block_and_globals_include_cancun_builtins() {
     let resolver = resolver_for(&db, file);
     let block = Ty::new(&db, TyKind::Builtin(BuiltinTy::Block));
 
-    assert!(
-        member(resolver.builtins(), block, "blobbasefee", MemberNamespace::Types).is_some()
-    );
-    assert!(
-        resolver
-            .builtins()
-            .resolve_global(&"blobhash".into())
-            .is_some()
-    );
+    assert!(member(resolver.builtins(), block, "blobbasefee", MemberNamespace::Types).is_some());
+    assert!(resolver.builtins().resolve_global(&"blobhash".into()).is_some());
 }
 
 #[test]
 fn db_dependent_docs_name_the_actual_types() {
-    let (db, file) =
-        make_test_db("type Price is uint256; contract C { uint256[] s; function f() external {} }");
+    let (db, file) = make_test_db("type Price is uint256; contract C { uint256[] s; function f() external {} }");
     let resolver = resolver_for(&db, file);
 
     let udvt = match resolver.resolve_name(&"Price".into(), None, 0) {
         Some(Resolution::Type(ty)) => ty.ty(),
         _ => panic!("Price should resolve to a type"),
     };
-    let unwrap = member(resolver.builtins(), udvt, "unwrap", MemberNamespace::Types)
-        .expect("unwrap");
-    assert!(
-        unwrap.doc(&db).contains("uint256"),
-        "got {:?}",
-        unwrap.doc(&db)
-    );
+    let unwrap = member(resolver.builtins(), udvt, "unwrap", MemberNamespace::Types).expect("unwrap");
+    assert!(unwrap.doc(&db).contains("uint256"), "got {:?}", unwrap.doc(&db));
 
     let array = Type::new(
         &db,
@@ -153,22 +110,11 @@ fn db_dependent_docs_name_the_actual_types() {
     .at_loc(&db, Location::Storage(RefKind::Reference))
     .ty();
     let push = member(resolver.builtins(), array, "push", MemberNamespace::Values).expect("push");
-    assert!(
-        push.doc(&db).contains("uint256"),
-        "got {:?}",
-        push.doc(&db)
-    );
+    assert!(push.doc(&db).contains("uint256"), "got {:?}", push.doc(&db));
 
-    let meta = Ty::new(
-        &db,
-        TyKind::Meta(Type::primitive(&db, Primitive::Uint(256))),
-    );
+    let meta = Ty::new(&db, TyKind::Meta(Type::primitive(&db, Primitive::Uint(256))));
     let max = member(resolver.builtins(), meta, "max", MemberNamespace::Types).expect("max");
-    assert!(
-        max.doc(&db).contains("uint256"),
-        "got {:?}",
-        max.doc(&db)
-    );
+    assert!(max.doc(&db).contains("uint256"), "got {:?}", max.doc(&db));
 }
 
 #[test]
@@ -228,9 +174,7 @@ fn static_tables_are_borrowed_parameterized_sets_owned() {
     // Fully-static tables borrow their `'static` table — no allocation.
     let address = Ty::primitive(&db, Primitive::Address);
     assert!(matches!(
-        resolver
-            .builtins()
-            .members(address, MemberNamespace::Values),
+        resolver.builtins().members(address, MemberNamespace::Values),
         Cow::Borrowed(_)
     ));
     // A fixed-size array is `.length`-only → static.
@@ -249,9 +193,7 @@ fn static_tables_are_borrowed_parameterized_sets_owned() {
     // are `Copy` ids — still borrowed.
     let payable = Ty::primitive(&db, Primitive::AddressPayable);
     assert!(matches!(
-        resolver
-            .builtins()
-            .members(payable, MemberNamespace::Values),
+        resolver.builtins().members(payable, MemberNamespace::Values),
         Cow::Borrowed(_)
     ));
     // A storage `T[]` specializes `push`/`pop` with the element `Type` →
@@ -266,15 +208,12 @@ fn static_tables_are_borrowed_parameterized_sets_owned() {
     .expect("array is nameable")
     .at_loc(&db, Location::Storage(RefKind::Reference))
     .ty();
-    assert!(matches!(
-        resolver.builtins().members(array, MemberNamespace::Values),
-        Cow::Owned(_)
-    ));
+    assert!(matches!(resolver.builtins().members(array, MemberNamespace::Values), Cow::Owned(_)));
 }
 
 #[test]
-fn owner_query_resolves_the_enclosing_container() {
-    // The conversion rules ask `db.owner` instead of walking the def-map.
+fn container_query_resolves_the_enclosing_container() {
+    // The conversion rules ask `db.container` instead of walking the def-map.
     let (db, file) = make_test_db(
         r#"
         contract C {
@@ -284,7 +223,7 @@ fn owner_query_resolves_the_enclosing_container() {
     );
     let f = find_function(&db, file, "f");
     let c = find_contract(&db, file, "C");
-    assert_eq!(db.owner(f), Some(c));
-    // A top-level item's owner is the file.
-    assert_eq!(db.owner(c), Some(DefId::File(file)));
+    assert_eq!(db.container(f), Some(c));
+    // A top-level item's container is the file.
+    assert_eq!(db.container(c), Some(DefId::File(file)));
 }

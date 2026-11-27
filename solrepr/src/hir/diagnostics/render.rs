@@ -20,25 +20,15 @@ pub(crate) fn collect_diagnostics(db: &dyn HirDb, file: File) -> Vec<Diagnostic>
         .diagnostics
         .iter()
         .filter(|error| error.declaration_file() == Some(file))
-        .map(|error| semantic_diagnostic(db, DefId::File(file), error))
+        .map(|error| semantic_diagnostic(db, error))
         .collect::<Vec<_>>();
-    for owner in analysis.data.owners(file) {
+    for def in analysis.data.file_defs(file) {
         // @NOTE safe: only called inside a tracked fn; see capabilities/diagnostics
         db.unwind_if_revision_cancelled();
-        let result = db.inference(owner);
-        diagnostics.extend(
-            result
-                .diagnostics
-                .iter()
-                .map(|error| semantic_diagnostic(db, owner, error)),
-        );
-        if matches!(owner, DefId::Contract(_) | DefId::Interface(_)) {
-            diagnostics.extend(
-                db.member_map(owner)
-                    .diagnostics
-                    .iter()
-                    .map(|error| semantic_diagnostic(db, owner, error)),
-            );
+        let result = db.inference(def);
+        diagnostics.extend(result.diagnostics.iter().map(|error| semantic_diagnostic(db, error)));
+        if matches!(def, DefId::Contract(_) | DefId::Interface(_)) {
+            diagnostics.extend(db.member_map(def).diagnostics.iter().map(|error| semantic_diagnostic(db, error)));
         }
     }
     diagnostics
@@ -60,9 +50,7 @@ pub(crate) fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     for mut diagnostic in diagnostics.drain(..) {
         match merged.last_mut() {
             Some(previous)
-                if previous.range == diagnostic.range
-                    && previous.code == diagnostic.code
-                    && previous.message == diagnostic.message =>
+                if previous.range == diagnostic.range && previous.code == diagnostic.code && previous.message == diagnostic.message =>
             {
                 for link in diagnostic.related {
                     if !previous.related.contains(&link) {
@@ -85,7 +73,7 @@ pub(crate) fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     *diagnostics = merged;
 }
 
-fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic) -> Diagnostic {
+fn semantic_diagnostic(db: &dyn HirDb, error: &SemanticDiagnostic) -> Diagnostic {
     let (code, message, related) = match error {
         SemanticDiagnostic::UnresolvedName { name, denials, .. } => (
             DiagnosticCode::UnresolvedName,
@@ -93,68 +81,39 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
             access_related(db, denials),
         ),
         SemanticDiagnostic::UnresolvedMember {
-            member,
-            receiver,
-            denials,
-            ..
+            member, receiver, denials, ..
         } => (
             DiagnosticCode::UnresolvedMember,
             format!("unresolved member `{member}` on `{}`", receiver.display(db)),
             access_related(db, denials),
         ),
-        SemanticDiagnostic::InheritanceFailure { problems, .. } => (
-            DiagnosticCode::InheritanceFailure,
-            bullet_list(problems),
-            Vec::new(),
-        ),
-        SemanticDiagnostic::UnresolvedType { name, .. } => (
-            DiagnosticCode::UnresolvedType,
-            format!("unresolved type `{name}`"),
-            Vec::new(),
-        ),
-        SemanticDiagnostic::AmbiguousMember {
-            name, declarations, ..
-        } => (
+        SemanticDiagnostic::InheritanceFailure { problems, .. } => (DiagnosticCode::InheritanceFailure, bullet_list(problems), Vec::new()),
+        SemanticDiagnostic::UnresolvedType { name, .. } => {
+            (DiagnosticCode::UnresolvedType, format!("unresolved type `{name}`"), Vec::new())
+        }
+        SemanticDiagnostic::AmbiguousMember { name, declarations, .. } => (
             DiagnosticCode::AmbiguousMember,
-            format!(
-                "member `{name}` is ambiguous: defined in multiple base contracts without a unique override"
-            ),
+            format!("member `{name}` is ambiguous: defined in multiple base contracts without a unique override"),
             conflict_links(db, declarations),
         ),
-        SemanticDiagnostic::InvalidArgumentCount {
-            expected, actual, ..
-        } => (
+        SemanticDiagnostic::InvalidArgumentCount { expected, actual, .. } => (
             DiagnosticCode::InvalidArgumentCount,
             format!("expected {expected} argument(s), found {actual}"),
             Vec::new(),
         ),
         SemanticDiagnostic::NoMatchingOverload { candidates, .. } => {
-            let related = candidates
-                .iter()
-                .filter_map(|c| callable_location(db, c))
-                .collect::<Vec<_>>();
-            (
-                DiagnosticCode::NoMatchingOverload,
-                "no matching overload".to_string(),
-                related,
-            )
+            let related = candidates.iter().filter_map(|c| callable_location(db, c)).collect::<Vec<_>>();
+            (DiagnosticCode::NoMatchingOverload, "no matching overload".to_string(), related)
         }
         SemanticDiagnostic::AmbiguousOverload { candidates, .. } => {
-            let related = candidates
-                .iter()
-                .filter_map(|c| callable_location(db, c))
-                .collect::<Vec<_>>();
+            let related = candidates.iter().filter_map(|c| callable_location(db, c)).collect::<Vec<_>>();
             (
                 DiagnosticCode::AmbiguousOverload,
                 format!("ambiguous overload ({} candidates)", candidates.len()),
                 related,
             )
         }
-        SemanticDiagnostic::InferenceFailure { message, .. } => (
-            DiagnosticCode::InferenceFailure,
-            message.clone(),
-            Vec::new(),
-        ),
+        SemanticDiagnostic::InferenceFailure { message, .. } => (DiagnosticCode::InferenceFailure, message.clone(), Vec::new()),
         SemanticDiagnostic::StateMutability {
             declared,
             required,
@@ -178,15 +137,9 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
                 })
                 .collect(),
         ),
-        SemanticDiagnostic::TypeMismatch {
-            expected, actual, ..
-        } => (
+        SemanticDiagnostic::TypeMismatch { expected, actual, .. } => (
             DiagnosticCode::TypeMismatch,
-            format!(
-                "type mismatch: expected `{}`, found `{}`",
-                expected.display(db),
-                actual.display(db)
-            ),
+            format!("type mismatch: expected `{}`, found `{}`", expected.display(db), actual.display(db)),
             Vec::new(),
         ),
         SemanticDiagnostic::UnknownNamedArgument { name, .. } => (
@@ -235,9 +188,7 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
             format!("`{name}` not found in `{path}`"),
             Vec::new(),
         ),
-        SemanticDiagnostic::MissingOverride {
-            declaration, bases, ..
-        } => (
+        SemanticDiagnostic::MissingOverride { declaration, bases, .. } => (
             DiagnosticCode::MissingOverride,
             format!(
                 "`{}` overrides an inherited declaration and must be marked `override`",
@@ -247,15 +198,10 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
         ),
         SemanticDiagnostic::UnnecessaryOverride { declaration, .. } => (
             DiagnosticCode::UnnecessaryOverride,
-            format!(
-                "`{}` is marked `override` but overrides nothing",
-                def_name(db, *declaration)
-            ),
+            format!("`{}` is marked `override` but overrides nothing", def_name(db, *declaration)),
             Vec::new(),
         ),
-        SemanticDiagnostic::NotVirtual {
-            declaration, base, ..
-        } => (
+        SemanticDiagnostic::NotVirtual { declaration, base, .. } => (
             DiagnosticCode::NotVirtual,
             format!(
                 "cannot override non-virtual `{}`; add `virtual` to the base declaration",
@@ -273,9 +219,7 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
             incompatible_override_message(db, *declaration, *mismatch),
             related_declarations(db, &[*base], "overridden declaration `{}` is here"),
         ),
-        SemanticDiagnostic::UnimplementedOverride {
-            declaration, base, ..
-        } => (
+        SemanticDiagnostic::UnimplementedOverride { declaration, base, .. } => (
             DiagnosticCode::UnimplementedOverride,
             {
                 let noun = match base {
@@ -287,17 +231,9 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
                     def_name(db, *base)
                 )
             },
-            related_declarations(
-                db,
-                &[*declaration],
-                "unimplemented declaration `{}` is here",
-            ),
+            related_declarations(db, &[*declaration], "unimplemented declaration `{}` is here"),
         ),
-        SemanticDiagnostic::OverrideListMismatch {
-            declaration,
-            expected,
-            ..
-        } => (
+        SemanticDiagnostic::OverrideListMismatch { declaration, expected, .. } => (
             DiagnosticCode::OverrideListMismatch,
             format!(
                 "`{}` must name the overridden contracts in `override(...)`",
@@ -305,13 +241,9 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
             ),
             related_declarations(db, expected, "`{}` must be listed in the override list"),
         ),
-        SemanticDiagnostic::OverrideConflict {
-            name, declarations, ..
-        } => (
+        SemanticDiagnostic::OverrideConflict { name, declarations, .. } => (
             DiagnosticCode::OverrideConflict,
-            format!(
-                "derived contract must override `{name}`: two or more bases define it with the same parameter types"
-            ),
+            format!("derived contract must override `{name}`: two or more bases define it with the same parameter types"),
             conflict_links(db, declarations),
         ),
         SemanticDiagnostic::UnimplementedContract { contract, .. } => (
@@ -322,16 +254,8 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
             ),
             Vec::new(),
         ),
-        SemanticDiagnostic::IllegalMember { violation, .. } => (
-            DiagnosticCode::IllegalMember,
-            violation.message().to_string(),
-            Vec::new(),
-        ),
-        SemanticDiagnostic::DuplicateMemberSlot {
-            declaration,
-            previous,
-            ..
-        } => (
+        SemanticDiagnostic::IllegalMember { violation, .. } => (DiagnosticCode::IllegalMember, violation.message().to_string(), Vec::new()),
+        SemanticDiagnostic::DuplicateMemberSlot { declaration, previous, .. } => (
             DiagnosticCode::DuplicateMemberSlot,
             format!(
                 "duplicate declaration of `{}` with the same parameter types",
@@ -339,33 +263,25 @@ fn semantic_diagnostic(db: &dyn HirDb, owner: DefId, error: &SemanticDiagnostic)
             ),
             related_declarations(db, &[*previous], "previous declaration is here"),
         ),
-        SemanticDiagnostic::InheritedMemberConflict {
-            name, declarations, ..
-        } => (
+        SemanticDiagnostic::InheritedMemberConflict { name, declarations, .. } => (
             DiagnosticCode::InheritedMemberConflict,
             format!("inherited member `{name}` is defined more than once"),
             conflict_links(db, declarations),
         ),
         SemanticDiagnostic::InvalidDataLocation { ty, location, .. } => {
-            let message = format!(
-                "data location `{location}` is invalid for type `{}`",
-                ty.peel_loc(db).display(db)
-            );
+            let message = format!("data location `{location}` is invalid for type `{}`", ty.peel_loc(db).display(db));
             (DiagnosticCode::InvalidDataLocation, message, Vec::new())
         }
         SemanticDiagnostic::DataLocationRequired { ty, .. } => (
             DiagnosticCode::DataLocationRequired,
-            format!(
-                "data location must be specified for type `{}`",
-                ty.peel_loc(db).display(db)
-            ),
+            format!("data location must be specified for type `{}`", ty.peel_loc(db).display(db)),
             Vec::new(),
         ),
     };
     Diagnostic {
         code,
         severity: Severity::Error,
-        range: anchor_range(db, owner, error.anchor()).unwrap_or(NodeRange { start: 0, end: 0 }),
+        range: anchor_range(db, error.anchor()).unwrap_or(NodeRange { start: 0, end: 0 }),
         message,
         related,
     }
@@ -397,13 +313,11 @@ fn effect_clause(required: Mutability) -> &'static str {
 fn conflict_links(db: &dyn HirDb, defs: &[DefId]) -> Vec<RelatedDiagnostic> {
     defs.iter()
         .filter_map(|def| {
-            let owner = db
-                .owner(*def)
-                .map_or_else(String::new, |owner| def_name(db, owner));
+            let container = db.container(*def).map_or_else(String::new, |container| def_name(db, container));
             Some(RelatedDiagnostic {
                 file: def.file_and_id().0,
                 range: def_range(db, *def)?,
-                message: format!("declared in `{owner}`"),
+                message: format!("declared in `{container}`"),
             })
         })
         .collect()
@@ -421,25 +335,17 @@ fn related_declarations(db: &dyn HirDb, defs: &[DefId], message: &str) -> Vec<Re
         .collect()
 }
 
-fn incompatible_override_message(
-    db: &dyn HirDb,
-    declaration: DefId,
-    mismatch: OverrideMismatch,
-) -> String {
+fn incompatible_override_message(db: &dyn HirDb, declaration: DefId, mismatch: OverrideMismatch) -> String {
     let name = def_name(db, declaration);
     match mismatch {
         OverrideMismatch::ReturnTypes => {
             format!("return types of `{name}` differ from the overridden declaration")
         }
         OverrideMismatch::ParameterLocations => {
-            format!(
-                "data locations of parameters of `{name}` differ; they must match when overriding a non-external function"
-            )
+            format!("data locations of parameters of `{name}` differ; they must match when overriding a non-external function")
         }
         OverrideMismatch::ReturnLocations => {
-            format!(
-                "data locations of return values of `{name}` differ; they must match when overriding a non-external function"
-            )
+            format!("data locations of return values of `{name}` differ; they must match when overriding a non-external function")
         }
         OverrideMismatch::Visibility => {
             format!("visibility of `{name}` cannot differ from the overridden declaration")
@@ -465,13 +371,10 @@ fn access_related(db: &dyn HirDb, denials: &[AccessDenial]) -> Vec<RelatedDiagno
         .filter_map(|denial| {
             let name = def_name(db, denial.def);
             // ``public`/`external` do not add visibility, since the denial is
-            // owner/access path based, so naming the visibility would contradict itself.
+            // declarer/access path based, so naming the visibility would contradict itself.
             let message = match denial.vis {
                 Visibility::Private | Visibility::Internal => {
-                    format!(
-                        "`{name}` is declared {} and is not visible here",
-                        denial.vis.as_str()
-                    )
+                    format!("`{name}` is declared {} and is not visible here", denial.vis.as_str())
                 }
                 Visibility::Public | Visibility::External => {
                     format!("`{name}` is not visible here")
@@ -516,8 +419,7 @@ fn callable_signature(db: &dyn HirDb, def: &DefId) -> Option<String> {
                 .iter()
                 .map(|id| {
                     let local = &data.parameters[*id];
-                    let ty = data.syntax_store.types[*local.ty_ref()]
-                        .to_string(&data.syntax_store.types);
+                    let ty = data.syntax_store.types[*local.ty_ref()].to_string(&data.syntax_store.types);
                     format!("{} {}", ty, local.name())
                 })
                 .collect::<Vec<_>>()
@@ -551,8 +453,7 @@ fn callable_signature(db: &dyn HirDb, def: &DefId) -> Option<String> {
                 .parameters
                 .iter()
                 .map(|(_, p)| {
-                    let ty =
-                        data.syntax_store.types[*p.ty_ref()].to_string(&data.syntax_store.types);
+                    let ty = data.syntax_store.types[*p.ty_ref()].to_string(&data.syntax_store.types);
                     format!("{} {}", ty, p.name())
                 })
                 .collect::<Vec<_>>()
@@ -565,8 +466,7 @@ fn callable_signature(db: &dyn HirDb, def: &DefId) -> Option<String> {
                 .parameters
                 .iter()
                 .map(|(_, p)| {
-                    let ty =
-                        data.syntax_store.types[*p.ty_ref()].to_string(&data.syntax_store.types);
+                    let ty = data.syntax_store.types[*p.ty_ref()].to_string(&data.syntax_store.types);
                     format!("{} {}", ty, p.name())
                 })
                 .collect::<Vec<_>>()
@@ -579,8 +479,7 @@ fn callable_signature(db: &dyn HirDb, def: &DefId) -> Option<String> {
                 .parameters
                 .iter()
                 .map(|(_, local)| {
-                    let ty = data.syntax_store.types[*local.ty_ref()]
-                        .to_string(&data.syntax_store.types);
+                    let ty = data.syntax_store.types[*local.ty_ref()].to_string(&data.syntax_store.types);
                     format!("{} {}", ty, local.name())
                 })
                 .collect::<Vec<_>>()

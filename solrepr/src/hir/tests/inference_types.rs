@@ -23,18 +23,14 @@ fn inherited_constant_in_signature_type_is_resolved() {
         .function_signature(function)
         .expect("inherited array bound should resolve without body inference");
     assert_eq!(signature.params.len(), 1);
-    let TyKind::Ref(array, Location::Memory) = signature.params[0].kind(&db)
-    else {
+    let TyKind::Ref(array, Location::Memory) = signature.params[0].kind(&db) else {
         panic!("expected a memory reference parameter");
     };
     let TyKind::Array { elem, size } = array.kind(&db) else {
         panic!("expected a fixed-size array parameter");
     };
     assert_eq!(size, Some(BigInt::from(4u8)));
-    assert!(matches!(
-        elem.kind(&db),
-        TyKind::Primitive(Primitive::Uint(256))
-    ));
+    assert!(matches!(elem.kind(&db), TyKind::Primitive(Primitive::Uint(256))));
 }
 
 /// The size expression in `uint256[N]` is an ordinary value expression:
@@ -63,17 +59,13 @@ fn array_size_expressions_infer_and_type_as_fixed_arrays() {
         let (db, file) = make_test_db(source);
         let def = find_function(&db, file, "f");
 
-        let offset = source
-            .find("uint256[N]")
-            .expect("the source should contain the array type")
-            + "uint256[".len();
+        let offset = source.find("uint256[N]").expect("the source should contain the array type") + "uint256[".len();
         let range = NodeRange {
             start: offset as u32,
             end: offset as u32 + 1,
         };
 
-        let id = semantic_at(&db, def, range)
-            .unwrap_or_else(|| panic!("the array size should map to a semantic id"));
+        let id = semantic_at(&db, def, range).unwrap_or_else(|| panic!("the array size should map to a semantic id"));
         let SemanticId::Expr(expr) = id else {
             panic!("the array size should be an expression");
         };
@@ -103,19 +95,12 @@ fn array_size_expressions_infer_and_type_as_fixed_arrays() {
             "#,
     );
     let inference = function_inference(&db, file);
-    assert!(
-        inference.diagnostics.is_empty(),
-        "{:?}",
-        codes(&inference),
-    );
+    assert!(inference.diagnostics.is_empty(), "{:?}", codes(&inference),);
     let fixed = expr_results(&inference).any(|(_, ty, _)| {
         matches!(ty.kind(&db), TyKind::Type(inner)
             if matches!(inner.peel_loc(&db).kind(&db), TyKind::Array { size: Some(n), .. } if n == BigInt::from(4u8)))
     });
-    assert!(
-        fixed,
-        "expected uint256[N] to type as a fixed-size array of 4"
-    );
+    assert!(fixed, "expected uint256[N] to type as a fixed-size array of 4");
 }
 
 #[test]
@@ -138,9 +123,7 @@ fn invalid_data_location_reports_diagnostic() {
     let DefId::Function(id) = find_function(&db, file, "f") else {
         panic!("fixture function should exist");
     };
-    let range = db
-        .body_source_map(BodyOwnerId::Function(id))
-        .ty_ref_ranges[*ty_ref_id];
+    let range = db.body_source_map(BodyOwnerId::Function(id)).ty_ref_ranges[*ty_ref_id];
     let text = db.text(file);
     assert!(text[range.start as usize..range.end as usize].contains("mapping"));
 }
@@ -159,9 +142,9 @@ fn qualified_types_lower_to_identifier_chains() {
             }
             "#,
     );
-    let owner = find_function(&db, file, "f");
-    let DefId::Function(function_id) = owner else {
-        panic!("expected function owner");
+    let def = find_function(&db, file, "f");
+    let DefId::Function(function_id) = def else {
+        panic!("expected function def");
     };
     let body = db.body_map(BodyOwnerId::Function(function_id));
     let local_id = body.scopes[body.root_scope]
@@ -184,14 +167,8 @@ fn qualified_types_lower_to_identifier_chains() {
     let source_map = db.body_source_map(BodyOwnerId::Function(function_id));
     let inner_range = source_map.ty_ref_ranges[ty_ref_id];
     let outer_range = source_map.ty_ref_ranges[base_id];
-    assert_eq!(
-        &text[inner_range.start as usize..inner_range.end as usize],
-        "Inner"
-    );
-    assert_eq!(
-        &text[outer_range.start as usize..outer_range.end as usize],
-        "Outer"
-    );
+    assert_eq!(&text[inner_range.start as usize..inner_range.end as usize], "Inner");
+    assert_eq!(&text[outer_range.start as usize..outer_range.end as usize], "Outer");
 }
 
 // ── Constant evaluation ─────────────────────────────────────────────────
@@ -224,10 +201,7 @@ fn array_sizes_fold_constant_expressions() {
             "#,
             8,
         ),
-        (
-            "contract C { function f() external { uint256[2**8] memory a; } }",
-            256,
-        ),
+        ("contract C { function f() external { uint256[2**8] memory a; } }", 256),
         (
             // Type-name member access follows internal scoping — `D.N` only
             // reaches `C` when `C` is `D` or derived from it.
@@ -290,11 +264,7 @@ fn array_sizes_fold_constant_expressions() {
     {
         let (db, file) = make_test_db(&type_text);
         let inference = function_inference(&db, file);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{type_text}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{type_text}: {:?}", codes(&inference));
         let fixed = inference
             .types
             .iter()
@@ -325,9 +295,7 @@ fn invalid_array_lengths_are_reported() {
     }
 
     for type_text in ["uint[-1]", "uint[1/2]", "uint[0]", "uint[type(int8).min]"] {
-        let source = format!(
-            "contract C {{ function f() external {{ {type_text} memory a; }} }}"
-        );
+        let source = format!("contract C {{ function f() external {{ {type_text} memory a; }} }}");
         let (db, file) = make_test_db(&source);
         let inference = function_inference(&db, file);
         assert!(
@@ -360,11 +328,7 @@ fn a_nested_constant_failure_is_reported_once() {
         count,
         1,
         "{:?}",
-        inference
-            .diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>()
+        inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
     );
 }
 
@@ -423,9 +387,12 @@ fn variable_declarations_are_checked() {
 
     let (db, file) = make_test_db("contract C { uint x = \"abc\"; }");
     let inference = var_inference(&db, file, "x");
-    assert!(inference.diagnostics.iter().any(|diagnostic| {
-        matches!(diagnostic, SemanticDiagnostic::TypeMismatch { .. })
-    }));
+    assert!(
+        inference
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { matches!(diagnostic, SemanticDiagnostic::TypeMismatch { .. }) })
+    );
 
     for source in ["contract C { uint a = a; }", "contract C { uint[a] a; }"] {
         let (db, file) = make_test_db(source);
@@ -453,11 +420,7 @@ fn constant_cycles_are_reported_at_each_declaration() {
                     if message.contains("cyclic dependency"))
             }),
             "{name}: {:?}",
-            inference
-                .diagnostics
-                .iter()
-                .map(SemanticDiagnostic::code)
-                .collect::<Vec<_>>()
+            inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
         );
     }
 }
@@ -483,17 +446,14 @@ fn opaque_constants_stay_silent() {
         assert!(
             inference.diagnostics.is_empty(),
             "{name}: {:?}",
-            inference
-                .diagnostics
-                .iter()
-                .map(SemanticDiagnostic::code)
-                .collect::<Vec<_>>()
+            inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
         );
     }
     let inference = var_inference(&db, file, "SLOT");
-    assert!(expr_results(&inference).any(|(_, ty, _)| {
-        matches!(ty.kind(&db), TyKind::Primitive(Primitive::FixedBytes(32)))
-    }), "the keccak256 call should still infer to bytes32");
+    assert!(
+        expr_results(&inference).any(|(_, ty, _)| { matches!(ty.kind(&db), TyKind::Primitive(Primitive::FixedBytes(32))) }),
+        "the keccak256 call should still infer to bytes32"
+    );
 }
 
 /// A shift past the fold width cap keeps an exact-enough kind, so the
@@ -509,11 +469,7 @@ fn an_oversized_shift_is_rejected_on_width() {
             .iter()
             .any(|diagnostic| matches!(diagnostic, SemanticDiagnostic::TypeMismatch { .. })),
         "{:?}",
-        inference
-            .diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>()
+        inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
     );
 
     let (db, file) = make_test_db("contract C { uint constant A = 0 << 4_000_000_000; }");
@@ -521,11 +477,7 @@ fn an_oversized_shift_is_rejected_on_width() {
     assert!(
         inference.diagnostics.is_empty(),
         "{:?}",
-        inference
-            .diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>()
+        inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
     );
 }
 
@@ -558,8 +510,7 @@ fn type_name_resolutions_are_never_modules_or_tuples() {
     );
     // Named elements are plain `Type` resolutions.
     assert!(
-        expr_results(&inference)
-            .any(|(_, _, resolution)| matches!(resolution, Some(Resolution::Type(_)))),
+        expr_results(&inference).any(|(_, _, resolution)| matches!(resolution, Some(Resolution::Type(_)))),
         "expected the tuple's type names to resolve as `Type`"
     );
     // `Type` is the nameable subset only: modules and tuples have variants
@@ -613,31 +564,19 @@ fn unresolved_type_segments_report_once_on_the_failing_segment() {
             .diagnostics
             .iter()
             .filter_map(|d| match d {
-                SemanticDiagnostic::UnresolvedType { name, ty_ref_id, .. } => {
-                    Some((name.as_str(), *ty_ref_id))
-                }
+                SemanticDiagnostic::UnresolvedType { name, ty_ref_id, .. } => Some((name.as_str(), *ty_ref_id)),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            missing.len(),
-            1,
-            "{source}: expected exactly one unresolved-type diagnostic"
-        );
+        assert_eq!(missing.len(), 1, "{source}: expected exactly one unresolved-type diagnostic");
         let (found, ty_ref_id) = missing[0];
         assert_eq!(found, name, "{source}");
         let DefId::Function(id) = find_function(&db, file, "f") else {
             panic!("{source}: fixture function should exist");
         };
-        let range = db
-            .body_source_map(BodyOwnerId::Function(id))
-            .ty_ref_ranges[ty_ref_id];
+        let range = db.body_source_map(BodyOwnerId::Function(id)).ty_ref_ranges[ty_ref_id];
         let text = db.text(file);
-        assert_eq!(
-            &text[range.start as usize..range.end as usize],
-            name,
-            "{source}"
-        );
+        assert_eq!(&text[range.start as usize..range.end as usize], name, "{source}");
     }
 }
 
@@ -659,11 +598,7 @@ fn library_internal_members_reach_any_caller() {
             "#,
     );
     let internal = named_function_inference(&db, file, "f");
-    assert!(
-        internal.diagnostics.is_empty(),
-        "{:?}",
-        codes(&internal)
-    );
+    assert!(internal.diagnostics.is_empty(), "{:?}", codes(&internal));
     let private = named_function_inference(&db, file, "g");
     assert!(
         codes(&private).contains(&DiagnosticCode::UnresolvedMember),
@@ -717,11 +652,7 @@ fn members_convert_to_external_function_pointers() {
             "#,
     );
     let inference = named_function_inference(&db, file, "f");
-    assert!(
-        inference.diagnostics.is_empty(),
-        "unexpected: {:?}",
-        codes(&inference)
-    );
+    assert!(inference.diagnostics.is_empty(), "unexpected: {:?}", codes(&inference));
 
     let (db, file) = make_test_db(
         "contract C { function f(address a, bytes memory m) external { \
@@ -750,11 +681,7 @@ fn bytes_concat_accepts_a_fixed_bytes_argument() {
     assert!(
         inference.diagnostics.is_empty(),
         "unexpected: {:?}",
-        inference
-            .diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>()
+        inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
     );
 }
 
@@ -804,11 +731,7 @@ fn casts_keep_the_source_location() {
     for source in accepts {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{source}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{source}: {:?}", codes(&inference));
     }
 
     // A slice cast is OZ's `draft-ERC7739Utils`: `string(encodedSignature[a:b])`
@@ -836,10 +759,7 @@ fn casts_keep_the_source_location() {
                 if matches!(inner.kind(&db), TyKind::Primitive(Primitive::String))
         )
     });
-    assert!(
-        calldata_string,
-        "`string(slice)` should type as `string calldata`"
-    );
+    assert!(calldata_string, "`string(slice)` should type as `string calldata`");
 
     for source in [
         // memory source -> calldata target
@@ -848,10 +768,7 @@ fn casts_keep_the_source_location() {
         // storage source -> calldata target
         "contract C { bytes sb; function f() external { bytes calldata bad = bytes(sb); } }",
     ] {
-        assert!(
-            reports_type_mismatch(source, "f"),
-            "{source} must report a mismatch"
-        );
+        assert!(reports_type_mismatch(source, "f"), "{source} must report a mismatch");
     }
 }
 
@@ -862,7 +779,7 @@ fn casts_keep_the_source_location() {
 /// callable through an instance, like `address.call`, convert); and a
 /// type-namespace reference (`L.f`, `D.f`) is a pointer only for an *internal*
 /// library function — a public library function is a delegatecall, not a
-/// jump, and a contract declaration has no mobile type. The owner is captured
+/// jump, and a contract declaration has no mobile type. The def is captured
 /// in the `ViaType` kind at resolution time, so `Fn::apply_call_kind` reads
 /// it off the kind.
 #[test]
@@ -930,11 +847,7 @@ fn references_that_are_not_function_values() {
             "contract C {{ function take(function() internal pure returns (uint) ptr) \
              internal {{}} function run() external {{ {call}; }} }} {decl}"
         );
-        assert_eq!(
-            reports_type_mismatch(&source, "run"),
-            *expect_mismatch,
-            "{label}"
-        );
+        assert_eq!(reports_type_mismatch(&source, "run"), *expect_mismatch, "{label}");
     }
 }
 
@@ -1052,11 +965,7 @@ fn function_type_conversions_follow_the_documented_rule() {
             "contract C {{ {decl} function take({param} ptr) internal {{}} \
              function f() external {{ {call}; }} }}"
         );
-        assert_eq!(
-            reports_type_mismatch(&source, "f"),
-            *expect_mismatch,
-            "{label}"
-        );
+        assert_eq!(reports_type_mismatch(&source, "f"), *expect_mismatch, "{label}");
     }
 
     // A `memory`/`calldata`/`storage` keyword inside a function-type parameter
@@ -1129,9 +1038,7 @@ fn call_options_reach_their_call_only() {
 /// unlocated `Struct`/`Array` into expression inference.
 #[test]
 fn function_type_locations_are_validated() {
-    let (db, file) = make_test_db(
-        "contract C { function f(function(uint memory) internal ptr) internal {} }",
-    );
+    let (db, file) = make_test_db("contract C { function f(function(uint memory) internal ptr) internal {} }");
     let inference = named_function_inference(&db, file, "f");
     assert!(
         inference
@@ -1158,8 +1065,7 @@ fn function_type_locations_are_validated() {
             codes(&inference)
         );
         assert!(
-            !expr_results(&inference)
-                .any(|(_, ty, _)| matches!(ty.kind(&db), TyKind::Ref(_, Location::Stack))),
+            !expr_results(&inference).any(|(_, ty, _)| matches!(ty.kind(&db), TyKind::Ref(_, Location::Stack))),
             "{source} must never mint a stack-located Ref"
         );
     }
@@ -1186,11 +1092,7 @@ fn function_values_convert_to_function_pointers() {
     );
     for name in ["assignIt", "passIt"] {
         let inference = named_function_inference(&db, file, name);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{name}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
     }
 
     let (db, file) = make_test_db(
@@ -1223,34 +1125,22 @@ fn function_values_convert_to_function_pointers() {
 /// target's type.
 #[test]
 fn assignments_lower_with_their_operator_and_type_as_the_target() {
-    let (db, file) =
-        make_test_db("contract C { function f() external { uint x; x = 1; x += 2; x <<= 3; } }");
+    let (db, file) = make_test_db("contract C { function f() external { uint x; x = 1; x += 2; x <<= 3; } }");
     let def = find_function(&db, file, "f");
-    let ops: Vec<Option<BinaryOp>> = assignments(&db, def)
-        .into_iter()
-        .map(|(_, op, _)| op)
-        .collect();
+    let ops: Vec<Option<BinaryOp>> = assignments(&db, def).into_iter().map(|(_, op, _)| op).collect();
     assert_eq!(ops, vec![None, Some(BinaryOp::Add), Some(BinaryOp::Shl)]);
 
-    let (db, file) =
-        make_test_db("contract C { function f() external { uint x; uint y; x = y; } }");
+    let (db, file) = make_test_db("contract C { function f() external { uint x; uint y; x = y; } }");
     let def = find_function(&db, file, "f");
     let inference = named_function_inference(&db, file, "f");
     assert!(inference.diagnostics.is_empty(), "{:?}", codes(&inference));
     let assigned = assignments(&db, def);
     assert_eq!(assigned.len(), 1);
     let (lhs, _, ty) = assigned[0];
-    assert!(matches!(
-        ty.kind(&db),
-        TyKind::Primitive(Primitive::Uint(256))
-    ));
-    assert!(matches!(
-        inference.expr_resolution(lhs),
-        Some(Resolution::Local(_))
-    ));
+    assert!(matches!(ty.kind(&db), TyKind::Primitive(Primitive::Uint(256))));
+    assert!(matches!(inference.expr_resolution(lhs), Some(Resolution::Local(_))));
 
-    let (db, file) =
-        make_test_db("contract C { function f() external { uint x; uint y; y = (x = 1); } }");
+    let (db, file) = make_test_db("contract C { function f() external { uint x; uint y; y = (x = 1); } }");
     let def = find_function(&db, file, "f");
     let inference = named_function_inference(&db, file, "f");
     assert!(inference.diagnostics.is_empty(), "{:?}", codes(&inference));
@@ -1365,11 +1255,7 @@ fn assignments_that_are_accepted() {
     for source in fixtures {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{source}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{source}: {:?}", codes(&inference));
     }
 }
 
@@ -1387,10 +1273,7 @@ fn assignments_that_are_rejected() {
     }
 
     let rejects: Rejects = &[
-        (
-            "contract C { function f() external { 1 = 2; } }",
-            not_assignable,
-        ),
+        ("contract C { function f() external { 1 = 2; } }", not_assignable),
         (
             "contract C { function g() internal pure returns (uint) { return 1; } function f() external { g() = 2; } }",
             not_assignable,
@@ -1429,10 +1312,7 @@ fn assignments_that_are_rejected() {
             "contract C { function f(string calldata c, string memory m) external { c = m; } }",
             mismatch,
         ),
-        (
-            "contract C { function f() external { uint x; x = \"abc\"; } }",
-            mismatch,
-        ),
+        ("contract C { function f() external { uint x; x = \"abc\"; } }", mismatch),
         // Tuple destructuring arity — the hole counts, so `(x, , y)` needs a
         // three-component source (solc: "not implicitly convertible").
         (
@@ -1462,11 +1342,7 @@ fn assignments_that_are_rejected() {
     for (source, expected) in rejects {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
-        assert!(
-            inference.diagnostics.iter().any(expected),
-            "{source}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.iter().any(expected), "{source}: {:?}", codes(&inference));
     }
 }
 
@@ -1489,11 +1365,7 @@ fn initializers_are_conversion_checked() {
     for source in accepts {
         let (db, file) = make_test_db(source);
         let inference = named_function_inference(&db, file, "f");
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{source}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{source}: {:?}", codes(&inference));
     }
 
     let rejects = [
@@ -1690,9 +1562,7 @@ fn integer_literals_convert_to_fixed_bytes_only_at_zero_or_exact_width() {
     let f = named_function_inference(&db, file, "f");
     assert!(f.diagnostics.is_empty(), "{:?}", codes(&f));
 
-    let (db, file) = make_test_db(
-        "contract C { function g(bytes32 b) internal pure {} function f() internal { g(1); g(0xff); } }",
-    );
+    let (db, file) = make_test_db("contract C { function g(bytes32 b) internal pure {} function f() internal { g(1); g(0xff); } }");
     let f = named_function_inference(&db, file, "f");
     assert_eq!(
         f.diagnostics
@@ -1720,12 +1590,7 @@ fn located_slots_never_nest_references() {
     );
 
     let inference = named_function_inference(&db, file, "f");
-    let local = inference
-        .locals
-        .iter()
-        .map(|(_, ty)| *ty)
-        .next()
-        .expect("the parameter has a type");
+    let local = inference.locals.iter().map(|(_, ty)| *ty).next().expect("the parameter has a type");
     let TyKind::Ref(array, Location::Memory) = local.kind(&db) else {
         panic!("expected `string[] memory`, got `{}`", local.display(&db));
     };
@@ -1807,9 +1672,7 @@ fn udvt_conversion_keeps_the_argument_constness_rule() {
 
     // The declaration-level rule: an `immutable` is not a compile-time
     // constant, so wrapping one does not make the initialiser one.
-    let (db, file) = make_test_db(
-        "type U is uint8; contract C { uint8 immutable I = 4; U constant N = U.wrap(I); }",
-    );
+    let (db, file) = make_test_db("type U is uint8; contract C { uint8 immutable I = 4; U constant N = U.wrap(I); }");
     let diagnostics = collect_diagnostics(&db, file);
     assert!(
         diagnostics
@@ -1899,17 +1762,14 @@ fn a_constant_must_be_a_value_type_or_a_byte_array() {
         assert!(
             !diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("compile-time constant")
-                    || diagnostic.message.contains("Uninitialized")),
+                .any(|diagnostic| diagnostic.message.contains("compile-time constant") || diagnostic.message.contains("Uninitialized")),
             "{source}: {diagnostics:?}"
         );
     }
 
     // A function type is a value type, so the rule does not fire — solc
     // rejects this one later, on the conversion (7407).
-    let (db, file) = make_test_db(
-        "contract C { function() external constant fp = C.g; function g() external {} }",
-    );
+    let (db, file) = make_test_db("contract C { function() external constant fp = C.g; function g() external {} }");
     let diagnostics = collect_diagnostics(&db, file);
     assert!(
         !diagnostics
@@ -1953,9 +1813,7 @@ fn literal_arithmetic_folds_into_its_fitness() {
         let (db, file) = make_test_db(source);
         let diagnostics = collect_diagnostics(&db, file);
         assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains(needle)),
+            diagnostics.iter().any(|diagnostic| diagnostic.message.contains(needle)),
             "{source}: {diagnostics:?}"
         );
     }
@@ -1982,12 +1840,7 @@ fn an_interface_variable_is_dropped_entirely() {
             "#,
     );
     let diagnostics = collect_diagnostics(&db, file);
-    let count = |needle: &str| {
-        diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.message.contains(needle))
-            .count()
-    };
+    let count = |needle: &str| diagnostics.iter().filter(|diagnostic| diagnostic.message.contains(needle)).count();
 
     // The declarations themselves, one each — reported by the def map's
     // membership table, not by inference.
@@ -2120,10 +1973,9 @@ fn shift_and_power_results_follow_the_left_operand() {
         let (db, file) = make_test_db(source);
         let diagnostics = collect_diagnostics(&db, file);
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic
-                .message
-                .contains("not allowed")
-                || diagnostic.message.contains("type mismatch")),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("not allowed") || diagnostic.message.contains("type mismatch")),
             "{source}: {diagnostics:?}"
         );
     }
@@ -2173,9 +2025,7 @@ fn payable_conversion_needs_a_receive_function() {
         let (db, file) = make_test_db(source);
         let diagnostics = collect_diagnostics(&db, file);
         assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("not allowed")),
+            diagnostics.iter().any(|diagnostic| diagnostic.message.contains("not allowed")),
             "{source}: {diagnostics:?}"
         );
     }
@@ -2195,9 +2045,7 @@ fn division_by_zero_needs_a_literal_divisor() {
         let (db, file) = make_test_db(source);
         let diagnostics = collect_diagnostics(&db, file);
         assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("by zero")),
+            diagnostics.iter().any(|diagnostic| diagnostic.message.contains("by zero")),
             "{source}: {diagnostics:?}"
         );
     }
@@ -2220,9 +2068,7 @@ fn division_by_zero_needs_a_literal_divisor() {
     let (db, file) = make_test_db("contract C { uint256 constant A = 1 / uint256(0); }");
     let diagnostics = collect_diagnostics(&db, file);
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("by zero")),
+        diagnostics.iter().any(|diagnostic| diagnostic.message.contains("by zero")),
         "{diagnostics:?}"
     );
 }
@@ -2251,14 +2097,28 @@ fn a_fold_does_not_build_an_oversized_integer() {
 #[test]
 fn udvt_constants_round_trip_through_wrap_and_unwrap() {
     for (label, decls, body) in [
-        ("unwrap of const", "Price constant P = Price.wrap(5);", "uint[Price.unwrap(P)] memory a; uint[5] memory b = a;"),
-        ("unwrap then arith", "Price constant P = Price.wrap(5); uint constant A = Price.unwrap(P) + 1;", "uint[A] memory a; uint[6] memory b = a;"),
-        ("wrap(unwrap + 1)", "Price constant P = Price.wrap(5); Price constant Q = Price.wrap(Price.unwrap(P) + 1);", "uint[Price.unwrap(Q)] memory a; uint[6] memory b = a;"),
-        ("wrap of a const underlying", "uint128 constant N = 9; Price constant P = Price.wrap(N);", "uint[Price.unwrap(P)] memory a; uint[9] memory b = a;"),
+        (
+            "unwrap of const",
+            "Price constant P = Price.wrap(5);",
+            "uint[Price.unwrap(P)] memory a; uint[5] memory b = a;",
+        ),
+        (
+            "unwrap then arith",
+            "Price constant P = Price.wrap(5); uint constant A = Price.unwrap(P) + 1;",
+            "uint[A] memory a; uint[6] memory b = a;",
+        ),
+        (
+            "wrap(unwrap + 1)",
+            "Price constant P = Price.wrap(5); Price constant Q = Price.wrap(Price.unwrap(P) + 1);",
+            "uint[Price.unwrap(Q)] memory a; uint[6] memory b = a;",
+        ),
+        (
+            "wrap of a const underlying",
+            "uint128 constant N = 9; Price constant P = Price.wrap(N);",
+            "uint[Price.unwrap(P)] memory a; uint[9] memory b = a;",
+        ),
     ] {
-        let src = format!(
-            "type Price is uint128;\n{decls}\ncontract C {{ function f() public pure {{ {body} }} }}"
-        );
+        let src = format!("type Price is uint128;\n{decls}\ncontract C {{ function f() public pure {{ {body} }} }}");
         let (db, file) = make_test_db(&src);
         let codes: Vec<_> = collect_diagnostics(&db, file).iter().map(|d| d.code).collect();
         assert!(codes.is_empty(), "{label}: {codes:?}");

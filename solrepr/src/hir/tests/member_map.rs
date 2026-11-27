@@ -1,10 +1,10 @@
 use camino::Utf8PathBuf;
 
-use crate::hir::member_map::*;
 use crate::hir::builtins::MemberNamespace;
-use crate::ir::def_map::DefNamespace;
 use crate::hir::diagnostics::{DiagnosticCode, SemanticDiagnostic};
+use crate::hir::member_map::*;
 use crate::hir::tests::helper::{find_contract, find_function, make_test_db};
+use crate::ir::def_map::DefNamespace;
 use crate::salsa::HirDb;
 
 /// Inheritance diagnostics belong to the contract's member map, so a
@@ -50,9 +50,7 @@ fn overloaded_event_conflicts_are_reported_per_slot() {
     let conflicts: Vec<_> = diagnostics
         .iter()
         .filter_map(|diagnostic| match diagnostic {
-            SemanticDiagnostic::InheritedMemberConflict { declarations, .. } => {
-                Some(declarations.len())
-            }
+            SemanticDiagnostic::InheritedMemberConflict { declarations, .. } => Some(declarations.len()),
             _ => None,
         })
         .collect();
@@ -72,8 +70,7 @@ fn every_unresolved_base_is_reported() {
         .collect();
     assert_eq!(problems.len(), 2, "{problems:?}");
     assert!(
-        problems.iter().any(|problem| problem.contains("`M1`"))
-            && problems.iter().any(|problem| problem.contains("`M2`")),
+        problems.iter().any(|problem| problem.contains("`M1`")) && problems.iter().any(|problem| problem.contains("`M2`")),
         "{problems:?}"
     );
 }
@@ -81,9 +78,7 @@ fn every_unresolved_base_is_reported() {
 /// Member inference does not repeat the contract's inheritance diagnostics.
 #[test]
 fn function_inference_inside_a_broken_contract_has_no_base_diagnostics() {
-    let (db, file) = make_test_db(
-        "contract Child is MissingBase { function f() external pure returns (uint) { return 1; } }",
-    );
+    let (db, file) = make_test_db("contract Child is MissingBase { function f() external pure returns (uint) { return 1; } }");
     let inference = db.inference(find_function(&db, file, "f"));
     let codes: Vec<_> = inference.diagnostics.iter().map(SemanticDiagnostic::code).collect();
     assert!(codes.is_empty(), "{codes:?}");
@@ -105,9 +100,7 @@ fn type_slots<'a>(members: &'a MemberMap, name: &str) -> &'a [MemberSlot] {
 }
 
 fn has_code(diagnostics: &[SemanticDiagnostic], code: DiagnosticCode) -> bool {
-    diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code() == code)
+    diagnostics.iter().any(|diagnostic| diagnostic.code() == code)
 }
 
 #[test]
@@ -126,10 +119,11 @@ fn inherited_overload_survives_alongside_own_overload() {
     assert!(members.diagnostics.is_empty());
     let slots = value_slots(&members.data, "f");
     assert_eq!(slots.len(), 2);
-    assert!(slots.iter().any(|slot| {
-        slot.effective()
-            .is_some_and(|def| db.owner(def) == Some(derived))
-    }));
+    assert!(
+        slots
+            .iter()
+            .any(|slot| { slot.effective().is_some_and(|def| db.container(def) == Some(derived)) })
+    );
     assert!(slots.iter().all(|slot| slot.effective().is_some()));
 }
 
@@ -148,9 +142,7 @@ fn override_retains_lineage_and_selects_the_derived_declaration() {
     };
     assert!(slot.effective().is_some());
     assert_eq!(slot.candidates.len(), 2);
-    let effective = slot
-        .effective()
-        .expect("valid slot has an effective declaration");
+    let effective = slot.effective().expect("valid slot has an effective declaration");
     let derived = members
         .declarations
         .get(&effective)
@@ -211,9 +203,11 @@ fn distinct_conflicts_on_one_contract_all_report() {
     assert_eq!(conflicts.len(), 2);
     assert!(conflicts.iter().all(|d| d.anchor() == conflicts[0].anchor()));
     for member in ["f", "g"] {
-        assert!(conflicts.iter().any(|diagnostic| {
-            matches!(*diagnostic, SemanticDiagnostic::OverrideConflict { name, .. } if name.as_str() == member)
-        }));
+        assert!(
+            conflicts
+                .iter()
+                .any(|diagnostic| { matches!(*diagnostic, SemanticDiagnostic::OverrideConflict { name, .. } if name.as_str() == member) })
+        );
     }
 }
 
@@ -251,21 +245,9 @@ fn getter_and_external_function_share_one_callable_slot() {
     };
     assert!(slot.effective().is_some());
     assert_eq!(slot.candidates.len(), 2);
-    let declarations: Vec<_> = slot
-        .candidates
-        .iter()
-        .map(|def| &members.declarations[def])
-        .collect();
-    assert!(
-        declarations
-            .iter()
-            .any(|decl| decl.namespace == DefNamespace::Functions)
-    );
-    assert!(
-        declarations
-            .iter()
-            .any(|decl| decl.namespace == DefNamespace::Variables)
-    );
+    let declarations: Vec<_> = slot.candidates.iter().map(|def| &members.declarations[def]).collect();
+    assert!(declarations.iter().any(|decl| decl.namespace == DefNamespace::Functions));
+    assert!(declarations.iter().any(|decl| decl.namespace == DefNamespace::Variables));
     assert_eq!(
         slot.effective(),
         declarations
@@ -372,10 +354,7 @@ fn inherited_non_overloadable_declarations_remain_an_explicit_conflict() {
         "#,
         "C",
     );
-    assert!(has_code(
-        &diagnostics,
-        DiagnosticCode::InheritedMemberConflict
-    ));
+    assert!(has_code(&diagnostics, DiagnosticCode::InheritedMemberConflict));
     let [slot] = type_slots(&members, "Item") else {
         panic!("expected one non-overloadable type slot");
     };
@@ -393,10 +372,7 @@ fn inherited_non_overloadable_variables_are_kept_as_conflicts() {
         "#,
         "C",
     );
-    assert!(has_code(
-        &diagnostics,
-        DiagnosticCode::InheritedMemberConflict
-    ));
+    assert!(has_code(&diagnostics, DiagnosticCode::InheritedMemberConflict));
     let [slot] = value_slots(&members, "state") else {
         panic!("expected one variable conflict slot");
     };
@@ -414,10 +390,7 @@ fn private_base_variables_do_not_collide_with_derived() {
         "#,
         "C",
     );
-    assert!(!has_code(
-        &diagnostics,
-        DiagnosticCode::InheritedMemberConflict
-    ));
+    assert!(!has_code(&diagnostics, DiagnosticCode::InheritedMemberConflict));
     let [slot] = value_slots(&members, "state") else {
         panic!("expected one variable slot");
     };

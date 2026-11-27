@@ -1,16 +1,14 @@
-use std::borrow::Cow;
 use num_bigint::{BigInt, Sign};
+use std::borrow::Cow;
 
 use crate::ast::{EnumId, StructId};
 use crate::hir::builtins::{BuiltinFn, ParamSchema};
+use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::hir::exprs::{Expr, ExprId, Name, NamedValues};
-use crate::hir::syntax_store::SyntaxStore;
+use crate::hir::item_data::SemanticId;
 use crate::hir::resolution::{Callable, CallableOrigin, Resolution};
-use crate::hir::diagnostics::{DiagnosticAnchor, SemanticDiagnostic};
-use crate::hir::types::{
-    CallKind, Callee, Fn, Location, Mutability, Primitive, Ty, TyKind,
-    Type, ViaTypeKind, Visibility, option_type,
-};
+use crate::hir::syntax_store::SyntaxStore;
+use crate::hir::types::{CallKind, Callee, Fn, Location, Mutability, Primitive, Ty, TyKind, Type, ViaTypeKind, Visibility, option_type};
 use crate::ir::def_map::{CallableDefId, DefId, TypeDefId};
 use crate::salsa::HirDb;
 
@@ -26,17 +24,10 @@ enum CallOutcome<'a> {
     Selected(&'a Callable),
     SelectedPtr(&'a Fn<Type>),
     NotInvocable,
-    ArityMismatch {
-        expected: usize,
-        actual: usize,
-    },
+    ArityMismatch { expected: usize, actual: usize },
     ArgumentMismatch(Box<[ArgumentMismatch]>),
-    NoMatchingOverload {
-        candidates: &'a [Callable],
-    },
-    AmbiguousOverload {
-        candidates: Box<[&'a Callable]>,
-    },
+    NoMatchingOverload { candidates: &'a [Callable] },
+    AmbiguousOverload { candidates: Box<[&'a Callable]> },
     Unusable,
 }
 
@@ -88,30 +79,16 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// The conversion cost of `actual` filling `expected`, or `None`. `bytes.concat` is the one
     /// exception: it takes a fixed `bytesN` where `bytes(bytes32(0))` is rejected.
     fn argument_cost(&self, callable: &Callable, actual: Ty, expected: Ty) -> Option<u8> {
-        actual
-            .implicitly_converts_to(expected, self.db)
-            .or_else(|| {
-                (matches!(callable.origin(), CallableOrigin::Builtin(BuiltinFn::BytesConcat))
-                    && matches!(
-                        expected.peel_loc(self.db).kind(self.db),
-                        TyKind::Primitive(Primitive::Bytes)
-                    )
-                    && matches!(
-                        actual.peel_loc(self.db).kind(self.db),
-                        TyKind::Primitive(Primitive::FixedBytes(_))
-                    ))
-                .then_some(1)
-            })
+        actual.implicitly_converts_to(expected, self.db).or_else(|| {
+            (matches!(callable.origin(), CallableOrigin::Builtin(BuiltinFn::BytesConcat))
+                && matches!(expected.peel_loc(self.db).kind(self.db), TyKind::Primitive(Primitive::Bytes))
+                && matches!(actual.peel_loc(self.db).kind(self.db), TyKind::Primitive(Primitive::FixedBytes(_))))
+            .then_some(1)
+        })
     }
 
     /// Every argument that fails to convert, in order.
-    fn arguments_mismatch(
-        &self,
-        args: &[ExprId],
-        arg_types: &[Ty],
-        sig: &Fn<Type>,
-        callable: &Callable,
-    ) -> Vec<ArgumentMismatch> {
+    fn arguments_mismatch(&self, args: &[ExprId], arg_types: &[Ty], sig: &Fn<Type>, callable: &Callable) -> Vec<ArgumentMismatch> {
         let Some(unbound) = Self::unbound_params(sig, callable) else {
             return Vec::new();
         };
@@ -157,13 +134,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     /// Selects for a call whose single declaration is known; the caller has
     /// already checked invocability.
-    fn select_one<'a>(
-        &self,
-        callable: &'a Callable,
-        sig: &'a Fn<Type>,
-        args: &'a [ExprId],
-        arg_types: &'a [Ty],
-    ) -> CallOutcome<'a> {
+    fn select_one<'a>(&self, callable: &'a Callable, sig: &'a Fn<Type>, args: &'a [ExprId], arg_types: &'a [Ty]) -> CallOutcome<'a> {
         let Some(unbound) = Self::unbound_params(sig, callable) else {
             return CallOutcome::Unusable;
         };
@@ -182,12 +153,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     /// Selects for a call whose callee is a function pointer: fixed arity, no
     /// bound receiver, and no declaration identity to record.
-    fn select_ptr<'a>(
-        &self,
-        fnty: &'a Fn<Type>,
-        args: &[ExprId],
-        arg_types: &[Ty],
-    ) -> CallOutcome<'a> {
+    fn select_ptr<'a>(&self, fnty: &'a Fn<Type>, args: &[ExprId], arg_types: &[Ty]) -> CallOutcome<'a> {
         // A pointer is called at its written type — solc normalizes the
         // *reference* (`this.e` types as `function(bytes memory)`), not the
         // call, so `function(bytes calldata) external p; p(m)` rejects.
@@ -217,16 +183,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     /// Selects among overloads. `declared` is the full set as written (for the
     /// "no matching overload" report), `candidates` the usable subset.
-    fn select_overloads<'a>(
-        &self,
-        declared: &'a [Callable],
-        candidates: &'a [Candidate<'a>],
-    ) -> CallOutcome<'a> {
+    fn select_overloads<'a>(&self, declared: &'a [Callable], candidates: &'a [Candidate<'a>]) -> CallOutcome<'a> {
         if candidates.is_empty() {
-            return if declared
-                .iter()
-                .all(|callable| !callable.is_invocable(self.db))
-            {
+            return if declared.iter().all(|callable| !callable.is_invocable(self.db)) {
                 CallOutcome::NotInvocable
             } else {
                 CallOutcome::Unusable
@@ -249,15 +208,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
         let matches = self.overload_matches(candidates);
         if matches.is_empty() {
-            return CallOutcome::NoMatchingOverload {
-                candidates: declared,
-            };
+            return CallOutcome::NoMatchingOverload { candidates: declared };
         }
-        let best_cost = matches
-            .iter()
-            .map(|(_, cost)| *cost)
-            .min()
-            .unwrap_or_default();
+        let best_cost = matches.iter().map(|(_, cost)| *cost).min().unwrap_or_default();
         let best = matches
             .into_iter()
             .filter(|(_, cost)| *cost == best_cost)
@@ -278,21 +231,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
     pub(super) fn check_new(&mut self, expr: ExprId, ty: ExprId, ty_expr_ty: Ty) -> Ty {
         return_invalid!(ty_expr_ty, self.db);
         let Some(Resolution::Type(name)) = self.tables.expr_resolution(ty).cloned() else {
-            return self.fail(
-                DiagnosticAnchor::Expr(expr),
-                "`new` requires a type name",
-                Ty::invalid(self.db),
-            );
+            return self.fail(SemanticId::Expr(expr), "`new` requires a type name", Ty::invalid(self.db));
         };
         let name = name.peel_loc(self.db);
         let callable = match name.kind(self.db) {
             TyKind::TypeDef(TypeDefId::Contract(id)) => {
                 let members = self.db.member_map(DefId::Contract(id));
-                if self.db.contract_data(id).is_abstract
-                    || members.data.has_unimplemented_members()
-                {
+                if self.db.contract_data(id).is_abstract || members.data.has_unimplemented_members() {
                     return self.fail(
-                        DiagnosticAnchor::Expr(expr),
+                        SemanticId::Expr(expr),
                         "Cannot instantiate an abstract contract.",
                         Ty::invalid(self.db),
                     );
@@ -304,21 +251,18 @@ impl<'db, 'store> Inferer<'db, 'store> {
             TyKind::Array { size: None, .. } => Callable::new_allocation(name),
             TyKind::Array { size: Some(_), .. } => {
                 return self.fail(
-                    DiagnosticAnchor::Expr(expr),
+                    SemanticId::Expr(expr),
                     "length has to be placed in parentheses after the array type for `new`",
                     Ty::invalid(self.db),
                 );
             }
             // `new bytes(n)` / `new string(n)` allocate a dynamic byte
-            TyKind::Primitive(Primitive::Bytes | Primitive::String) => {
-                Callable::new_allocation(name)
-            }
+            TyKind::Primitive(Primitive::Bytes | Primitive::String) => Callable::new_allocation(name),
             target => {
-                return self.fail(DiagnosticAnchor::Expr(expr), uninstantiable(target), Ty::invalid(self.db));
+                return self.fail(SemanticId::Expr(expr), uninstantiable(target), Ty::invalid(self.db));
             }
         };
-        self.tables
-            .set_expr_resolution(expr, Resolution::Callable(callable));
+        self.tables.set_expr_resolution(expr, Resolution::Callable(callable));
         self.callable_type(&callable)
     }
 
@@ -326,7 +270,6 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// forwards the callee's type and resolution
     /// The options expression types as the callee itself
     pub(super) fn check_call_options(&mut self, expr: ExprId, callee: ExprId, callee_ty: Ty, options: &NamedValues) -> Ty {
-        
         // Carry the callee's identity to the enclosing call expr
         let resolution = self.tables.expr_resolution(callee).cloned();
         if let Some(resolution) = &resolution {
@@ -334,7 +277,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
 
         if !self.in_callee() {
-            return self.fail(DiagnosticAnchor::Expr(expr), "options can only be set on a function call", callee_ty, );
+            return self.fail(SemanticId::Expr(expr), "options can only be set on a function call", callee_ty);
         }
 
         if callee_ty.is_invalid(self.db) && !matches!(resolution, Some(Resolution::Callables(_))) {
@@ -343,7 +286,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         // `{…}{…}` reject multiple options
         if matches!(&self.input.store.exprs[callee], Expr::CallOptions { .. }) {
             return self.fail(
-                DiagnosticAnchor::Expr(expr),
+                SemanticId::Expr(expr),
                 "call options have already been set — combine them into a single `{…}`",
                 callee_ty,
             );
@@ -359,12 +302,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
         };
         let Some(callee_options) = callee_options else {
             return self.fail(
-                DiagnosticAnchor::Expr(expr),
+                SemanticId::Expr(expr),
                 "function call options can only be set on external function calls or contract creations",
                 callee_ty,
             );
         };
-        
+
         let host = match &resolution {
             Some(Resolution::Callable(c)) => match c.builtin() {
                 Some(b) => b.name(),
@@ -373,20 +316,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
             },
             _ => "function",
         };
-        
+
         for (name, value) in options.iter() {
             let expected = match option_type(name) {
-                None => self.fail(DiagnosticAnchor::Expr(expr), format!("unknown call option: `{name}`"), None),
-                Some(primitive) if callee_options.contains(&name.as_str()) => {
-                    Some(Ty::primitive(self.db, primitive))
-                }
-                Some(_) if name == "salt" => self.fail(
-                    DiagnosticAnchor::Expr(expr),
-                    "call option: `salt` can only be used with `new`",
-                    None,
-                ),
+                None => self.fail(SemanticId::Expr(expr), format!("unknown call option: `{name}`"), None),
+                Some(primitive) if callee_options.contains(&name.as_str()) => Some(Ty::primitive(self.db, primitive)),
+                Some(_) if name == "salt" => self.fail(SemanticId::Expr(expr), "call option: `salt` can only be used with `new`", None),
                 Some(_) => self.fail(
-                    DiagnosticAnchor::Expr(expr),
+                    SemanticId::Expr(expr),
                     format!("call option: `{name}` cannot be used with `{host}`"),
                     None,
                 ),
@@ -394,11 +331,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
             let actual = self.check_rvalue(*value);
             let Some(expected) = expected else { continue };
-            if !actual.is_invalid(self.db)
-                && actual.implicitly_converts_to(expected, self.db).is_none()
-            {
+            if !actual.is_invalid(self.db) && actual.implicitly_converts_to(expected, self.db).is_none() {
                 self.report(
                     SemanticDiagnostic::TypeMismatch {
+                        def: self.def,
                         expr: *value,
                         expected,
                         actual,
@@ -429,25 +365,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// intrinsic's arguments contextually instead of eagerly.
     pub(super) fn intrinsic_callee(&self, callee: ExprId) -> Option<Callable> {
         match self.tables.expr_resolution(callee) {
-            Some(Resolution::Callable(callable)) if callable.is_intrinsic() => {
-                Some(*callable)
-            }
-            Some(Resolution::Callables(callables))
-                if callables.iter().all(Callable::is_intrinsic) =>
-            {
-                callables.first().cloned()
-            }
+            Some(Resolution::Callable(callable)) if callable.is_intrinsic() => Some(*callable),
+            Some(Resolution::Callables(callables)) if callables.iter().all(Callable::is_intrinsic) => callables.first().cloned(),
             _ => None,
         }
     }
 
-    pub(super) fn check_positional_call(
-        &mut self,
-        expr: ExprId,
-        callee: ExprId,
-        args: &[ExprId],
-        arg_types: &[Ty],
-    ) -> Ty {
+    pub(super) fn check_positional_call(&mut self, expr: ExprId, callee: ExprId, args: &[ExprId], arg_types: &[Ty]) -> Ty {
         let callee_ty = self.tables.expr_ty(callee);
         // A call's resolution names the callable, but as a callee its value is the result:
         // `cast(_impl)(payload)` calls the returned pointer; `CallOptions` denotes the callee.
@@ -456,12 +380,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
             _ => self.tables.expr_resolution(callee).cloned(),
         };
         match resolution {
-            Some(Resolution::Callable(callable)) => {
-                self.resolve_callable(expr, callable, args, arg_types)
-            }
-            Some(Resolution::Callables(callables)) => {
-                self.resolve_callables(expr, &callables, arg_types)
-            }
+            Some(Resolution::Callable(callable)) => self.resolve_callable(expr, callable, args, arg_types),
+            Some(Resolution::Callables(callables)) => self.resolve_callables(expr, &callables, arg_types),
             Some(Resolution::Type(ty)) => {
                 // Match on the canonical kind, but convert against the located
                 // type: a cast's result keeps the argument's location, so the
@@ -479,22 +399,17 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 self.tables.set_expr_resolution(expr, Resolution::Type(ty));
                 match target.kind(self.db) {
                     TyKind::Invalid => Ty::invalid(self.db),
-                    TyKind::TypeDef(TypeDefId::Struct(id)) => {
-                        self.check_struct_construction(expr, id, args, arg_types, None)
-                    }
+                    TyKind::TypeDef(TypeDefId::Struct(id)) => self.check_struct_construction(expr, id, args, arg_types, None),
                     _ if args.len() == 1 => {
                         let from = arg_types[0];
                         let literal_out_of_range = match target.kind(self.db) {
-                            TyKind::TypeDef(TypeDefId::Enum(id)) => {
-                                !enum_literal_is_in_range(self.db, self.input.store, args[0], id)
-                            }
+                            TyKind::TypeDef(TypeDefId::Enum(id)) => !enum_literal_is_in_range(self.db, self.input.store, args[0], id),
                             _ => false,
                         };
-                        if literal_out_of_range
-                            || from.explicitly_converts_to(ty, self.db).is_none()
-                        {
+                        if literal_out_of_range || from.explicitly_converts_to(ty, self.db).is_none() {
                             return self.report(
                                 SemanticDiagnostic::InvalidExplicitConversion {
+                                    def: self.def,
                                     expr,
                                     from,
                                     to: target,
@@ -502,7 +417,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                                 Ty::invalid(self.db),
                             );
                         }
-                        // Every cast keeps the *argument's* location 
+                        // Every cast keeps the *argument's* location
                         match from.loc(self.db) {
                             Some(loc) => ty.upcast_from(self.db, loc).ty(),
                             None => ty.ty(),
@@ -510,6 +425,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     }
                     _ => self.report(
                         SemanticDiagnostic::InvalidArgumentCount {
+                            def: self.def,
                             call: expr,
                             expected: 1,
                             actual: args.len(),
@@ -526,20 +442,17 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     self.apply_call_outcome(expr, outcome)
                 }
                 TyKind::Invalid => Ty::invalid(self.db),
-                _ => self.fail(DiagnosticAnchor::Expr(expr), "expression is not callable", Ty::invalid(self.db)),
+                _ => self.fail(SemanticId::Expr(expr), "expression is not callable", Ty::invalid(self.db)),
             },
         }
     }
 
     /// Checks for a duplicate named argument before values are inferred.
-    pub(super) fn check_duplicate_named(
-        &mut self,
-        call: ExprId,
-        named: &[(Name, ExprId)],
-    ) -> Option<Ty> {
+    pub(super) fn check_duplicate_named(&mut self, call: ExprId, named: &[(Name, ExprId)]) -> Option<Ty> {
         let name = duplicate_name(named)?;
         Some(self.report(
             SemanticDiagnostic::DuplicateNamedArgument {
+                def: self.def,
                 call,
                 name: name.clone(),
             },
@@ -548,13 +461,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
     }
 
     /// A call written with named arguments — `f({a: 1, b: 2})`.
-    pub(super) fn check_named_call(
-        &mut self,
-        call: ExprId,
-        callee: ExprId,
-        named: &[(Name, ExprId)],
-        arg_types: &[Ty],
-    ) -> Ty {
+    pub(super) fn check_named_call(&mut self, call: ExprId, callee: ExprId, named: &[(Name, ExprId)], arg_types: &[Ty]) -> Ty {
         let mut names = Vec::with_capacity(named.len());
         let mut values = Vec::with_capacity(named.len());
         for (name, value) in named.iter() {
@@ -566,61 +473,35 @@ impl<'db, 'store> Inferer<'db, 'store> {
             Some(Resolution::Type(ty)) => {
                 self.tables.set_expr_resolution(call, Resolution::Type(ty));
                 match ty.peel_loc(self.db).kind(self.db) {
-                    TyKind::Invalid => {
-                        self.unknown_named_argument(call, named.first().map(|(name, _)| name))
-                    }
+                    TyKind::Invalid => self.unknown_named_argument(call, named.first().map(|(name, _)| name)),
                     TyKind::TypeDef(TypeDefId::Contract(id)) if self.in_modifier() => {
                         let callable = Callable::new_constructor(id);
                         self.resolve_named_call(call, &callable, named, arg_types)
                     }
-                    TyKind::TypeDef(TypeDefId::Struct(id)) => self.check_struct_construction(
-                        call,
-                        id,
-                        &values,
-                        arg_types,
-                        Some(&names),
-                    ),
+                    TyKind::TypeDef(TypeDefId::Struct(id)) => self.check_struct_construction(call, id, &values, arg_types, Some(&names)),
                     // A cast has no parameters to name.
                     _ => self.fail(
-                        DiagnosticAnchor::Expr(call),
+                        SemanticId::Expr(call),
                         "type conversion cannot allow named arguments",
                         Ty::invalid(self.db),
                     ),
                 }
             }
-            Some(Resolution::Callable(callable)) => {
-                self.resolve_named_call(call, &callable, named, arg_types)
-            }
-            Some(Resolution::Callables(callables)) => {
-                self.resolve_named_callables(call, &callables, named, arg_types)
-            }
+            Some(Resolution::Callable(callable)) => self.resolve_named_call(call, &callable, named, arg_types),
+            Some(Resolution::Callables(callables)) => self.resolve_named_callables(call, &callables, named, arg_types),
             _ => self.unknown_named_argument(call, named.first().map(|(name, _)| name)),
         }
     }
 
     fn parameter_names(&self, callable: &Callable) -> Option<Box<[Name]>> {
-        Some(
-            callable.named_parameters(self.db)?
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect(),
-        )
+        Some(callable.named_parameters(self.db)?.iter().map(|(name, _)| name.clone()).collect())
     }
 
-    fn resolve_named_call(
-        &mut self,
-        call: ExprId,
-        callable: &Callable,
-        named: &[(Name, ExprId)],
-        arg_types: &[Ty],
-    ) -> Ty {
+    fn resolve_named_call(&mut self, call: ExprId, callable: &Callable, named: &[(Name, ExprId)], arg_types: &[Ty]) -> Ty {
         // A variadic builtin has no fixed parameter list to name.
-        if matches!(
-            callable.schema(),
-            ParamSchema::TypedTail | ParamSchema::AnyTail
-        ) {
+        if matches!(callable.schema(), ParamSchema::TypedTail | ParamSchema::AnyTail) {
             return self.fail(
-                DiagnosticAnchor::Expr(call),
+                SemanticId::Expr(call),
                 "named arguments cannot be used for functions that take arbitrary parameters",
                 Ty::invalid(self.db),
             );
@@ -632,6 +513,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         if named.len() != names.len() {
             return self.report(
                 SemanticDiagnostic::InvalidArgumentCount {
+                    def: self.def,
                     call,
                     expected: names.len(),
                     actual: named.len(),
@@ -642,28 +524,20 @@ impl<'db, 'store> Inferer<'db, 'store> {
         if let Some((name, _)) = named.iter().find(|(name, _)| !names.contains(name)) {
             return self.report(
                 SemanticDiagnostic::UnknownNamedArgument {
+                    def: self.def,
                     call,
                     name: name.clone(),
                 },
                 Ty::invalid(self.db),
             );
         }
-        let (args, types) =
-            order_named(&names, named, arg_types).expect("every name matched and the counts agree");
+        let (args, types) = order_named(&names, named, arg_types).expect("every name matched and the counts agree");
         self.resolve_callable(call, *callable, &args, &types)
     }
 
-    fn resolve_named_callables(
-        &mut self,
-        call: ExprId,
-        callables: &[Callable],
-        named: &[(Name, ExprId)],
-        arg_types: &[Ty],
-    ) -> Ty {
-        self.tables.set_expr_resolution(
-            call,
-            Resolution::Callables(callables.iter().cloned().collect()),
-        );
+    fn resolve_named_callables(&mut self, call: ExprId, callables: &[Callable], named: &[(Name, ExprId)], arg_types: &[Ty]) -> Ty {
+        self.tables
+            .set_expr_resolution(call, Resolution::Callables(callables.iter().cloned().collect()));
         let matching = callables
             .iter()
             .filter(|callable| callable.is_invocable(self.db))
@@ -673,6 +547,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         if matching.is_empty() {
             return self.report(
                 SemanticDiagnostic::NoMatchingOverload {
+                    def: self.def,
                     call,
                     candidates: callables.to_vec(),
                 },
@@ -688,28 +563,20 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     /// Whether a named call's names are exactly this declaration's parameters.
     fn names_match(&self, callable: &Callable, named: &[(Name, ExprId)]) -> bool {
-        self.parameter_names(callable).is_some_and(|names| {
-            named.len() == names.len() && named.iter().all(|(name, _)| names.contains(name))
-        })
+        self.parameter_names(callable)
+            .is_some_and(|names| named.len() == names.len() && named.iter().all(|(name, _)| names.contains(name)))
     }
 
     fn unknown_named_argument(&mut self, call: ExprId, name: Option<&Name>) -> Ty {
         let name = name.map_or(String::new(), Name::to_string);
         self.fail(
-            DiagnosticAnchor::Expr(call),
+            SemanticId::Expr(call),
             format!("named argument `{name}` does not match function declaration"),
             Ty::invalid(self.db),
         )
     }
 
-    fn check_struct_construction(
-        &mut self,
-        call: ExprId,
-        id: StructId,
-        args: &[ExprId],
-        arg_types: &[Ty],
-        names: Option<&[Name]>,
-    ) -> Ty {
+    fn check_struct_construction(&mut self, call: ExprId, id: StructId, args: &[ExprId], arg_types: &[Ty], names: Option<&[Name]>) -> Ty {
         let data = self.db.struct_data(id);
         let inference = self.db.inference(DefId::Struct(id));
         let fields = data
@@ -721,6 +588,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         if args.len() != fields.len() {
             return self.report(
                 SemanticDiagnostic::InvalidArgumentCount {
+                    def: self.def,
                     call,
                     expected: fields.len(),
                     actual: args.len(),
@@ -729,12 +597,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
             );
         }
         if let Some(names) = names
-            && let Some(name) = names
-                .iter()
-                .find(|name| !fields.iter().any(|(field, _)| field == *name))
+            && let Some(name) = names.iter().find(|name| !fields.iter().any(|(field, _)| field == *name))
         {
             return self.report(
                 SemanticDiagnostic::UnknownNamedArgument {
+                    def: self.def,
                     call,
                     name: name.clone(),
                 },
@@ -754,6 +621,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             if actual.implicitly_converts_to(*field_ty, self.db).is_none() {
                 return self.report(
                     SemanticDiagnostic::TypeMismatch {
+                        def: self.def,
                         expr: args[position],
                         expected: *field_ty,
                         actual,
@@ -763,9 +631,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             }
         }
 
-        Type::new(self.db, TyKind::TypeDef(id.into()))
-            .expect("a struct is nameable")
-            .ty()
+        Type::new(self.db, TyKind::TypeDef(id.into())).expect("a struct is nameable").ty()
     }
 
     // ── Call finalization & intrinsics ───────────────────────────────────
@@ -774,12 +640,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// constrains nothing (events, errors).
     fn callable_mutability(&self, callable: &Callable) -> Option<Mutability> {
         match callable.origin() {
-            CallableOrigin::Def(CallableDefId::Function(id)) => {
-                Some(self.db.function_data(*id).mutability)
-            }
-            CallableOrigin::Def(CallableDefId::Getter(id)) => {
-                self.db.getter_signature(*id).map(|sig| sig.mutability)
-            }
+            CallableOrigin::Def(CallableDefId::Function(id)) => Some(self.db.function_data(*id).mutability),
+            CallableOrigin::Def(CallableDefId::Getter(id)) => self.db.getter_signature(*id).map(|sig| sig.mutability),
             // A creation is a state-modifying operation; an allocation is not.
             CallableOrigin::Def(CallableDefId::Constructor(_)) => Some(Mutability::NonPayable),
             CallableOrigin::Allocation(_) => Some(Mutability::Pure),
@@ -789,7 +651,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             // body needs is what the function it wraps has to allow.
             CallableOrigin::Def(CallableDefId::Modifier(id)) => {
                 let def = DefId::Modifier(*id);
-                (!self.is_owner(def)).then(|| self.db.inference(def).effect)
+                (!self.is_current(def)).then(|| self.db.inference(def).effect)
             }
         }
     }
@@ -810,12 +672,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// owns their diagnostics.
     fn accepts_value(&self, callable: &Callable) -> Option<bool> {
         let mutability = match callable.origin() {
-            CallableOrigin::Def(CallableDefId::Function(id)) => {
-                Some(self.db.function_data(*id).mutability)
-            }
-            CallableOrigin::Def(CallableDefId::Getter(id)) => {
-                self.db.getter_signature(*id).map(|sig| sig.mutability)
-            }
+            CallableOrigin::Def(CallableDefId::Function(id)) => Some(self.db.function_data(*id).mutability),
+            CallableOrigin::Def(CallableDefId::Getter(id)) => self.db.getter_signature(*id).map(|sig| sig.mutability),
             CallableOrigin::Def(CallableDefId::Constructor(id)) => Some(
                 self.db
                     .contract_data(*id)
@@ -825,9 +683,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             ),
             CallableOrigin::Builtin(builtin) => Some(builtin.mutability()),
             CallableOrigin::Allocation(_)
-            | CallableOrigin::Def(
-                CallableDefId::Error(_) | CallableDefId::Event(_) | CallableDefId::Modifier(_),
-            ) => None,
+            | CallableOrigin::Def(CallableDefId::Error(_) | CallableDefId::Event(_) | CallableDefId::Modifier(_)) => None,
         };
         mutability.map(|mutability| mutability == Mutability::Payable)
     }
@@ -837,7 +693,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             .set_expr_resolution(call, Resolution::Callable(Callable::clone(callable)));
         if callable.origin().is_error() && !self.in_revert() {
             return self.fail(
-                DiagnosticAnchor::Expr(call),
+                SemanticId::Expr(call),
                 "errors can only be used with revert statements or require functions",
                 Ty::invalid(self.db),
             );
@@ -849,15 +705,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
         // overload set the picked member must be external (or a `new` creation),
         // and `value` attaches only to a payable target.
         if let Some((options_expr, options)) = self.call_options(call) {
-            let external = callable.is_external()
-                || callable.origin().is_constructor();
-            if matches!(
-                self.tables.expr_resolution(options_expr),
-                Some(Resolution::Callables(_))
-            ) && !external
-            {
+            let external = callable.is_external() || callable.origin().is_constructor();
+            if matches!(self.tables.expr_resolution(options_expr), Some(Resolution::Callables(_))) && !external {
                 return self.fail(
-                    DiagnosticAnchor::Expr(options_expr),
+                    SemanticId::Expr(options_expr),
                     "function call options can only be set on external function calls or contract creations",
                     Ty::invalid(self.db),
                 );
@@ -870,7 +721,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 && self.accepts_value(callable) == Some(false)
             {
                 return self.fail(
-                    DiagnosticAnchor::Expr(options_expr),
+                    SemanticId::Expr(options_expr),
                     "cannot set option `value` on a non-payable function",
                     Ty::invalid(self.db),
                 );
@@ -884,21 +735,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// Dispatches an intrinsic call to its finisher: `require`,
     /// `abi.decode`, `abi.encodeCall`. The arguments infer contextually —
     /// `require`'s optional message is an error-construction position.
-    pub(super) fn infer_intrinsic_call_expr(
-        &mut self,
-        call: ExprId,
-        callable: Callable,
-        args: &[ExprId],
-    ) -> Ty {
-        self.tables
-            .set_expr_resolution(call, Resolution::Callable(callable));
+    pub(super) fn infer_intrinsic_call_expr(&mut self, call: ExprId, callable: Callable, args: &[ExprId]) -> Ty {
+        self.tables.set_expr_resolution(call, Resolution::Callable(callable));
         // An intrinsic bypasses selection, but not the effect lattice.
         if let Some(effect) = self.callable_mutability(&callable) {
             self.require_effect(call, effect, callable.def());
         }
         let Some(builtin) = callable.builtin() else {
             return self.fail(
-                DiagnosticAnchor::Expr(call),
+                SemanticId::Expr(call),
                 "intrinsic call has no builtin identity",
                 Ty::invalid(self.db),
             );
@@ -908,8 +753,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 if let Some(invalid) = self.check_intrinsic_arity(call, args.len(), &[1, 2], 2) {
                     return invalid;
                 }
-                let condition =
-                    self.expect_assignable(args[0], Ty::primitive(self.db, Primitive::Boolean));
+                let condition = self.expect_assignable(args[0], Ty::primitive(self.db, Primitive::Boolean));
                 let message_ty = if let [_, message] = args {
                     let actual = self.infer_in(*message, UsageContext::Revert);
                     Some(return_invalid!(actual, self.db))
@@ -930,6 +774,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     if actual.implicitly_converts_to(expected, self.db).is_none() {
                         return self.report(
                             SemanticDiagnostic::TypeMismatch {
+                                def: self.def,
                                 expr: *reason,
                                 expected,
                                 actual,
@@ -945,8 +790,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 if let Some(invalid) = self.check_intrinsic_arity(call, args.len(), &[2], 2) {
                     return invalid;
                 }
-                let data =
-                    self.expect_assignable(args[0], Ty::primitive(self.db, Primitive::Bytes));
+                let data = self.expect_assignable(args[0], Ty::primitive(self.db, Primitive::Bytes));
                 return_invalid!(self.check_rvalue(args[1]), self.db);
                 return_invalid!(data, self.db);
                 self.finish_abi_decode_call(args)
@@ -956,30 +800,22 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     return invalid;
                 }
                 let target_ty = return_invalid!(self.check_rvalue(args[0]), self.db);
-                let Some(params) = self.encode_call_target_params(call, args[0], target_ty)
-                else {
+                let Some(params) = self.encode_call_target_params(call, args[0], target_ty) else {
                     return Ty::invalid(self.db);
                 };
                 return_invalid!(self.check_rvalue(args[1]), self.db);
                 self.finish_abi_encode_call(call, args, &params)
             }
             _ => self.fail(
-                DiagnosticAnchor::Expr(call),
+                SemanticId::Expr(call),
                 format!("no intrinsic checker for `{}`", builtin.name()),
                 Ty::invalid(self.db),
             ),
         }
     }
 
-    fn resolve_callable(
-        &mut self,
-        call: ExprId,
-        callable: Callable,
-        args: &[ExprId],
-        arg_types: &[Ty],
-    ) -> Ty {
-        self.tables
-            .set_expr_resolution(call, Resolution::Callable(callable));
+    fn resolve_callable(&mut self, call: ExprId, callable: Callable, args: &[ExprId], arg_types: &[Ty]) -> Ty {
+        self.tables.set_expr_resolution(call, Resolution::Callable(callable));
         if !callable.is_invocable(self.db) {
             return self.apply_call_outcome(call, CallOutcome::NotInvocable);
         }
@@ -996,13 +832,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
     }
 
     fn resolve_callables(&mut self, call: ExprId, callables: &[Callable], arg_types: &[Ty]) -> Ty {
-        self.tables.set_expr_resolution(
-            call,
-            Resolution::Callables(callables.iter().cloned().collect()),
-        );
-        self.resolve_overload_candidates(call, callables, callables, |_, _| {
-            Some(Cow::Borrowed(arg_types))
-        })
+        self.tables
+            .set_expr_resolution(call, Resolution::Callables(callables.iter().cloned().collect()));
+        self.resolve_overload_candidates(call, callables, callables, |_, _| Some(Cow::Borrowed(arg_types)))
     }
 
     fn resolve_overload_candidates<'a>(
@@ -1012,9 +844,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         viable: &[Callable],
         args_for: impl std::ops::Fn(&Self, &Callable) -> Option<Cow<'a, [Ty]>>,
     ) -> Ty {
-        let mut invocable = viable
-            .iter()
-            .filter(|callable| callable.is_invocable(self.db));
+        let mut invocable = viable.iter().filter(|callable| callable.is_invocable(self.db));
         let candidates = invocable
             .clone()
             .filter_map(|callable| {
@@ -1031,8 +861,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
             })
             .collect::<Vec<_>>();
         if candidates.is_empty()
-            && let Some(unavailable) =
-                invocable.find(|callable| self.try_callable_sig(callable).is_err())
+            && let Some(unavailable) = invocable.find(|callable| self.try_callable_sig(callable).is_err())
         {
             self.callable_sig(unavailable, call);
             return Ty::invalid(self.db);
@@ -1055,7 +884,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     && options.iter().any(|(name, _)| name.as_str() == "value")
                 {
                     return self.fail(
-                        DiagnosticAnchor::Expr(options_expr),
+                        SemanticId::Expr(options_expr),
                         "cannot set option `value` on a non-payable function",
                         Ty::invalid(self.db),
                     );
@@ -1063,12 +892,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 fnty.result(self.db)
             }
             CallOutcome::NotInvocable => self.fail(
-                DiagnosticAnchor::Expr(call),
+                SemanticId::Expr(call),
                 "declaration-only function cannot be called",
                 Ty::invalid(self.db),
             ),
             CallOutcome::ArityMismatch { expected, actual } => self.report(
                 SemanticDiagnostic::InvalidArgumentCount {
+                    def: self.def,
                     call,
                     expected,
                     actual,
@@ -1079,6 +909,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 for mismatch in mismatches {
                     self.report(
                         SemanticDiagnostic::TypeMismatch {
+                            def: self.def,
                             expr: mismatch.arg,
                             expected: mismatch.expected,
                             actual: mismatch.actual,
@@ -1090,20 +921,18 @@ impl<'db, 'store> Inferer<'db, 'store> {
             }
             CallOutcome::NoMatchingOverload { candidates } => self.report(
                 SemanticDiagnostic::NoMatchingOverload {
+                    def: self.def,
                     call,
                     candidates: candidates.to_vec(),
                 },
                 Ty::invalid(self.db),
             ),
             CallOutcome::AmbiguousOverload { candidates } => {
-                let tied: Box<[Callable]> = candidates
-                    .iter()
-                    .map(|callable| **callable)
-                    .collect();
-                self.tables
-                    .set_expr_resolution(call, Resolution::Callables(tied.clone()));
+                let tied: Box<[Callable]> = candidates.iter().map(|callable| **callable).collect();
+                self.tables.set_expr_resolution(call, Resolution::Callables(tied.clone()));
                 self.report(
                     SemanticDiagnostic::AmbiguousOverload {
+                        def: self.def,
                         call,
                         candidates: tied.into_vec(),
                     },
@@ -1114,18 +943,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
     }
 
-    pub(super) fn check_intrinsic_arity(
-        &mut self,
-        call: ExprId,
-        actual: usize,
-        valid: &[usize],
-        expected: usize,
-    ) -> Option<Ty> {
+    pub(super) fn check_intrinsic_arity(&mut self, call: ExprId, actual: usize, valid: &[usize], expected: usize) -> Option<Ty> {
         if valid.contains(&actual) {
             return None;
         }
         Some(self.report(
             SemanticDiagnostic::InvalidArgumentCount {
+                def: self.def,
                 call,
                 expected,
                 actual,
@@ -1148,6 +972,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 if actual.implicitly_converts_to(expected, self.db).is_none() {
                     return self.report(
                         SemanticDiagnostic::TypeMismatch {
+                            def: self.def,
                             expr: *message,
                             expected,
                             actual,
@@ -1163,24 +988,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     /// `abi.decode(data, (T1, T2, ..))`
     fn finish_abi_decode_call(&mut self, args: &[ExprId]) -> Ty {
-
         let names = match &self.input.store.exprs[args[1]] {
             Expr::Tuple(elems) => {
                 let mut names = Vec::with_capacity(elems.len());
                 for elem in elems.iter() {
                     let Some(elem) = elem else {
-                        return self.fail(
-                            DiagnosticAnchor::Expr(args[1]),
-                            "tuple component cannot be empty",
-                            Ty::invalid(self.db),
-                        );
+                        return self.fail(SemanticId::Expr(args[1]), "tuple component cannot be empty", Ty::invalid(self.db));
                     };
                     let TyKind::Type(name) = self.tables.expr_ty(*elem).kind(self.db) else {
-                        return self.fail(
-                            DiagnosticAnchor::Expr(args[1]),
-                            "argument has to be a type name",
-                            Ty::invalid(self.db),
-                        );
+                        return self.fail(SemanticId::Expr(args[1]), "argument has to be a type name", Ty::invalid(self.db));
                     };
                     names.push(name);
                 }
@@ -1190,7 +1006,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 TyKind::Type(name) => vec![name],
                 _ => {
                     return self.fail(
-                        DiagnosticAnchor::Expr(args[1]),
+                        SemanticId::Expr(args[1]),
                         "the second argument to `abi.decode` has to be a tuple of types",
                         Ty::invalid(self.db),
                     );
@@ -1204,21 +1020,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
     /// `abi.encodeCall(f, (args…))` — the first argument must denote a function
     /// and the second a tuple whose components convert to that function's
     /// parameters.
-    pub(super) fn encode_call_target_params(
-        &mut self,
-        call: ExprId,
-        target_expr: ExprId,
-        target_ty: Ty,
-    ) -> Option<Box<[Type]>> {
+    pub(super) fn encode_call_target_params(&mut self, call: ExprId, target_expr: ExprId, target_ty: Ty) -> Option<Box<[Type]>> {
         match self.tables.expr_resolution(target_expr).cloned() {
             Some(Resolution::Callable(target)) => {
                 // solc: "Cannot use library functions for abi.encodeCall."
                 if matches!(target.kind(), CallKind::ViaType(ViaTypeKind::Library)) {
-                    return self.fail(
-                        DiagnosticAnchor::Expr(call),
-                        "Cannot use library functions for abi.encodeCall.",
-                        None,
-                    );
+                    return self.fail(SemanticId::Expr(call), "Cannot use library functions for abi.encodeCall.", None);
                 }
                 let sig = self.callable_sig(&target, call)?;
                 // "Expected regular external function type, or external view on public function": another
@@ -1228,7 +1035,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                     || matches!(target.kind(), CallKind::ViaType(ViaTypeKind::NonLibrary));
                 if !external {
                     return self.fail(
-                        DiagnosticAnchor::Expr(call),
+                        SemanticId::Expr(call),
                         "Expected regular external function type, or external view on public function.",
                         None,
                     );
@@ -1238,16 +1045,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 Some(sig.external_abi(self.db).params)
             }
             _ => match target_ty.kind(self.db) {
-                TyKind::FnPtr(sig) if sig.visibility == Visibility::External => {
-                    Some(sig.external_abi(self.db).params)
-                }
+                TyKind::FnPtr(sig) if sig.visibility == Visibility::External => Some(sig.external_abi(self.db).params),
                 TyKind::FnPtr(_) => self.fail(
-                    DiagnosticAnchor::Expr(call),
+                    SemanticId::Expr(call),
                     "Expected regular external function type, or external view on public function.",
                     None,
                 ),
                 _ => self.fail(
-                    DiagnosticAnchor::Expr(call),
+                    SemanticId::Expr(call),
                     "The first argument of abi.encodeCall must be a function pointer.",
                     None,
                 ),
@@ -1255,12 +1060,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
     }
 
-    fn finish_abi_encode_call(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        params: &[Type],
-    ) -> Ty {
+    fn finish_abi_encode_call(&mut self, call: ExprId, args: &[ExprId], params: &[Type]) -> Ty {
         // `(x)` is a parenthesized expression, not a one-component tuple, so a
         // lone argument is its own component.
         let components: Box<[Option<ExprId>]> = match &self.input.store.exprs[args[1]] {
@@ -1270,6 +1070,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
         if components.len() != params.len() {
             return self.report(
                 SemanticDiagnostic::InvalidArgumentCount {
+                    def: self.def,
                     call,
                     expected: params.len(),
                     actual: components.len(),
@@ -1279,16 +1080,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
         }
         for (component, expected) in components.iter().zip(params.iter()) {
             let Some(component) = component else {
-                return self.fail(
-                    DiagnosticAnchor::Expr(args[1]),
-                    "tuple component cannot be empty",
-                    Ty::invalid(self.db),
-                );
+                return self.fail(SemanticId::Expr(args[1]), "tuple component cannot be empty", Ty::invalid(self.db));
             };
             let actual = self.tables.expr_ty(*component);
             if actual.implicitly_converts_to(*expected, self.db).is_none() {
                 return self.report(
                     SemanticDiagnostic::TypeMismatch {
+                        def: self.def,
                         expr: *component,
                         expected: expected.ty(),
                         actual,
@@ -1305,22 +1103,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
 
     fn try_callable_sig(&self, callable: &Callable) -> Result<Fn<Type>, &'static str> {
         match callable.origin() {
-            CallableOrigin::Def(CallableDefId::Function(id)) => self
-                .db
-                .function_signature(*id)
-                .ok_or("function signature is unavailable"),
+            CallableOrigin::Def(CallableDefId::Function(id)) => self.db.function_signature(*id).ok_or("function signature is unavailable"),
             CallableOrigin::Def(CallableDefId::Constructor(id)) => {
                 let mut sig = match self.db.contract_data(*id).constructor {
-                    Some(ctor) => self
-                        .db
-                        .function_signature(ctor)
-                        .ok_or("constructor signature is unavailable")?,
+                    Some(ctor) => self.db.function_signature(ctor).ok_or("constructor signature is unavailable")?,
                     None => Fn::default(),
                 };
-                sig.returns = Box::from([
-                    Type::new(self.db, TyKind::TypeDef((*id).into()))
-                        .expect("a contract is nameable")
-                ]);
+                sig.returns = Box::from([Type::new(self.db, TyKind::TypeDef((*id).into())).expect("a contract is nameable")]);
                 Ok(sig)
             }
             CallableOrigin::Allocation(ty) => Ok(Fn {
@@ -1329,23 +1118,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 params: Box::from([Type::primitive(self.db, Primitive::Uint(256))]),
                 returns: Box::from([ty.at_loc(self.db, Location::Memory)]),
             }),
-            CallableOrigin::Def(CallableDefId::Event(id)) => self
-                .db
-                .event_signature(*id)
-                .ok_or("event signature is unavailable"),
-            CallableOrigin::Def(CallableDefId::Error(id)) => self
-                .db
-                .error_signature(*id)
-                .ok_or("error signature is unavailable"),
-            CallableOrigin::Def(CallableDefId::Modifier(id)) => self
-                .db
-                .modifier_signature(*id)
-                .ok_or("modifier signature is unavailable"),
+            CallableOrigin::Def(CallableDefId::Event(id)) => self.db.event_signature(*id).ok_or("event signature is unavailable"),
+            CallableOrigin::Def(CallableDefId::Error(id)) => self.db.error_signature(*id).ok_or("error signature is unavailable"),
+            CallableOrigin::Def(CallableDefId::Modifier(id)) => self.db.modifier_signature(*id).ok_or("modifier signature is unavailable"),
             CallableOrigin::Builtin(builtin) => Ok(builtin.call_sig(self.db)),
-            CallableOrigin::Def(CallableDefId::Getter(id)) => self
-                .db
-                .getter_signature(*id)
-                .ok_or("getter variable type is unavailable"),
+            CallableOrigin::Def(CallableDefId::Getter(id)) => self.db.getter_signature(*id).ok_or("getter variable type is unavailable"),
         }
     }
 
@@ -1353,7 +1130,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
     fn callable_sig(&mut self, callable: &Callable, call: ExprId) -> Option<Fn<Type>> {
         match self.try_callable_sig(callable) {
             Ok(sig) => Some(sig),
-            Err(message) => self.fail(DiagnosticAnchor::Expr(call), message, None),
+            Err(message) => self.fail(SemanticId::Expr(call), message, None),
         }
     }
 
@@ -1398,21 +1175,14 @@ impl<'db, 'store> Inferer<'db, 'store> {
             // On Type-level Kind decodes call-semantics which isn't apllicabe to them
             CallableOrigin::Def(CallableDefId::Error(id)) => Ty::new(self.db, TyKind::Error(*id)),
             CallableOrigin::Def(CallableDefId::Event(id)) => Ty::new(self.db, TyKind::Event(*id)),
-            CallableOrigin::Def(CallableDefId::Modifier(id)) => {
-                Ty::new(self.db, TyKind::Modifier(*id))
-            }
+            CallableOrigin::Def(CallableDefId::Modifier(id)) => Ty::new(self.db, TyKind::Modifier(*id)),
         }
     }
 }
 
 // ── Enums ────────────────────────────────────────────────────────────────
 
-fn enum_literal_is_in_range(
-    db: &dyn HirDb,
-    store: &SyntaxStore,
-    arg: ExprId,
-    id: EnumId,
-) -> bool {
+fn enum_literal_is_in_range(db: &dyn HirDb, store: &SyntaxStore, arg: ExprId, id: EnumId) -> bool {
     let value = match &store.exprs[arg] {
         Expr::Literal(literal) => literal.integer_value(),
         _ => None,
@@ -1435,11 +1205,7 @@ fn duplicate_name(named: &[(Name, ExprId)]) -> Option<&Name> {
         .map(|index| &named[index].0)
 }
 
-fn order_named(
-    names: &[Name],
-    named: &[(Name, ExprId)],
-    arg_types: &[Ty],
-) -> Option<(Vec<ExprId>, Vec<Ty>)> {
+fn order_named(names: &[Name], named: &[(Name, ExprId)], arg_types: &[Ty]) -> Option<(Vec<ExprId>, Vec<Ty>)> {
     let ordered = names
         .iter()
         .map(|param| {

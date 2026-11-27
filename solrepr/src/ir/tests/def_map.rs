@@ -4,9 +4,7 @@ use crate::ir::def_map::*;
 use crate::paths::NormalizedPath;
 use crate::salsa::Db;
 use crate::salsa::root_db::RootDb;
-use crate::workspace::{
-    LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles,
-};
+use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles};
 use camino::Utf8PathBuf;
 use ropey::Rope;
 
@@ -37,9 +35,7 @@ fn db_with(files: &[(&str, &str)]) -> Db {
 }
 
 fn analysis_of(db: &Db) -> Analysis<DefMap> {
-    let file = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/src/Test.sol")))
-        .unwrap();
+    let file = db.file(&Utf8PathBuf::from(format!("{ROOT}/src/Test.sol"))).unwrap();
     db.root_def_map_analysis(RootDb::file_source_root(db, file))
 }
 
@@ -47,9 +43,7 @@ fn scope_of(defmap: &DefMap, contract: &str) -> ScopeId {
     defmap
         .defs
         .iter()
-        .find(|(id, data)| {
-            matches!(id, DefId::Contract(_)) && data.name.as_deref() == Some(contract)
-        })
+        .find(|(id, data)| matches!(id, DefId::Contract(_)) && data.name.as_deref() == Some(contract))
         .and_then(|(_, data)| data.child_scope)
         .expect("contract scope")
 }
@@ -89,26 +83,14 @@ fn rejected_declarations_are_retained_but_not_lookup_candidates() {
         .diagnostics
         .iter()
         .filter_map(|d| match d {
-            SemanticDiagnostic::Redeclaration {
-                rejected, previous, ..
-            } => Some((*rejected, *previous)),
+            SemanticDiagnostic::Redeclaration { rejected, previous, .. } => Some((*rejected, *previous)),
             _ => None,
         })
         .collect();
     assert_eq!(redeclarations.len(), 4);
     for (rejected, previous) in redeclarations {
-        assert!(
-            !analysis.data.scopes[scope]
-                .by_name
-                .values()
-                .any(|sd| sd.defs.contains(&rejected))
-        );
-        assert!(
-            analysis.data.scopes[scope]
-                .by_name
-                .values()
-                .any(|sd| sd.defs.contains(&previous))
-        );
+        assert!(!analysis.data.scopes[scope].by_name.values().any(|sd| sd.defs.contains(&rejected)));
+        assert!(analysis.data.scopes[scope].by_name.values().any(|sd| sd.defs.contains(&previous)));
     }
 }
 
@@ -121,12 +103,7 @@ fn overloads_are_not_rejected() {
     let analysis = analysis_of(&db);
 
     assert!(analysis.diagnostics.is_empty());
-    assert_eq!(
-        analysis.data.scopes[scope_of(&analysis.data, "C")].by_name["f"]
-            .defs
-            .len(),
-        2
-    );
+    assert_eq!(analysis.data.scopes[scope_of(&analysis.data, "C")].by_name["f"].defs.len(), 2);
 }
 
 #[test]
@@ -150,20 +127,13 @@ fn import_collisions_and_failures_are_reported_at_the_directive() {
                 previous: DefId::Contract(_),
                 ..
             } => collision = true,
-            SemanticDiagnostic::ImportSymbolNotFound { name, path, .. } => {
-                missing = name == "Missing" && path == "./A.sol"
-            }
-            SemanticDiagnostic::UnresolvedImport { path, .. } => {
-                unresolved = path == "./Nowhere.sol"
-            }
+            SemanticDiagnostic::ImportSymbolNotFound { name, path, .. } => missing = name == "Missing" && path == "./A.sol",
+            SemanticDiagnostic::UnresolvedImport { path, .. } => unresolved = path == "./Nowhere.sol",
             other => panic!("unexpected diagnostic: {:?}", other.code()),
         }
     }
     let codes: Vec<_> = analysis.diagnostics.iter().map(|d| d.code()).collect();
-    assert!(
-        collision && missing && unresolved,
-        "{codes:?} {collision} {missing} {unresolved}"
-    );
+    assert!(collision && missing && unresolved, "{codes:?} {collision} {missing} {unresolved}");
     assert_eq!(analysis.diagnostics.len(), 3);
 }
 
@@ -172,10 +142,7 @@ fn namespace_alias_collisions_are_reported() {
     let db = db_with(&[
         ("src/A.sol", "contract A {}"),
         ("src/B.sol", "contract B {}"),
-        (
-            "src/Test.sol",
-            "import \"./A.sol\" as Q;\nimport \"./B.sol\" as Q;\n",
-        ),
+        ("src/Test.sol", "import \"./A.sol\" as Q;\nimport \"./B.sol\" as Q;\n"),
     ]);
     let analysis = analysis_of(&db);
 
@@ -194,10 +161,7 @@ fn legal_import_cycles_report_nothing() {
     let db = db_with(&[
         ("src/A.sol", "import {Y} from \"./B.sol\";\ncontract X {}"),
         ("src/B.sol", "import {X} from \"./A.sol\";\ncontract Y {}"),
-        (
-            "src/Test.sol",
-            "import {X} from \"./A.sol\";\ncontract C {}",
-        ),
+        ("src/Test.sol", "import {X} from \"./A.sol\";\ncontract C {}"),
     ]);
     let analysis = analysis_of(&db);
 
@@ -223,11 +187,7 @@ fn duplicate_special_functions_are_reported() {
 
     // Each special name keeps exactly one lookup candidate.
     for name in ["constructor", "fallback", "receive"] {
-        assert_eq!(
-            analysis.data.scopes[scope].by_name[name].defs.len(),
-            1,
-            "{name}"
-        );
+        assert_eq!(analysis.data.scopes[scope].by_name[name].defs.len(), 1, "{name}");
     }
 }
 
@@ -259,12 +219,7 @@ fn narrow_sums_admit_exactly_their_def_kinds() {
             TypeDefId::try_from(def).is_ok(),
             matches!(
                 def,
-                DefId::Contract(_)
-                    | DefId::Interface(_)
-                    | DefId::Library(_)
-                    | DefId::Struct(_)
-                    | DefId::Enum(_)
-                    | DefId::Udvt(_)
+                DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_) | DefId::Struct(_) | DefId::Enum(_) | DefId::Udvt(_)
             ),
             "TypeDefId membership is wrong for {def:?}"
         );
@@ -272,12 +227,7 @@ fn narrow_sums_admit_exactly_their_def_kinds() {
             CallableDefId::try_from(def).is_ok(),
             matches!(
                 def,
-                DefId::Function(_)
-                    | DefId::Var(_)
-                    | DefId::Contract(_)
-                    | DefId::Error(_)
-                    | DefId::Event(_)
-                    | DefId::Modifier(_)
+                DefId::Function(_) | DefId::Var(_) | DefId::Contract(_) | DefId::Error(_) | DefId::Event(_) | DefId::Modifier(_)
             ),
             "CallableDefId membership is wrong for {def:?}"
         );
@@ -296,10 +246,10 @@ fn narrow_sums_admit_exactly_their_def_kinds() {
     }
 }
 
-/// The per-file owner set: every declaration the file contains, walked through
+/// The per-file def set: every declaration the file contains, walked through
 /// the scopes its members own, and nothing an import bound into its scope.
 #[test]
-fn owners_are_the_files_own_declarations() {
+fn defs_in_file_are_the_files_own_declarations() {
     let db = db_with(&[
         ("src/Dep.sol", "contract Dep { uint256 d; }"),
         (
@@ -310,13 +260,11 @@ fn owners_are_the_files_own_declarations() {
              contract C { struct S { uint256 a; } uint256 x; function f() external {} }",
         ),
     ]);
-    let file = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/src/Test.sol")))
-        .unwrap();
+    let file = db.file(&Utf8PathBuf::from(format!("{ROOT}/src/Test.sol"))).unwrap();
     let defmap = db.file_def_map(file);
 
     let mut kinds = defmap
-        .owners(file)
+        .file_defs(file)
         .into_iter()
         .map(|def| match def {
             DefId::Library(_) => "library",
@@ -331,17 +279,13 @@ fn owners_are_the_files_own_declarations() {
     kinds.sort();
     assert_eq!(
         kinds,
-        [
-            "contract", "function", "function", "library", "struct", "using", "var"
-        ],
+        ["contract", "function", "function", "library", "struct", "using", "var"],
         "the file's own declarations, including `using` and both functions"
     );
 
     // The named import binds `Dep` into this file's scope; it belongs to its own
     // file's collection.
-    let dep = db
-        .file(&Utf8PathBuf::from(format!("{ROOT}/src/Dep.sol")))
-        .unwrap();
+    let dep = db.file(&Utf8PathBuf::from(format!("{ROOT}/src/Dep.sol"))).unwrap();
     let imported = defmap
         .defs
         .keys()
@@ -349,7 +293,7 @@ fn owners_are_the_files_own_declarations() {
         .find(|def| matches!(def, DefId::Contract(_)) && def.file() == dep)
         .expect("the dependency declares a contract");
     assert!(
-        !defmap.owners(file).contains(&imported),
-        "an imported def is not one of this file's owners"
+        !defmap.file_defs(file).contains(&imported),
+        "an imported def is not one of this file's defs"
     );
 }

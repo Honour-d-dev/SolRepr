@@ -6,24 +6,20 @@ use triomphe::Arc;
 
 use crate::ast::kinds::{FieldKind, NodeKind};
 use crate::ast::{
-    AstId, AstIdMap, AstNode, Contract, Enum, Error, Event, Function, FunctionId, FunctionKind,
-    Import, ImportKind, Interface, Library, Modifier, NodeRange, Struct, ToAstNode, Udvt, Using,
-    Var,
+    AstId, AstIdMap, AstNode, Contract, Enum, Error, Event, Function, FunctionId, FunctionKind, Import, ImportKind, Interface, Library,
+    Modifier, NodeRange, Struct, ToAstNode, Udvt, Using, Var,
 };
 use crate::hir::body_map::{Local, LocalId};
 use crate::hir::exprs::{Expr, ExprBuilder, ExprId, Name};
 use crate::hir::syntax_store::{SourceMap, SyntaxStore};
-use crate::hir::types::{
-    Location, Mutability, Primitive, RefKind, TyName, TyNameId, TypeBuilder, VariableKind,
-    Visibility,
-};
+use crate::hir::types::{Location, Mutability, Primitive, RefKind, TyName, TyNameId, TypeBuilder, VariableKind, Visibility};
 use crate::ir::item_tree::{ItemId, ItemTree};
 use crate::salsa::FileId;
 
 pub type FieldId = Idx<Field>;
 pub type VariantId = Idx<Variant>;
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum SemanticId {
     //Local semantics
     Local(LocalId),
@@ -185,35 +181,27 @@ impl ExprBuilder for ItemBuilder {
     fn alloc_expr_range(&mut self, expr: Expr, range: NodeRange) -> ExprId {
         let expr_id = self.syntax_store.exprs.alloc(expr);
         self.source_map.expr_ranges.insert(expr_id, range);
-        self.source_map
-            .range_to_semantic
-            .insert(range, SemanticId::Expr(expr_id));
+        self.source_map.range_to_semantic.insert(range, SemanticId::Expr(expr_id));
         expr_id
     }
 
     fn alloc_member_expr(&mut self, member: Expr, range: NodeRange, prop: NodeRange) -> ExprId {
         let mem_id = self.alloc_expr_range(member, range);
-        self.source_map
-            .range_to_semantic
-            .insert(prop, SemanticId::Expr(mem_id));
+        self.source_map.range_to_semantic.insert(prop, SemanticId::Expr(mem_id));
         mem_id
     }
 
     fn alloc_call_expr(&mut self, call: Expr, node: Node, ident: Option<NodeRange>) -> ExprId {
         let call_id = self.alloc_expr(call, node);
         if let Some(ident) = ident {
-            self.source_map
-                .range_to_semantic
-                .insert(ident, SemanticId::Expr(call_id));
+            self.source_map.range_to_semantic.insert(ident, SemanticId::Expr(call_id));
         };
         call_id
     }
 
     fn alloc_wrapper_expr(&mut self, expr: Expr, node: Node) -> ExprId {
         let expr_id = self.syntax_store.exprs.alloc(expr);
-        self.source_map
-            .expr_ranges
-            .insert(expr_id, NodeRange::from(&node));
+        self.source_map.expr_ranges.insert(expr_id, NodeRange::from(&node));
         expr_id
     }
 }
@@ -223,9 +211,7 @@ impl TypeBuilder for ItemBuilder {
         let ty_ref_id = self.syntax_store.types.alloc(ty);
         let range = NodeRange::from(&node);
         self.source_map.ty_ref_ranges.insert(ty_ref_id, range);
-        self.source_map
-            .range_to_semantic
-            .insert(range, SemanticId::Type(ty_ref_id));
+        self.source_map.range_to_semantic.insert(range, SemanticId::Type(ty_ref_id));
         ty_ref_id
     }
 }
@@ -268,10 +254,8 @@ impl ItemBuilder {
             ImportKind::Named { symbols } => {
                 let mut name_cursor = import_node.walk();
                 let mut alias_cursor = import_node.walk();
-                let mut names = import_node
-                    .children_by_field_id(FieldKind::IMPORT_NAME.into(), &mut name_cursor);
-                let mut aliases =
-                    import_node.children_by_field_id(FieldKind::ALIAS.into(), &mut alias_cursor);
+                let mut names = import_node.children_by_field_id(FieldKind::IMPORT_NAME.into(), &mut name_cursor);
+                let mut aliases = import_node.children_by_field_id(FieldKind::ALIAS.into(), &mut alias_cursor);
                 for symbol in symbols {
                     let expr = if let Some(alias) = symbol.alias {
                         let alias_node = aliases.next().unwrap();
@@ -287,21 +271,14 @@ impl ItemBuilder {
             }
             ImportKind::Namespace { alias } => {
                 let expr = Expr::Ident(alias);
-                let node = import_node
-                    .child_by_field_id(FieldKind::ALIAS.into())
-                    .unwrap();
+                let node = import_node.child_by_field_id(FieldKind::ALIAS.into()).unwrap();
                 self.alloc_expr(expr, node);
             }
             ImportKind::Full => {} //only has path
         };
 
-        let node = import_node
-            .child_by_field_id(FieldKind::SOURCE.into())
-            .unwrap();
-        let path = self
-            .root()
-            .text_by_range(node.byte_range())
-            .trim_matches(['"', '\'']);
+        let node = import_node.child_by_field_id(FieldKind::SOURCE.into()).unwrap();
+        let path = self.root().text_by_range(node.byte_range()).trim_matches(['"', '\'']);
         let expr = Expr::Path(path.into());
         self.alloc_expr(expr, node);
 
@@ -359,10 +336,7 @@ impl ItemBuilder {
 
     fn lower_override_specifier(&mut self, node: Node) -> OverrideSpecifier {
         let range = NodeRange::from(&node);
-        if !node
-            .children(&mut node.walk())
-            .any(|child| child.kind_id() == NodeKind::LPAREN)
-        {
+        if !node.children(&mut node.walk()).any(|child| child.kind_id() == NodeKind::LPAREN) {
             self.source_map.override_ranges = Box::from([range]);
             return OverrideSpecifier::Bare;
         }
@@ -388,42 +362,29 @@ impl ItemBuilder {
         let node = ast.node();
         let mut fields = Arena::new();
 
-        self.syntax_store.name = node
-            .child_by_field_id(FieldKind::NAME.into())
-            .and_then(|n| self.lower_expr(n));
+        self.syntax_store.name = node.child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n));
 
         if let Some(body) = node.child_by_field_id(FieldKind::BODY.into()) {
             for member in body.named_children(&mut body.walk()) {
                 if let NodeKind::STRUCT_MEMBER = member.kind_id().into() {
-                    let Some((name, range)) =
-                        member.child_by_field_id(FieldKind::NAME.into()).map(|n| {
-                            (
-                                self.root().text_by_range(n.byte_range()).trim().into(),
-                                NodeRange::from(&n),
-                            )
-                        })
+                    let Some((name, range)) = member
+                        .child_by_field_id(FieldKind::NAME.into())
+                        .map(|n| (self.root().text_by_range(n.byte_range()).trim().into(), NodeRange::from(&n)))
                     else {
                         continue;
                     };
 
-                    let Some(ty_ref) = member
-                        .child_by_field_id(FieldKind::TYPE.into())
-                        .and_then(|ty| self.lower_type(ty))
-                    else {
+                    let Some(ty_ref) = member.child_by_field_id(FieldKind::TYPE.into()).and_then(|ty| self.lower_type(ty)) else {
                         continue;
                     };
 
                     let field_id = fields.alloc(Field { name, ty_ref });
 
-                    self.source_map
-                        .field_ranges
-                        .insert(field_id, NodeRange::from(&member));
+                    self.source_map.field_ranges.insert(field_id, NodeRange::from(&member));
                     self.source_map
                         .range_to_semantic
                         .insert(NodeRange::from(&member), SemanticId::Field(field_id));
-                    self.source_map
-                        .range_to_semantic
-                        .insert(range, SemanticId::Field(field_id));
+                    self.source_map.range_to_semantic.insert(range, SemanticId::Field(field_id));
                 }
             }
         }
@@ -442,9 +403,7 @@ impl ItemBuilder {
         let node = ast.node();
         let mut variants = Arena::new();
 
-        self.syntax_store.name = node
-            .child_by_field_id(FieldKind::NAME.into())
-            .and_then(|n| self.lower_expr(n));
+        self.syntax_store.name = node.child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n));
 
         if let Some(body) = node.child_by_field_id(FieldKind::BODY.into()) {
             for value in body.named_children(&mut body.walk()) {
@@ -452,9 +411,7 @@ impl ItemBuilder {
                     let name = self.root().text_by_range(value.byte_range()).trim().into();
 
                     let variant_id = variants.alloc(Variant { name });
-                    self.source_map
-                        .variant_ranges
-                        .insert(variant_id, NodeRange::from(&value));
+                    self.source_map.variant_ranges.insert(variant_id, NodeRange::from(&value));
                     self.source_map
                         .range_to_semantic
                         .insert(NodeRange::from(&value), SemanticId::Variant(variant_id));
@@ -477,10 +434,7 @@ impl ItemBuilder {
         let mut parameters = Arena::new();
         let mut anonymous = false;
 
-        if let Some(expr_id) = node
-            .child_by_field_id(FieldKind::NAME.into())
-            .and_then(|n| self.lower_expr(n))
-        {
+        if let Some(expr_id) = node.child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n)) {
             self.syntax_store.name = Some(expr_id);
         }
 
@@ -513,10 +467,7 @@ impl ItemBuilder {
         let node = ast.node();
         let mut parameters = Arena::new();
 
-        if let Some(expr_id) = node
-            .child_by_field_id(FieldKind::NAME.into())
-            .and_then(|n| self.lower_expr(n))
-        {
+        if let Some(expr_id) = node.child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n)) {
             self.syntax_store.name = Some(expr_id);
         }
 
@@ -555,7 +506,6 @@ impl ItemBuilder {
         }
 
         let body = node.child_by_field_id(FieldKind::BODY.into());
-        self.source_map.body_range = body.map(|body| NodeRange::from(&body));
         ModifierData {
             name: item.name.clone(),
             is_virtual: item.is_virtual,
@@ -574,8 +524,7 @@ impl ItemBuilder {
                 .find(|child| child.kind_id() == NodeKind::EXPRESSION)
                 .is_some_and(|expr| self.root().text_by_range(expr.byte_range()).trim() == "_");
         }
-        node.named_children(&mut node.walk())
-            .any(|child| self.body_has_placeholder(child))
+        node.named_children(&mut node.walk()).any(|child| self.body_has_placeholder(child))
     }
 
     // ── Function Builder ─────────────────────────────────────────────────
@@ -613,16 +562,8 @@ impl ItemBuilder {
             }
         }
 
-        let args = args
-            .iter()
-            .copied()
-            .collect::<Option<Vec<_>>>()
-            .unwrap_or_default();
-        let rets = rets
-            .iter()
-            .copied()
-            .collect::<Option<Vec<_>>>()
-            .unwrap_or_default();
+        let args = args.iter().copied().collect::<Option<Vec<_>>>().unwrap_or_default();
+        let rets = rets.iter().copied().collect::<Option<Vec<_>>>().unwrap_or_default();
 
         FunctionData {
             name: item.name.clone(),
@@ -667,22 +608,14 @@ impl ItemBuilder {
         let parameter_range = NodeRange::from(&node);
         let local_range = name_range.unwrap_or(parameter_range);
         let decl_order = parameters.len() as u32;
-        let local_id = parameters.alloc(Local::new(
-            name,
-            VariableKind::Parameter,
-            ty_ref,
-            decl_order,
-            None,
-        ));
+        let local_id = parameters.alloc(Local::new(name, VariableKind::Parameter, ty_ref, decl_order, None));
         self.source_map.local_ranges.insert(local_id, local_range);
         self.source_map
             .range_to_semantic
             .insert(parameter_range, SemanticId::Local(local_id));
 
         if let Some(range) = name_range {
-            self.source_map
-                .range_to_semantic
-                .insert(range, SemanticId::Local(local_id));
+            self.source_map.range_to_semantic.insert(range, SemanticId::Local(local_id));
         }
         Some(local_id)
     }
@@ -692,14 +625,10 @@ impl ItemBuilder {
     pub fn build_contract(&mut self, id: AstId<Contract>, items: &ItemTree) -> ContractData {
         let ast = self.ast_node(id);
         let node = ast.node();
-        let is_abstract = node
-            .children(&mut node.walk())
-            .any(|child| child.kind_id() == NodeKind::ABSTRACT);
+        let is_abstract = node.children(&mut node.walk()).any(|child| child.kind_id() == NodeKind::ABSTRACT);
         let mut bases = Vec::new();
 
-        self.syntax_store.name = node
-            .child_by_field_id(FieldKind::NAME.into())
-            .and_then(|n| self.lower_expr(n));
+        self.syntax_store.name = node.child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
             if child.kind_id() == NodeKind::INHERITANCE_SPECIFIER
@@ -716,10 +645,7 @@ impl ItemBuilder {
                 return None;
             };
             match items[*id].kind {
-                FunctionKind::Constructor => Some(FunctionId {
-                    file: self.file,
-                    id: *id,
-                }),
+                FunctionKind::Constructor => Some(FunctionId { file: self.file, id: *id }),
                 _ => None,
             }
         });
@@ -740,9 +666,7 @@ impl ItemBuilder {
         let node = ast.node();
         let mut bases = Vec::new();
 
-        self.syntax_store.name = node
-            .child_by_field_id(FieldKind::NAME.into())
-            .and_then(|n| self.lower_expr(n));
+        self.syntax_store.name = node.child_by_field_id(FieldKind::NAME.into()).and_then(|n| self.lower_expr(n));
 
         for child in node.named_children(&mut node.walk()) {
             if child.kind_id() == NodeKind::INHERITANCE_SPECIFIER

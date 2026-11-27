@@ -34,24 +34,17 @@ mod types;
 /// A `(source, predicate)` pair for a rejection table.
 type Rejects = &'static [(&'static str, fn(&SemanticDiagnostic) -> bool)];
 
-/// The diagnostic codes an owner produced — the `{:?}` payload every
+/// The diagnostic codes a def produced — the `{:?}` payload every
 /// rejection test prints on failure.
 fn codes(inference: &Inference) -> Vec<DiagnosticCode> {
-    inference
-        .diagnostics
-        .iter()
-        .map(SemanticDiagnostic::code)
-        .collect()
+    inference.diagnostics.iter().map(SemanticDiagnostic::code).collect()
 }
 
 fn expr_results(inference: &Inference) -> impl Iterator<Item = (ExprId, Ty, Option<&Resolution>)> {
-    inference
-        .expr_types
-        .iter()
-        .map(|(id, ty)| (id, *ty, inference.expr_resolution(id)))
+    inference.expr_types.iter().map(|(id, ty)| (id, *ty, inference.expr_resolution(id)))
 }
 
-/// The `InferenceFailure` messages an owner produced.
+/// The `InferenceFailure` messages a def produced.
 fn failure_messages(inference: &Inference) -> Vec<String> {
     inference
         .diagnostics
@@ -81,7 +74,7 @@ fn reports_type_mismatch(source: &str, function: &str) -> bool {
         .any(|d| matches!(d, SemanticDiagnostic::TypeMismatch { .. }))
 }
 
-/// `(lhs, operator, type)` for every assignment expression in the owner's
+/// `(lhs, operator, type)` for every assignment expression in the def's
 /// body, in arena order.
 fn assignments(db: &Db, def: DefId) -> Vec<(ExprId, Option<BinaryOp>, Ty)> {
     let DefId::Function(id) = def else {
@@ -118,23 +111,15 @@ fn declaration_names_are_semantic_hover_targets() {
     for def in [find_error(&db, file, "Bad"), find_event(&db, file, "Done")] {
         let name = def_name(&db, def);
         let range = def_name_range(&db, file, def).expect("def should have a name range");
-        let id = semantic_at(&db, def, range)
-            .unwrap_or_else(|| panic!("`{name}` should map to a semantic id"));
+        let id = semantic_at(&db, def, range).unwrap_or_else(|| panic!("`{name}` should map to a semantic id"));
         let SemanticId::Expr(expr) = id else {
             panic!("`{name}` should be an expression");
         };
-        let resolved = db
-            .inference(def)
-            .expr_resolution(expr)
-            .and_then(|resolution| match resolution {
-                Resolution::Callable(callable) => callable.def(),
-                _ => None,
-            });
-        assert_eq!(
-            resolved,
-            Some(def),
-            "`{name}` should resolve to its own declaration"
-        );
+        let resolved = db.inference(def).expr_resolution(expr).and_then(|resolution| match resolution {
+            Resolution::Callable(callable) => callable.def(),
+            _ => None,
+        });
+        assert_eq!(resolved, Some(def), "`{name}` should resolve to its own declaration");
     }
 }
 /// An invocation wrapper (`emit`, `revert`, a modifier invocation) shares its
@@ -143,9 +128,7 @@ fn declaration_names_are_semantic_hover_targets() {
 /// selected declaration, which the call carries.
 #[test]
 fn invocation_wrapper_does_not_steal_the_semantic_mapping() {
-    let (db, file) = make_test_db(
-        "contract C { event Done(uint256 v); function f() external { emit Done(1); } }",
-    );
+    let (db, file) = make_test_db("contract C { event Done(uint256 v); function f() external { emit Done(1); } }");
     let f = find_function(&db, file, "f");
     let DefId::Function(id) = f else {
         panic!("fixture declares function f")
@@ -162,41 +145,28 @@ fn invocation_wrapper_does_not_steal_the_semantic_mapping() {
     let Some(SemanticId::Expr(mapped)) = semantic_at(&db, f, range) else {
         panic!("the emit statement's range should map to an expression");
     };
-    assert_ne!(
-        mapped, wrapper,
-        "the wrapper must not own the statement range"
-    );
+    assert_ne!(mapped, wrapper, "the wrapper must not own the statement range");
     assert!(
-        matches!(
-            db.inference(f).expr_resolution(mapped),
-            Some(Resolution::Callable(_))
-        ),
+        matches!(db.inference(f).expr_resolution(mapped), Some(Resolution::Callable(_))),
         "the mapped expression should carry the selected event",
     );
 }
 
 #[test]
 fn computed_expression_keeps_type_without_a_resolution() {
-    let (db, file) =
-        make_test_db("contract C { function f(uint a, uint b) external { uint c = a + b; } }");
+    let (db, file) = make_test_db("contract C { function f(uint a, uint b) external { uint c = a + b; } }");
     let inference = function_inference(&db, file);
-    assert!(expr_results(&inference).any(|(_, ty, resolution)| {
-        resolution.is_none() && !matches!(ty.kind(&db), TyKind::Invalid)
-    }));
+    assert!(expr_results(&inference).any(|(_, ty, resolution)| { resolution.is_none() && !matches!(ty.kind(&db), TyKind::Invalid) }));
 }
 #[test]
 fn every_expression_has_a_type_and_resolution_is_sparse() {
-    let (db, file) =
-        make_test_db("contract C { function f(uint a, uint b) external { uint c = a + b; } }");
+    let (db, file) = make_test_db("contract C { function f(uint a, uint b) external { uint c = a + b; } }");
     let inference = function_inference(&db, file);
     let DefId::Function(function) = find_function(&db, file, "f") else {
         panic!("fixture should contain a function")
     };
     let body = db.body_map(BodyOwnerId::Function(function));
-    assert_eq!(
-        inference.expr_types.iter().count(),
-        body.syntax_store.exprs.iter().count()
-    );
+    assert_eq!(inference.expr_types.iter().count(), body.syntax_store.exprs.iter().count());
     assert!(inference.expr_resolutions.iter().count() < inference.expr_types.iter().count());
     for (expr, _) in body.syntax_store.exprs.iter() {
         let _ = inference.expr_ty(expr);
@@ -215,8 +185,7 @@ fn tables_are_keyed_by_expr_id() {
 }
 #[test]
 fn cycle_recovery_converges_on_the_declared_types() {
-    let (db, file) =
-        make_test_db(r#"contract C { uint256 constant A = B; uint256 constant B = A; }"#);
+    let (db, file) = make_test_db(r#"contract C { uint256 constant A = B; uint256 constant B = A; }"#);
     let vars = db
         .file_def_map(file)
         .defs
@@ -230,18 +199,12 @@ fn cycle_recovery_converges_on_the_declared_types() {
         let DefId::Var(id) = var else { continue };
         let data = db.var_data(id);
         // The cycle iterates to a fixed point, so the declared type survives
-        // instead of the whole owner degrading to `Invalid`.
+        // instead of the whole def degrading to `Invalid`.
         for (expr, _) in data.syntax_store.exprs.iter() {
-            assert!(
-                !inference.expr_ty(expr).is_invalid(&db),
-                "{var:?} initializer"
-            );
+            assert!(!inference.expr_ty(expr).is_invalid(&db), "{var:?} initializer");
         }
         for (ty_ref_id, _) in data.syntax_store.types.iter() {
-            assert!(
-                !inference.ty(ty_ref_id).is_invalid(&db),
-                "{var:?} declared type"
-            );
+            assert!(!inference.ty(ty_ref_id).is_invalid(&db), "{var:?} declared type");
         }
     }
 }

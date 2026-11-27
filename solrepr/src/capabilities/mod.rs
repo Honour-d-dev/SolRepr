@@ -8,14 +8,13 @@ pub mod view_hir;
 
 use lsp_types::Range;
 
-use crate::ast::{NodeRange, EnumId};
-use crate::utilities::byte_to_position;
+use crate::ast::{EnumId, NodeRange};
 use crate::hir::body_map::LocalId;
 use crate::hir::item_data::{FieldId, SemanticId, VariantId};
 use crate::hir::resolution::{Field, Resolution};
 use crate::ir::def_map::DefId;
-use crate::salsa::{File, HirDb, Db};
-
+use crate::salsa::{Db, File, HirDb};
+use crate::utilities::byte_to_position;
 
 /// A byte range in `file`, as an LSP range. The one conversion the capabilities
 /// share.
@@ -63,9 +62,7 @@ impl Identity {
 /// or several.
 fn identity_of_resolution(db: &dyn HirDb, resolution: &Resolution) -> Option<Identity> {
     match resolution {
-        Resolution::Var(def) | Resolution::This(def) | Resolution::Super(def) => {
-            Some(Identity::Def(*def))
-        }
+        Resolution::Var(def) | Resolution::This(def) | Resolution::Super(def) => Some(Identity::Def(*def)),
         Resolution::Callable(callable) => callable.def().map(Identity::Def),
         Resolution::Type(ty) => ty.ty().def_id(db).map(Identity::Def),
         Resolution::Module(file) => Some(Identity::Def(DefId::File(*file))),
@@ -89,23 +86,23 @@ fn identity_of_resolution(db: &dyn HirDb, resolution: &Resolution) -> Option<Ide
     }
 }
 
-/// The single Identity a semantic `id` denotes, read from the owner's own store.
-pub fn identity_of_semantic(db: &dyn HirDb, owner: DefId, id: SemanticId) -> Option<Identity> {
+/// The single Identity a semantic `id` denotes, read from the def's own store.
+pub fn identity_of_semantic(db: &dyn HirDb, def: DefId, id: SemanticId) -> Option<Identity> {
     match id {
-        SemanticId::Local(local) => Some(Identity::Local { owner, local }),
-        SemanticId::Field(field) => match owner {
-            DefId::Struct(_) => Some(Identity::Field { owner, field }),
+        SemanticId::Local(local) => Some(Identity::Local { owner: def, local }),
+        SemanticId::Field(field) => match def {
+            DefId::Struct(_) => Some(Identity::Field { owner: def, field }),
             _ => None,
         },
-        SemanticId::Variant(variant) => match owner {
+        SemanticId::Variant(variant) => match def {
             DefId::Enum(enum_) => Some(Identity::Variant { enum_, variant }),
             _ => None,
         },
         SemanticId::Expr(expr) => db
-            .inference(owner)
+            .inference(def)
             .expr_resolution(expr)
             .and_then(|resolution| identity_of_resolution(db, resolution)),
-        SemanticId::Type(ty) => db.inference(owner).ty(ty).ty().def_id(db).map(Identity::Def),
+        SemanticId::Type(ty) => db.inference(def).ty(ty).ty().def_id(db).map(Identity::Def),
     }
 }
 

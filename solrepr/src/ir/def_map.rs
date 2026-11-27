@@ -14,8 +14,7 @@ use crate::ast::ImportItem;
 use crate::ast::UdvtId;
 use crate::ast::UsingId;
 use crate::ast::{
-    ContractId, EnumId, ErasedAstId, ErrorId, EventId, FunctionId, ImportKind, InterfaceId,
-    LibraryId, ModifierId, StructId, VarId,
+    ContractId, EnumId, ErasedAstId, ErrorId, EventId, FunctionId, ImportKind, InterfaceId, LibraryId, ModifierId, StructId, VarId,
 };
 use crate::hir::analysis::Analysis;
 use crate::hir::diagnostics::{DiagnosticSink, SemanticDiagnostic};
@@ -119,10 +118,7 @@ impl TypeDefId {
     /// A contract, interface or library — the kinds whose members come from a
     /// scope rather than from a field list.
     pub fn is_contract_like(self) -> bool {
-        matches!(
-            self,
-            Self::Contract(_) | Self::Interface(_) | Self::Library(_)
-        )
+        matches!(self, Self::Contract(_) | Self::Interface(_) | Self::Library(_))
     }
 }
 
@@ -313,11 +309,11 @@ impl DefMap {
     /// The file's own declarations, through the scopes its members own. Skips what
     /// imports bound, and declarations the def map withheld (the gate keeps their
     /// `DefData` but not their name).
-    pub fn owners(&self, file: FileId) -> Vec<DefId> {
+    pub fn file_defs(&self, file: FileId) -> Vec<DefId> {
         let Some(data) = self.files.get(&file) else {
             return Vec::new();
         };
-        let mut owners = Vec::new();
+        let mut defs = Vec::new();
         let mut pending = vec![data.scope];
         let mut visited = FxHashSet::default();
         while let Some(scope_id) = pending.pop() {
@@ -330,7 +326,7 @@ impl DefMap {
                     if def.file() != file {
                         continue;
                     }
-                    owners.push(def);
+                    defs.push(def);
                     if let Some(child) = self.defs.get(&def).and_then(|data| data.child_scope) {
                         pending.push(child);
                     }
@@ -338,11 +334,11 @@ impl DefMap {
             }
             for &using in scope.usings.iter().flatten() {
                 if using.file() == file {
-                    owners.push(using);
+                    defs.push(using);
                 }
             }
         }
-        owners
+        defs
     }
 }
 
@@ -385,17 +381,9 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
                         scope: file_scope,
                         child_scope: None,
                     };
-                    let id = ImportId {
-                        file: self.file,
-                        id,
-                    };
+                    let id = ImportId { file: self.file, id };
                     self.collector.defs.insert(DefId::Import(id), def_data);
-                    self.collector
-                        .unresolved_imports
-                        .entry(self.file)
-                        .or_default()
-                        .imports
-                        .push(id);
+                    self.collector.unresolved_imports.entry(self.file).or_default().imports.push(id);
                 }
                 ItemId::Using(id) => {
                     let data = DefData {
@@ -403,105 +391,66 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
                         scope: file_scope,
                         child_scope: None,
                     };
-                    let id = DefId::Using(UsingId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Using(UsingId { file: self.file, id });
                     self.collector.defs.insert(id, data);
-                    self.collector.scopes[file_scope]
-                        .usings
-                        .get_or_insert_with(Vec::new)
-                        .push(id);
+                    self.collector.scopes[file_scope].usings.get_or_insert_with(Vec::new).push(id);
                     if let Some(violation) = self.membership_error(id, file_scope) {
                         self.report_member_error(violation, id, file_scope);
                     }
                 }
                 ItemId::Contract(id) => {
                     let c = &self.item_tree[id];
-                    let id = DefId::Contract(ContractId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Contract(ContractId { file: self.file, id });
                     self.collect_container(id, file_scope, c.name.clone(), &c.members);
                 }
                 ItemId::Interface(id) => {
                     let i = &self.item_tree[id];
-                    let id = DefId::Interface(InterfaceId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Interface(InterfaceId { file: self.file, id });
                     self.collect_container(id, file_scope, i.name.clone(), &i.members);
                 }
                 ItemId::Library(id) => {
                     let l = &self.item_tree[id];
-                    let id = DefId::Library(LibraryId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Library(LibraryId { file: self.file, id });
                     self.collect_container(id, file_scope, l.name.clone(), &l.members);
                 }
                 ItemId::Udvt(id) => {
                     let u = &self.item_tree[id];
-                    let id = DefId::Udvt(UdvtId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Udvt(UdvtId { file: self.file, id });
                     self.collect_def(id, file_scope, None, u.name.clone().unwrap_or_default());
                 }
                 ItemId::Struct(id) => {
                     let s = &self.item_tree[id];
-                    let id = DefId::Struct(StructId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Struct(StructId { file: self.file, id });
                     self.collect_def(id, file_scope, None, s.name.clone());
                 }
                 ItemId::Enum(id) => {
                     let e = &self.item_tree[id];
-                    let id = DefId::Enum(EnumId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Enum(EnumId { file: self.file, id });
                     self.collect_def(id, file_scope, None, e.name.clone());
                 }
                 ItemId::Function(id) => {
                     let f = &self.item_tree[id];
-                    let id = DefId::Function(FunctionId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Function(FunctionId { file: self.file, id });
                     self.collect_def(id, file_scope, None, f.name.clone());
                 }
                 ItemId::Event(id) => {
                     let e = &self.item_tree[id];
-                    let id = DefId::Event(EventId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Event(EventId { file: self.file, id });
                     self.collect_def(id, file_scope, None, e.name.clone());
                 }
                 ItemId::Error(id) => {
                     let e = &self.item_tree[id];
-                    let id = DefId::Error(ErrorId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Error(ErrorId { file: self.file, id });
                     self.collect_def(id, file_scope, None, e.name.clone());
                 }
                 ItemId::Modifier(id) => {
                     let m = &self.item_tree[id];
-                    let id = DefId::Modifier(ModifierId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Modifier(ModifierId { file: self.file, id });
                     self.collect_def(id, file_scope, None, m.name.clone());
                 }
                 ItemId::Var(id) => {
                     let v = &self.item_tree[id];
-                    let id = DefId::Var(VarId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Var(VarId { file: self.file, id });
                     self.collect_def(id, file_scope, None, v.name.clone());
                 }
             }
@@ -538,13 +487,7 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
         scope_id
     }
 
-    fn collect_container(
-        &mut self,
-        id: DefId,
-        file_scope: ScopeId,
-        name: Name,
-        members: &[ItemId],
-    ) {
+    fn collect_container(&mut self, id: DefId, file_scope: ScopeId, name: Name, members: &[ItemId]) {
         let scope = Scope {
             owner: id,
             parent: Some(file_scope),
@@ -561,60 +504,15 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
     fn collect_members(&mut self, members: &[ItemId], parent_scope: ScopeId) {
         for &member in members {
             let (id, name) = match member {
-                ItemId::Struct(id) => (
-                    DefId::Struct(StructId {
-                        file: self.file,
-                        id,
-                    }),
-                    self.item_tree[id].name.clone(),
-                ),
-                ItemId::Enum(id) => (
-                    DefId::Enum(EnumId {
-                        file: self.file,
-                        id,
-                    }),
-                    self.item_tree[id].name.clone(),
-                ),
-                ItemId::Function(id) => (
-                    DefId::Function(FunctionId {
-                        file: self.file,
-                        id,
-                    }),
-                    self.item_tree[id].name.clone(),
-                ),
-                ItemId::Event(id) => (
-                    DefId::Event(EventId {
-                        file: self.file,
-                        id,
-                    }),
-                    self.item_tree[id].name.clone(),
-                ),
-                ItemId::Error(id) => (
-                    DefId::Error(ErrorId {
-                        file: self.file,
-                        id,
-                    }),
-                    self.item_tree[id].name.clone(),
-                ),
-                ItemId::Modifier(id) => (
-                    DefId::Modifier(ModifierId {
-                        file: self.file,
-                        id,
-                    }),
-                    self.item_tree[id].name.clone(),
-                ),
-                ItemId::Var(id) => (
-                    DefId::Var(VarId {
-                        file: self.file,
-                        id,
-                    }),
-                    self.item_tree[id].name.clone(),
-                ),
+                ItemId::Struct(id) => (DefId::Struct(StructId { file: self.file, id }), self.item_tree[id].name.clone()),
+                ItemId::Enum(id) => (DefId::Enum(EnumId { file: self.file, id }), self.item_tree[id].name.clone()),
+                ItemId::Function(id) => (DefId::Function(FunctionId { file: self.file, id }), self.item_tree[id].name.clone()),
+                ItemId::Event(id) => (DefId::Event(EventId { file: self.file, id }), self.item_tree[id].name.clone()),
+                ItemId::Error(id) => (DefId::Error(ErrorId { file: self.file, id }), self.item_tree[id].name.clone()),
+                ItemId::Modifier(id) => (DefId::Modifier(ModifierId { file: self.file, id }), self.item_tree[id].name.clone()),
+                ItemId::Var(id) => (DefId::Var(VarId { file: self.file, id }), self.item_tree[id].name.clone()),
                 ItemId::Udvt(id) => (
-                    DefId::Udvt(UdvtId {
-                        file: self.file,
-                        id,
-                    }),
+                    DefId::Udvt(UdvtId { file: self.file, id }),
                     self.item_tree[id].name.clone().unwrap_or_default(),
                 ),
                 ItemId::Using(id) => {
@@ -623,15 +521,9 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
                         scope: parent_scope,
                         child_scope: None,
                     };
-                    let id = DefId::Using(UsingId {
-                        file: self.file,
-                        id,
-                    });
+                    let id = DefId::Using(UsingId { file: self.file, id });
                     self.collector.defs.insert(id, data);
-                    self.collector.scopes[parent_scope]
-                        .usings
-                        .get_or_insert_with(Vec::new)
-                        .push(id);
+                    self.collector.scopes[parent_scope].usings.get_or_insert_with(Vec::new).push(id);
                     if let Some(violation) = self.membership_error(id, parent_scope) {
                         self.report_member_error(violation, id, parent_scope);
                     }
@@ -644,13 +536,7 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
         }
     }
 
-    fn collect_def(
-        &mut self,
-        id: DefId,
-        scope_id: ScopeId,
-        sub_scope: Option<ScopeId>,
-        name: Name,
-    ) {
+    fn collect_def(&mut self, id: DefId, scope_id: ScopeId, sub_scope: Option<ScopeId>, name: Name) {
         let member_error = self.membership_error(id, scope_id);
         let scope = self.collector.scopes.index_mut(scope_id);
         let ns = DefNamespace::from(&id);
@@ -675,8 +561,7 @@ impl<'db, 'collector> FileCollector<'db, 'collector> {
             }
         }
         if let Some(previous) = previous {
-            self.collector
-                .report_redeclaration(id, name.clone(), previous);
+            self.collector.report_redeclaration(id, name.clone(), previous);
         }
 
         if let Some(violation) = member_error {
@@ -779,11 +664,7 @@ impl<'db> Collector<'db> {
     }
 
     fn report_redeclaration(&mut self, rejected: DefId, name: Name, previous: DefId) {
-        self.sink.push(SemanticDiagnostic::Redeclaration {
-            rejected,
-            name,
-            previous,
-        });
+        self.sink.push(SemanticDiagnostic::Redeclaration { rejected, name, previous });
     }
 
     /// Resolving imports is tricky because a global import brings its own imported global scope
@@ -867,13 +748,7 @@ impl<'db> Collector<'db> {
 
     /// Binds an import into its importing file's scope.
     /// `false` indicates the depdata isnt available or ready yet (in the case the defmaps are cyclic)
-    fn extend_scope(
-        &mut self,
-        import: ImportId,
-        dep: FileId,
-        dep_root: SourceRootId,
-        import_kind: &ImportKind,
-    ) -> bool {
+    fn extend_scope(&mut self, import: ImportId, dep: FileId, dep_root: SourceRootId, import_kind: &ImportKind) -> bool {
         let Some(dep_data) = self.file_data(dep_root, dep) else {
             return false;
         };
@@ -907,12 +782,7 @@ impl<'db> Collector<'db> {
                 let dep_def_id = dep_data.id;
                 let file_scope = self.files.get(&import.file).unwrap().scope;
                 let mut previous = None;
-                match self
-                    .scopes
-                    .index_mut(file_scope)
-                    .by_name
-                    .entry(alias.clone())
-                {
+                match self.scopes.index_mut(file_scope).by_name.entry(alias.clone()) {
                     Entry::Vacant(v) => {
                         v.insert(ScopeData {
                             namespace: DefNamespace::Types,
@@ -934,25 +804,14 @@ impl<'db> Collector<'db> {
 
     /// Binds one named-import symbol into its importing file's scope. `false` means the symbol
     /// is not visible in the dependency yet and must be retried.
-    fn bind_named_symbol(
-        &mut self,
-        import: ImportId,
-        dep: FileId,
-        dep_root: SourceRootId,
-        symbol: &ImportItem,
-    ) -> bool {
+    fn bind_named_symbol(&mut self, import: ImportId, dep: FileId, dep_root: SourceRootId, symbol: &ImportItem) -> bool {
         let Some(ids) = self.find_name_in_file(dep_root, dep, &symbol.name) else {
             return false;
         };
         let file_scope = self.files.get(&import.file).unwrap().scope;
         let name = symbol.alias.clone().unwrap_or(symbol.name.clone());
         let mut previous = None;
-        match self
-            .scopes
-            .index_mut(file_scope)
-            .by_name
-            .entry(name.clone())
-        {
+        match self.scopes.index_mut(file_scope).by_name.entry(name.clone()) {
             Entry::Vacant(v) => {
                 v.insert(ids);
             }
@@ -975,18 +834,11 @@ impl<'db> Collector<'db> {
     fn bind_pending_symbols(&mut self) {
         let db = self.db;
         for pending in mem::take(&mut self.pending_symbols) {
-            if !self.bind_named_symbol(
-                pending.import,
-                pending.dep,
-                pending.dep_root,
-                &pending.symbol,
-            ) {
+            if !self.bind_named_symbol(pending.import, pending.dep, pending.dep_root, &pending.symbol) {
                 self.sink.push(SemanticDiagnostic::ImportSymbolNotFound {
                     import: pending.import,
                     name: pending.symbol.name.clone(),
-                    path: db.item_tree(pending.import.file)[pending.import.id]
-                        .path
-                        .clone(),
+                    path: db.item_tree(pending.import.file)[pending.import.id].path.clone(),
                 });
             }
         }
@@ -1031,12 +883,7 @@ impl<'db> Collector<'db> {
         self.db.root_def_map(root).files.get(&file).cloned()
     }
 
-    fn find_name_in_file(
-        &self,
-        root: SourceRootId,
-        file: FileId,
-        name: &Name,
-    ) -> Option<ScopeData> {
+    fn find_name_in_file(&self, root: SourceRootId, file: FileId, name: &Name) -> Option<ScopeData> {
         let file_data = self.file_data(root, file)?;
         let local_scope = ScopeEntry {
             root,

@@ -21,11 +21,7 @@ fn value_array_access_without_an_index_is_reported() {
                 if message.contains("requires an index")
         )),
         "{:?}",
-        inference
-            .diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>(),
+        inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>(),
     );
 }
 
@@ -44,16 +40,10 @@ fn value_tuples_produce_a_tuple_type() {
     assert!(
         inference.diagnostics.is_empty(),
         "{:?}",
-        inference
-            .diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>()
+        inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
     );
     assert!(
-        expr_results(&inference).any(|(_, ty, _)| {
-            matches!(ty.kind(&db), TyKind::Tuple(tuple) if tuple.elements.len() == 2)
-        }),
+        expr_results(&inference).any(|(_, ty, _)| { matches!(ty.kind(&db), TyKind::Tuple(tuple) if tuple.elements.len() == 2) }),
         "expected `(a, b)` to type as a two-element tuple"
     );
 }
@@ -86,10 +76,7 @@ fn tuple_components_keep_their_literal_types() {
             .iter()
             .any(|elem| matches!(elem, Some(ty) if matches!(ty.kind(&db), TyKind::Literal(_))))
     });
-    assert!(
-        kept_literal,
-        "the rational component should be kept as a literal"
-    );
+    assert!(kept_literal, "the rational component should be kept as a literal");
 
     let (db, file) = make_test_db(
         r#"
@@ -105,11 +92,7 @@ fn tuple_components_keep_their_literal_types() {
     );
     for name in ["hex4", "str", "addr"] {
         let inference = named_function_inference(&db, file, name);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{name}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
     }
 }
 
@@ -127,10 +110,7 @@ fn meta_type_requires_a_ty_ref() {
     assert!(
         ok.diagnostics.is_empty(),
         "{:?}",
-        ok.diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>()
+        ok.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
     );
     let bad = named_function_inference(&db, file, "bad");
     assert!(bad.diagnostics.iter().any(|d| matches!(d,
@@ -152,8 +132,7 @@ fn meta_enum_min_max_are_the_enum_type() {
     let inference = named_function_inference(&db, file, "f");
     assert!(
         expr_results(&inference).any(|(_, ty, resolution)| {
-            matches!(resolution, Some(Resolution::Field(_)))
-                && matches!(ty.kind(&db), TyKind::TypeDef(TypeDefId::Enum(_)))
+            matches!(resolution, Some(Resolution::Field(_))) && matches!(ty.kind(&db), TyKind::TypeDef(TypeDefId::Enum(_)))
         }),
         "expected `type(E).min` to type as the enum"
     );
@@ -178,14 +157,9 @@ fn indexed_operands_bind_tighter_than_binary_operators() {
     assert!(
         inference.diagnostics.is_empty(),
         "{:?}",
-        inference
-            .diagnostics
-            .iter()
-            .map(SemanticDiagnostic::code)
-            .collect::<Vec<_>>()
+        inference.diagnostics.iter().map(SemanticDiagnostic::code).collect::<Vec<_>>()
     );
-    let condition = expr_results(&inference)
-        .any(|(_, ty, _)| matches!(ty.kind(&db), TyKind::Primitive(Primitive::Boolean)));
+    let condition = expr_results(&inference).any(|(_, ty, _)| matches!(ty.kind(&db), TyKind::Primitive(Primitive::Boolean)));
     assert!(condition, "expected `a[i] == a[j]` to type as bool");
 }
 
@@ -193,8 +167,7 @@ fn indexed_operands_bind_tighter_than_binary_operators() {
 /// are the grammar's *anonymous commas*, which `named_children()` drops.
 #[test]
 fn tuple_holes_are_lowered_as_omitted_components() {
-    let (db, file) =
-        make_test_db("contract C { function f() external pure { uint a; uint b; (a, , b); } }");
+    let (db, file) = make_test_db("contract C { function f() external pure { uint a; uint b; (a, , b); } }");
     let DefId::Function(id) = find_function(&db, file, "f") else {
         panic!("fixture declares function f")
     };
@@ -208,11 +181,7 @@ fn tuple_holes_are_lowered_as_omitted_components() {
             _ => None,
         })
         .expect("the fixture has a tuple expression");
-    assert_eq!(
-        components,
-        [true, false, true],
-        "`(a, , b)` has three components"
-    );
+    assert_eq!(components, [true, false, true], "`(a, , b)` has three components");
 }
 
 /// A hole is legal only in lvalue position, where it is an ignored slot and
@@ -299,11 +268,7 @@ fn tuple_components_are_unrestricted_expressions() {
     );
     for name in ["nested", "nested_target", "mixed", "casts"] {
         let inference = named_function_inference(&db, file, name);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{name}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
     }
 }
 
@@ -329,17 +294,10 @@ fn qualified_modifier_paths_fold_into_the_member_chain() {
     );
     for name in ["base_mod", "self_mod"] {
         let inference = named_function_inference(&db, file, name);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{name}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
     }
     let lib_mod = named_function_inference(&db, file, "lib_mod");
-    assert!(
-        !lib_mod.diagnostics.is_empty(),
-        "a library's modifier must not be invocable"
-    );
+    assert!(!lib_mod.diagnostics.is_empty(), "a library's modifier must not be invocable");
 }
 
 /// A qualified `using` source is the same flat path. Without the fold
@@ -389,17 +347,11 @@ fn payable_is_a_cast_to_address_payable() {
     );
     for name in ["to_payable", "to_address"] {
         let inference = named_function_inference(&db, file, name);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{name}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
     }
     let bad = named_function_inference(&db, file, "bad");
     assert!(
-        bad.diagnostics
-            .iter()
-            .any(|d| matches!(d, SemanticDiagnostic::TypeMismatch { .. })),
+        bad.diagnostics.iter().any(|d| matches!(d, SemanticDiagnostic::TypeMismatch { .. })),
         "{:?}",
         codes(&bad),
     );
@@ -407,9 +359,7 @@ fn payable_is_a_cast_to_address_payable() {
 
 /// The type the fixture's single ternary inferred to.
 fn ternary_type(db: &Db, def: DefId) -> Ty {
-    let DefId::Function(id) = def else {
-        panic!("expected a function")
-    };
+    let DefId::Function(id) = def else { panic!("expected a function") };
     let body = db.body_map(BodyOwnerId::Function(id));
     let inference = db.inference(def);
     body.syntax_store
@@ -429,15 +379,10 @@ fn ternary_branches_fold_to_a_common_type() {
         ("c ? 1 : 300", Primitive::Uint(16)),
         ("c ? uint8(1) : uint256(2)", Primitive::Uint(256)),
     ] {
-        let source =
-            format!("contract C {{ function f(bool c) external pure {{ {branches}; }} }}");
+        let source = format!("contract C {{ function f(bool c) external pure {{ {branches}; }} }}");
         let (db, file) = make_test_db(&source);
         let inference = named_function_inference(&db, file, "f");
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{branches}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{branches}: {:?}", codes(&inference));
         let ty = ternary_type(&db, find_function(&db, file, "f"));
         assert!(
             matches!(ty.kind(&db), TyKind::Primitive(p) if p == expected),
@@ -449,9 +394,7 @@ fn ternary_branches_fold_to_a_common_type() {
     // A fractional literal has no concrete mobile type in this subset — solc
     // reaches a fixed-point type — so the fractional branch stands in instead
     // of the conditional being rejected as having no common type.
-    let (db, file) = make_test_db(
-        "contract C { function f(bool c) external pure { c ? 1.5 : 2.5; c ? 1 : 1.5; c ? 1.5 : 2; } }",
-    );
+    let (db, file) = make_test_db("contract C { function f(bool c) external pure { c ? 1.5 : 2.5; c ? 1 : 1.5; c ? 1.5 : 2; } }");
     let inference = named_function_inference(&db, file, "f");
     assert!(
         !inference
@@ -562,20 +505,15 @@ fn ternary_lowers_every_branch_before_failing() {
     };
     let body = db.body_map(BodyOwnerId::Function(id));
     assert!(
-        !body
-            .syntax_store
-            .exprs
-            .iter()
-            .any(|(_, e)| matches!(e, Expr::Ternary { .. })),
+        !body.syntax_store.exprs.iter().any(|(_, e)| matches!(e, Expr::Ternary { .. })),
         "the ternary should not be built when an arm fails to lower"
     );
-    let false_branch = body.syntax_store.exprs.iter().any(|(_, e)| {
-        matches!(e, Expr::Literal(Literal::Number(n)) if n.as_str() == "42")
-    });
-    assert!(
-        false_branch,
-        "the false branch should still be lowered past the failing arm"
-    );
+    let false_branch = body
+        .syntax_store
+        .exprs
+        .iter()
+        .any(|(_, e)| matches!(e, Expr::Literal(Literal::Number(n)) if n.as_str() == "42"));
+    assert!(false_branch, "the false branch should still be lowered past the failing arm");
 }
 
 /// Unary and update expressions keep their operator in HIR and type from their
@@ -622,9 +560,7 @@ fn unary_and_update_expressions_type_from_their_operand() {
     // `!x` on an unsigned is not a `bool`, so the conversion is refused.
     let bad = named_function_inference(&db, file, "bad");
     assert!(
-        bad.diagnostics
-            .iter()
-            .any(|d| matches!(d, SemanticDiagnostic::TypeMismatch { .. })),
+        bad.diagnostics.iter().any(|d| matches!(d, SemanticDiagnostic::TypeMismatch { .. })),
         "{:?}",
         codes(&bad)
     );
@@ -816,9 +752,7 @@ fn only_dynamic_calldata_arrays_slice() {
     // is not implicitly convertible to expected type bytes memory".
     let mem = named_function_inference(&db, file, "mem");
     assert!(
-        mem.diagnostics
-            .iter()
-            .any(|d| matches!(d, SemanticDiagnostic::TypeMismatch { .. })),
+        mem.diagnostics.iter().any(|d| matches!(d, SemanticDiagnostic::TypeMismatch { .. })),
         "{:?}",
         codes(&mem),
     );
@@ -854,16 +788,9 @@ fn inline_arrays_type_from_their_elements() {
         let TyKind::Ref(inner, Location::Memory) = ty.kind(&db) else {
             return None;
         };
-        matches!(
-            inner.kind(&db),
-            TyKind::Array { size: Some(_), .. }
-        )
-        .then_some(ty)
+        matches!(inner.kind(&db), TyKind::Array { size: Some(_), .. }).then_some(ty)
     });
-    assert!(
-        literal_ty.is_some(),
-        "expected an inline array to type as `T[k] memory`"
-    );
+    assert!(literal_ty.is_some(), "expected an inline array to type as `T[k] memory`");
 }
 
 /// `[]`, mixed kinds, and a deduced-but-unnameable common type all reject.
@@ -909,8 +836,7 @@ fn inline_array_element_types_must_agree() {
 // state *write* is not also a read, a write to memory is not a state write, and
 // a modifier's effect reaches the function that invokes it.
 
-
-/// The effect levels an owner's body could not afford, in diagnostic order.
+/// The effect levels a def's body could not afford, in diagnostic order.
 fn required(inference: &Inference) -> Vec<Mutability> {
     inference
         .diagnostics
@@ -925,12 +851,7 @@ fn required(inference: &Inference) -> Vec<Mutability> {
 fn assert_requires(source: &str, function: &str, expected: &[Mutability]) {
     let (db, file) = make_test_db(source);
     let inference = named_function_inference(&db, file, function);
-    assert_eq!(
-        required(&inference),
-        expected,
-        "{function}: {:?}",
-        codes(&inference)
-    );
+    assert_eq!(required(&inference), expected, "{function}: {:?}", codes(&inference));
 }
 
 /// Every shape of state write: a bare variable, a member, an index, and a
@@ -1226,13 +1147,7 @@ fn pure_sites_require_nothing() {
             function nowPure() public pure returns (uint) { return now(); }
         }
     "#;
-    for name in [
-        "readImmutable",
-        "readConstant",
-        "assertIt",
-        "requireIt",
-        "nowView",
-    ] {
+    for name in ["readImmutable", "readConstant", "assertIt", "requireIt", "nowView"] {
         assert_requires(source, name, &[]);
     }
     for (name, effect) in [("readState", Mutability::View), ("nowPure", Mutability::View)] {
@@ -1271,8 +1186,7 @@ fn account_probes_read_the_environment() {
 /// so the returned value is checked as a value of the enclosing function.
 #[test]
 fn return_statement_lowers_to_a_return_node_with_its_value() {
-    let (db, file) =
-        make_test_db("contract C { function f() external pure returns (uint) { return 1; } }");
+    let (db, file) = make_test_db("contract C { function f() external pure returns (uint) { return 1; } }");
     let DefId::Function(id) = find_function(&db, file, "f") else {
         panic!("fixture declares function f")
     };
@@ -1291,9 +1205,7 @@ fn return_statement_lowers_to_a_return_node_with_its_value() {
     assert!(value < return_id);
     // A `return` produces no value of its own.
     assert!(matches!(
-        db.inference(DefId::Function(id))
-            .expr_ty(return_id)
-            .kind(&db),
+        db.inference(DefId::Function(id)).expr_ty(return_id).kind(&db),
         TyKind::Void
     ));
 }
@@ -1322,11 +1234,7 @@ fn returned_values_are_checked_against_the_signature() {
     );
     for name in ["ok", "tuple_ok"] {
         let inference = named_function_inference(&db, file, name);
-        assert!(
-            inference.diagnostics.is_empty(),
-            "{name}: {:?}",
-            codes(&inference)
-        );
+        assert!(inference.diagnostics.is_empty(), "{name}: {:?}", codes(&inference));
     }
     for name in ["bad", "nested", "element"] {
         let inference = named_function_inference(&db, file, name);
@@ -1383,9 +1291,7 @@ fn returned_values_are_checked_against_the_signature() {
 /// leaves the signature unavailable so no arity error piles on.
 #[test]
 fn unresolved_return_parts_do_not_cascade() {
-    let (db, file) = make_test_db(
-        "contract C { function f() external pure returns (uint) { return missing; } }",
-    );
+    let (db, file) = make_test_db("contract C { function f() external pure returns (uint) { return missing; } }");
     let f = named_function_inference(&db, file, "f");
     assert_eq!(
         f.diagnostics
@@ -1398,13 +1304,10 @@ fn unresolved_return_parts_do_not_cascade() {
     );
     assert_eq!(f.diagnostics.len(), 1, "{:?}", codes(&f));
 
-    let (db, file) =
-        make_test_db("contract C { function f() external pure returns (Missing) { return 1; } }");
+    let (db, file) = make_test_db("contract C { function f() external pure returns (Missing) { return 1; } }");
     let f = named_function_inference(&db, file, "f");
     assert!(
-        f.diagnostics
-            .iter()
-            .any(|d| matches!(d, SemanticDiagnostic::UnresolvedType { .. })),
+        f.diagnostics.iter().any(|d| matches!(d, SemanticDiagnostic::UnresolvedType { .. })),
         "{:?}",
         codes(&f),
     );
@@ -1468,11 +1371,7 @@ fn ternary_chains_associate_to_the_right() {
         })
         .count();
     assert_eq!(nested, 1, "exactly one conditional ends in the next one");
-    assert!(
-        inference.diagnostics.is_empty(),
-        "{:?}",
-        codes(&inference)
-    );
+    assert!(inference.diagnostics.is_empty(), "{:?}", codes(&inference));
 }
 
 /// Assigning a storage *pointer* rebinds the reference — no storage is written,
@@ -1517,13 +1416,7 @@ fn storage_pointer_rebinds_cover_every_reference_type() {
             function stateCopy(S storage p) internal view { stored = p; }
         }
     "#;
-    for name in [
-        "structRebind",
-        "stringRebind",
-        "bytesRebind",
-        "arrayRebind",
-        "fromState",
-    ] {
+    for name in ["structRebind", "stringRebind", "bytesRebind", "arrayRebind", "fromState"] {
         assert_requires(source, name, &[]);
     }
     for name in ["memberWrite", "indexWrite", "stateCopy"] {
@@ -1567,11 +1460,7 @@ fn a_pointer_inside_the_lhs_is_not_the_lvalue() {
     "#;
     let (db, file) = make_test_db(source);
     let inference = named_function_inference(&db, file, "index");
-    assert!(
-        inference.diagnostics.is_empty(),
-        "{:?}",
-        codes(&inference)
-    );
+    assert!(inference.diagnostics.is_empty(), "{:?}", codes(&inference));
 }
 
 /// A storage pointer is a handle, not an lvalue: `delete`, `++`/`--` and a
@@ -1661,12 +1550,6 @@ fn a_fallback_declares_its_return_parameters() {
             }
             "#,
     );
-    let codes: Vec<_> = collect_diagnostics(&db, file)
-        .iter()
-        .map(|diagnostic| diagnostic.code)
-        .collect();
-    assert!(
-        codes.contains(&DiagnosticCode::TypeMismatch),
-        "{codes:?}",
-    );
+    let codes: Vec<_> = collect_diagnostics(&db, file).iter().map(|diagnostic| diagnostic.code).collect();
+    assert!(codes.contains(&DiagnosticCode::TypeMismatch), "{codes:?}",);
 }

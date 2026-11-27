@@ -1,7 +1,7 @@
 use crate::hir::body_map::LocalId;
-use crate::hir::item_data::FieldId;
-use crate::hir::resolution::Resolution;
 use crate::hir::diagnostics::{DiagnosticAnchor, SemanticDiagnostic};
+use crate::hir::item_data::{FieldId, SemanticId};
+use crate::hir::resolution::Resolution;
 use crate::hir::types::{Fn, TyKind, TyName, TyNameId, Type};
 use crate::ir::def_map::DefId;
 
@@ -19,21 +19,21 @@ impl<'db, 'store> Inferer<'db, 'store> {
     pub(super) fn infer_local(&mut self, local: LocalId) -> Type {
         let Some(local_arena) = self.input.locals else {
             return self.fail(
-                DiagnosticAnchor::Local(local),
+                SemanticId::Local(local),
                 "local resolution has no local arena",
                 Type::invalid(self.db),
             );
         };
         let local = &local_arena[local];
         let ty_ref_id = *local.ty_ref();
-        let located = !matches!(self.owner, DefId::Event(_) | DefId::Error(_));
+        let located = !matches!(self.def, DefId::Event(_) | DefId::Error(_));
         self.lower_type(ty_ref_id, located)
     }
 
     pub(super) fn infer_field(&mut self, field: FieldId) -> Type {
         let Some(fields) = self.input.fields else {
-            return self.fail(
-                DiagnosticAnchor::Def(self.owner),
+            return self.fail_at(
+                DiagnosticAnchor::def(self.def),
                 "struct field inferred outside a struct",
                 Type::invalid(self.db),
             );
@@ -42,9 +42,9 @@ impl<'db, 'store> Inferer<'db, 'store> {
     }
 
     pub(super) fn infer_variant(&mut self) -> Type {
-        let DefId::Enum(enum_id) = self.owner else {
-            return self.fail(
-                DiagnosticAnchor::Def(self.owner),
+        let DefId::Enum(enum_id) = self.def else {
+            return self.fail_at(
+                DiagnosticAnchor::def(self.def),
                 "variant inferred outside an enum",
                 Type::invalid(self.db),
             );
@@ -71,11 +71,15 @@ impl<'db, 'store> Inferer<'db, 'store> {
             return cached;
         }
         let ty = self.lower_ty_ref_uncached(ty_ref_id, located, role);
-        
+
         let written = matches!(self.input.store.types[ty_ref_id], TyName::Located { .. });
         if located && !written && ty.default_loc(self.db).is_some() {
             self.report(
-                SemanticDiagnostic::DataLocationRequired { ty_ref_id, ty },
+                SemanticDiagnostic::DataLocationRequired {
+                    def: self.def,
+                    ty_ref_id,
+                    ty,
+                },
                 (),
             );
         }
@@ -99,13 +103,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 };
                 let resolution = match base_ty {
                     None => self.resolver.resolve_path(std::slice::from_ref(name)),
-                    Some(ty) => ty
-                        .def_id(self.db)
-                        .and_then(|def| self.resolver.lookup_type(&def, name)),
+                    Some(ty) => ty.def_id(self.db).and_then(|def| self.resolver.lookup_type(&def, name)),
                 };
                 let Some(resolution) = resolution else {
                     return self.report(
                         SemanticDiagnostic::UnresolvedType {
+                            def: self.def,
                             ty_ref_id,
                             name: name.clone(),
                         },
@@ -115,15 +118,13 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 match resolution {
                     Resolution::Type(ty) => ty,
                     Resolution::Module(_) if role == TyRole::Type => self.fail(
-                        DiagnosticAnchor::TyRef(ty_ref_id),
+                        SemanticId::Type(ty_ref_id),
                         "name has to refer to a user-defined type",
                         Type::invalid(self.db),
                     ),
-                    Resolution::Module(file) => {
-                        Type::new(self.db, TyKind::Module(file)).expect("a module is nameable")
-                    }
+                    Resolution::Module(file) => Type::new(self.db, TyKind::Module(file)).expect("a module is nameable"),
                     _ => self.fail(
-                        DiagnosticAnchor::TyRef(ty_ref_id),
+                        SemanticId::Type(ty_ref_id),
                         format!("`{name}` does not resolve to a type"),
                         Type::invalid(self.db),
                     ),
@@ -145,10 +146,10 @@ impl<'db, 'store> Inferer<'db, 'store> {
             }
             TyName::Mapping { key, value } => {
                 let key = self.lower_type(*key, false);
-                
+
                 let value = self.lower_type(*value, false);
-               
-                if key.is_invalid(self.db)||value.is_invalid(self.db){
+
+                if key.is_invalid(self.db) || value.is_invalid(self.db) {
                     Type::invalid(self.db)
                 } else {
                     Type::mapping(self.db, key, value)
@@ -172,6 +173,7 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 if !is_valid {
                     return self.report(
                         SemanticDiagnostic::InvalidDataLocation {
+                            def: self.def,
                             ty_ref_id,
                             ty: inner,
                             location: *loc,
@@ -214,5 +216,4 @@ impl<'db, 'store> Inferer<'db, 'store> {
             }
         }
     }
-
 }

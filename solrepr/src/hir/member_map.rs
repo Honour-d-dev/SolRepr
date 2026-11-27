@@ -6,9 +6,9 @@ use triomphe::Arc;
 use crate::ast::FunctionKind;
 use crate::hir::analysis::Analysis;
 use crate::hir::builtins::MemberNamespace;
+use crate::hir::diagnostics::{DiagnosticSink, SemanticDiagnostic};
 use crate::hir::exprs::Name;
 use crate::hir::overrides::OverrideFacts;
-use crate::hir::diagnostics::{DiagnosticSink, SemanticDiagnostic};
 use crate::hir::signatures::OverrideSignature;
 use crate::hir::types::{Mutability, Type, Visibility};
 use crate::ir::def_map::{DefId, DefNamespace};
@@ -25,15 +25,15 @@ enum SlotKey {
 #[derive(Clone, PartialEq, Eq)]
 pub struct MemberDeclaration {
     pub def: DefId,
-    pub owner: DefId,
+    pub declarer: DefId,
     pub namespace: DefNamespace,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct MemberSlot {
     pub candidates: Box<[DefId]>,
-    /// The slot's winner: 
-    /// `Some(def)` when one declaration stands for the slot 
+    /// The slot's winner:
+    /// `Some(def)` when one declaration stands for the slot
     /// `None` when the slot is a true conflict.
     pub effective: Option<DefId>,
 }
@@ -76,9 +76,7 @@ pub struct MemberMap {
 
 impl MemberMap {
     pub fn get(&self, name: &str, namespace: MemberNamespace) -> &[MemberSlot] {
-        self.by_name
-            .get(name)
-            .map_or(&[], |group| group.get(namespace))
+        self.by_name.get(name).map_or(&[], |group| group.get(namespace))
     }
 
     pub fn declaration(&self, def: DefId) -> Option<&MemberDeclaration> {
@@ -95,8 +93,7 @@ impl MemberMap {
                     return false;
                 };
                 let data = db.function_data(id);
-                data.kind == FunctionKind::Receive
-                    || (data.kind == FunctionKind::Fallback && data.mutability == Mutability::Payable)
+                data.kind == FunctionKind::Receive || (data.kind == FunctionKind::Fallback && data.mutability == Mutability::Payable)
             })
     }
 
@@ -124,9 +121,7 @@ impl<'db> MemberBuilder<'db> {
         sink.extend(override_facts.diagnostics.iter());
         let bases_analysis = db.bases_analysis(container);
         sink.extend(bases_analysis.diagnostics.iter());
-        let complete = override_facts.data.complete
-            && bases_analysis.diagnostics.is_empty()
-            && !bases_analysis.data.is_empty();
+        let complete = override_facts.data.complete && bases_analysis.diagnostics.is_empty() && !bases_analysis.data.is_empty();
         Self {
             db,
             container,
@@ -162,17 +157,16 @@ impl<'db> MemberBuilder<'db> {
         let facts = &self.facts;
         let mut signatures: Box<[_]> = facts.by_sig.keys().collect();
         signatures.sort_by_key(|signature| signature.sort_key(self.db));
-        let is_concrete =
-            matches!(container, DefId::Contract(id) if !self.db.contract_data(id).is_abstract);
+        let is_concrete = matches!(container, DefId::Contract(id) if !self.db.contract_data(id).is_abstract);
 
         for &signature in &signatures {
             let overrides = &facts.by_sig[signature];
             let mut declarations = facts.declarations(signature);
             declarations.sort_by_key(|def| {
-                let owner = facts.known.get(def).map(|entry| entry.owner);
+                let declarer = facts.known.get(def).map(|entry| entry.declarer);
                 (
-                    owner
-                        .and_then(|owner| self.mro.iter().position(|&base| base == owner))
+                    declarer
+                        .and_then(|declarer| self.mro.iter().position(|&base| base == declarer))
                         .unwrap_or(usize::MAX),
                     def_range(self.db, *def).map_or(0, |range| range.start),
                 )
@@ -184,7 +178,7 @@ impl<'db> MemberBuilder<'db> {
                 if let Some(entry) = facts.known.get(&def) {
                     self.declarations.entry(def).or_insert(MemberDeclaration {
                         def,
-                        owner: entry.owner,
+                        declarer: entry.declarer,
                         namespace: DefNamespace::from(&def),
                     });
                 }
@@ -205,42 +199,31 @@ impl<'db> MemberBuilder<'db> {
                     .copied()
                     .filter(|entry| !unimplemented_cuts.contains(&entry.decl))
                     .collect();
-                let owners: FxHashSet<DefId> =
-                    conflicting.iter().map(|entry| entry.owner).collect();
-                if conflicting.len() > 1
-                    || (conflicting.is_empty() && unresolved.len() > 1)
-                {
-                    if self.complete && owners.len() > 1 {
+                let declarers: FxHashSet<DefId> = conflicting.iter().map(|entry| entry.declarer).collect();
+                if conflicting.len() > 1 || (conflicting.is_empty() && unresolved.len() > 1) {
+                    if self.complete && declarers.len() > 1 {
                         self.sink.push(SemanticDiagnostic::OverrideConflict {
                             contract: container,
                             name: signature.name().clone(),
                             declarations: conflicting.iter().map(|entry| entry.decl).collect(),
                         });
                     }
-                } else if let Some(&entry) =
-                    conflicting.first().or_else(|| unresolved.first())
-                {
+                } else if let Some(&entry) = conflicting.first().or_else(|| unresolved.first()) {
                     effective = Some(entry.decl);
                     if self.complete && entry.owes_implementation() {
                         self.obligations.push(entry.decl);
                     }
                 }
             }
-            self.by_name
-                .entry(signature.name().clone())
-                .or_default()
-                .values
-                .push(MemberSlot {
-                    candidates: declarations,
-                    effective,
-                });
+            self.by_name.entry(signature.name().clone()).or_default().values.push(MemberSlot {
+                candidates: declarations,
+                effective,
+            });
         }
 
         self.obligations.dedup();
         if is_concrete && !self.obligations.is_empty() {
-            self.sink.push(SemanticDiagnostic::UnimplementedContract {
-                contract: container,
-            });
+            self.sink.push(SemanticDiagnostic::UnimplementedContract { contract: container });
         }
     }
 
@@ -254,7 +237,7 @@ impl<'db> MemberBuilder<'db> {
             let def = entry.decl;
             self.declarations.entry(def).or_insert(MemberDeclaration {
                 def,
-                owner: entry.owner,
+                declarer: entry.declarer,
                 namespace: DefNamespace::from(&def),
             });
             self.by_name
@@ -271,9 +254,9 @@ impl<'db> MemberBuilder<'db> {
     fn add_non_override_members(&mut self) {
         let mut index_by_key: FxHashMap<SlotKey, (MemberNamespace, usize)> = FxHashMap::default();
 
-        for &owner in self.mro.iter() {
-            let defmap = self.db.file_def_map(owner.file());
-            let Some(scope) = defmap.defs.get(&owner).and_then(|data| data.child_scope) else {
+        for &declarer in self.mro.iter() {
+            let defmap = self.db.file_def_map(declarer.file());
+            let Some(scope) = defmap.defs.get(&declarer).and_then(|data| data.child_scope) else {
                 continue;
             };
             let mut declarations: Box<[(Name, DefNamespace, DefId)]> = defmap.scopes[scope]
@@ -294,20 +277,16 @@ impl<'db> MemberBuilder<'db> {
                         .map(|def| (name.clone(), scope_data.namespace, def))
                 })
                 .collect();
-            declarations.sort_by_key(|(_, _, def)| {
-                def_range(self.db, *def).map_or(0, |range| range.start)
-            });
+            declarations.sort_by_key(|(_, _, def)| def_range(self.db, *def).map_or(0, |range| range.start));
 
             for (name, namespace, def) in declarations {
                 let key = self.slot_key(name.clone(), namespace, def);
-                self.declarations.entry(def).or_insert(MemberDeclaration {
-                    def,
-                    owner,
-                    namespace,
-                });
+                self.declarations
+                    .entry(def)
+                    .or_insert(MemberDeclaration { def, declarer, namespace });
                 let is_visible = |d: &DefId| {
                     self.declarations.get(d).is_some_and(|decl| {
-                        decl.owner == self.container || !matches!(d, DefId::Var(id) if self.db.var_data(*id).vis == Visibility::Private)
+                        decl.declarer == self.container || !matches!(d, DefId::Var(id) if self.db.var_data(*id).vis == Visibility::Private)
                     })
                 };
                 let visible = is_visible(&def);
@@ -324,30 +303,22 @@ impl<'db> MemberBuilder<'db> {
                                     slot.effective = None;
                                     // Two declarations in *this* contract are a duplicates
                                     let previous = defs.iter().copied().find(|d| *d != def && is_visible(d));
-                                    let own = self.declarations.get(&def)
-                                        .is_some_and(|decl| decl.owner == self.container);
+                                    let own = self.declarations.get(&def).is_some_and(|decl| decl.declarer == self.container);
                                     match previous {
                                         Some(previous)
-                                            if own && self.declarations.get(&previous)
-                                                    .is_some_and(|decl| decl.owner == self.container) => {
-                                            self.sink.push(
-                                                SemanticDiagnostic::DuplicateMemberSlot {
-                                                    declaration: def,
-                                                    previous,
-                                                },
-                                            );
+                                            if own
+                                                && self.declarations.get(&previous).is_some_and(|decl| decl.declarer == self.container) =>
+                                        {
+                                            self.sink.push(SemanticDiagnostic::DuplicateMemberSlot {
+                                                declaration: def,
+                                                previous,
+                                            });
                                         }
-                                        _ => self.sink.push(
-                                            SemanticDiagnostic::InheritedMemberConflict {
-                                                contract: self.container,
-                                                name,
-                                                declarations: defs
-                                                    .iter()
-                                                    .filter(|d| is_visible(d))
-                                                    .copied()
-                                                    .collect(),
-                                            },
-                                        ),
+                                        _ => self.sink.push(SemanticDiagnostic::InheritedMemberConflict {
+                                            contract: self.container,
+                                            name,
+                                            declarations: defs.iter().filter(|d| is_visible(d)).copied().collect(),
+                                        }),
                                     }
                                 }
                                 (true, false) => slot.effective = Some(def),
@@ -382,11 +353,8 @@ impl<'db> MemberBuilder<'db> {
                 .db
                 .error_signature(id)
                 .map(|sig| SlotKey::Overload(name, namespace, sig.params)),
-            _ if matches!(namespace, DefNamespace::Types | DefNamespace::Variables) => {
-                Some(SlotKey::NonOverloadable(name))
-            }
+            _ if matches!(namespace, DefNamespace::Types | DefNamespace::Variables) => Some(SlotKey::NonOverloadable(name)),
             _ => None,
         }
     }
 }
-

@@ -5,11 +5,7 @@ use crate::salsa::HirDb;
 fn codes(source: &str, contract: &str) -> Vec<DiagnosticCode> {
     let (db, file) = make_test_db(source);
     let def = find_contract(&db, file, contract);
-    db.member_map(def)
-        .diagnostics
-        .iter()
-        .map(SemanticDiagnostic::code)
-        .collect()
+    db.member_map(def).diagnostics.iter().map(SemanticDiagnostic::code).collect()
 }
 
 #[test]
@@ -188,7 +184,7 @@ fn shared_base_diamond_is_not_a_conflict() {
 }
 
 #[test]
-fn diamond_override_lists_every_owner() {
+fn diamond_override_lists_every_declarer() {
     assert!(
         codes(
             r#"
@@ -204,7 +200,7 @@ fn diamond_override_lists_every_owner() {
 }
 
 #[test]
-fn diamond_override_list_must_name_every_owner() {
+fn diamond_override_list_must_name_every_declarer() {
     assert_eq!(
         codes(
             r#"
@@ -422,11 +418,7 @@ fn bare_override_requires_a_list_for_multiple_bases() {
         contract C is I, J { function f() external override {} }
         "#,
     ] {
-        assert_eq!(
-            codes(source, "C"),
-            vec![DiagnosticCode::OverrideListMismatch],
-            "{source}"
-        );
+        assert_eq!(codes(source, "C"), vec![DiagnosticCode::OverrideListMismatch], "{source}");
     }
 
     // A single contract needs no list.

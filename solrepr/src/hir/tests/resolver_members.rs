@@ -1,16 +1,16 @@
 use super::{helper::*, resolver_helpers::*};
 use crate::hir::access::AccessDenial;
+use crate::hir::diagnostics::SemanticDiagnostic;
+use crate::hir::exprs::ExprId;
 use crate::hir::exprs::Name;
 use crate::hir::item_data::VariantId;
-use crate::hir::diagnostics::SemanticDiagnostic;
+use crate::hir::resolution::{Field as ResolvedField, *};
+use crate::hir::resolver::*;
+use crate::hir::types::Location;
+use crate::hir::types::{BaseKind, Primitive, Visibility};
+use crate::hir::types::{CallKind, Callee, Ty, TyKind, ViaTypeKind};
 use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
-use crate::hir::resolver::*;
-use crate::hir::exprs::ExprId;
-use crate::hir::resolution::{Field as ResolvedField, *};
-use crate::hir::types::Location;
-use crate::hir::types::{CallKind, Callee, Ty, TyKind, ViaTypeKind};
-use crate::hir::types::{BaseKind, Primitive, Visibility};
 use crate::salsa::RootDb;
 
 #[test]
@@ -82,16 +82,8 @@ fn receiver_members_dispatch_on_expression_type() {
     let type_receiver = Ty::new(&db, TyKind::Type(c_name));
 
     let namespace_members = member_resolutions(&resolver, type_receiver);
-    assert!(
-        namespace_members
-            .iter()
-            .any(|member| matches!(member, Resolution::Callable(_)))
-    );
-    assert!(
-        !namespace_members
-            .iter()
-            .any(|member| matches!(member, Resolution::Var(_)))
-    );
+    assert!(namespace_members.iter().any(|member| matches!(member, Resolution::Callable(_))));
+    assert!(!namespace_members.iter().any(|member| matches!(member, Resolution::Var(_))));
 
     // A contract value exposes the external interface: functions and
     // public-variable getters, both as callables.
@@ -102,15 +94,11 @@ fn receiver_members_dispatch_on_expression_type() {
             .any(|member| matches!(member, Resolution::Callable(callable) if callable.is_getter()))
     );
     assert!(
-        instance_members.iter().any(
-            |member| matches!(member, Resolution::Callable(callable) if !callable.is_getter())
-        )
-    );
-    assert!(
-        !instance_members
+        instance_members
             .iter()
-            .any(|member| matches!(member, Resolution::Var(_)))
+            .any(|member| matches!(member, Resolution::Callable(callable) if !callable.is_getter()))
     );
+    assert!(!instance_members.iter().any(|member| matches!(member, Resolution::Var(_))));
 }
 
 #[test]
@@ -130,14 +118,10 @@ fn enum_variants_are_visible_through_types() {
         panic!("E should resolve to a type");
     };
     let type_receiver = types_receiver(&db, ty.ty());
-    let Resolution::Variant(variant) = lookup_member(&resolver, type_receiver, &"A".into()).unwrap()
-    else {
+    let Resolution::Variant(variant) = lookup_member(&resolver, type_receiver, &"A".into()).unwrap() else {
         panic!("E.A should resolve to a variant");
     };
-    assert_eq!(
-        variant.id,
-        VariantId::from_raw(0.into())
-    );
+    assert_eq!(variant.id, VariantId::from_raw(0.into()));
 }
 
 #[test]
@@ -284,8 +268,7 @@ fn error_and_event_type_members() {
     let resolver = Resolver::build(&db, f);
 
     let def_of = |name: &str| -> DefId {
-        let Resolution::Callable(callable) = resolver.resolve_name(&name.into(), None, 0).unwrap()
-        else {
+        let Resolution::Callable(callable) = resolver.resolve_name(&name.into(), None, 0).unwrap() else {
             panic!("{name} should resolve to a callable");
         };
         callable.def().unwrap()
@@ -312,21 +295,10 @@ fn error_and_event_type_members() {
 }
 
 fn resolve_reported_name(resolver: &Resolver, name: &str, offset: u32) -> Option<Resolution> {
-    resolver.resolve_name_at(
-        &name.into(),
-        None,
-        offset,
-        ExprId::from_raw(offset.into()),
-        false,
-    )
+    resolver.resolve_name_at(&name.into(), None, offset, ExprId::from_raw(offset.into()), false)
 }
 
-fn lookup_reported_member(
-    resolver: &Resolver,
-    ty: Ty,
-    name: &str,
-    offset: u32,
-) -> Option<Resolution> {
+fn lookup_reported_member(resolver: &Resolver, ty: Ty, name: &str, offset: u32) -> Option<Resolution> {
     let name: Name = name.into();
     resolver.lookup_member_at(ty, &name, ExprId::from_raw(offset.into()))
 }
@@ -336,8 +308,7 @@ fn recorded_denials(resolver: &Resolver) -> Vec<AccessDenial> {
         .finish_diagnostics()
         .iter()
         .flat_map(|diagnostic| match diagnostic {
-            SemanticDiagnostic::UnresolvedName { denials, .. }
-            | SemanticDiagnostic::UnresolvedMember { denials, .. } => denials.clone(),
+            SemanticDiagnostic::UnresolvedName { denials, .. } | SemanticDiagnostic::UnresolvedMember { denials, .. } => denials.clone(),
             _ => Vec::new(),
         })
         .collect()
@@ -362,26 +333,16 @@ fn bare_names_follow_the_access_matrix() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
 
     for name in ["inter", "pub_", "priv"] {
-        assert!(
-            resolver.resolve_name(&name.into(), None, 0).is_some(),
-            "{name} should resolve bare"
-        );
+        assert!(resolver.resolve_name(&name.into(), None, 0).is_some(), "{name} should resolve bare");
     }
     // An `external` function has no internal reference — solc spells it
     // "Undeclared identifier" — and the denial records why.
     assert!(resolve_reported_name(&resolver, "ext", 10).is_none());
     let denials = recorded_denials(&resolver);
-    assert!(
-        denials
-            .iter()
-            .any(|denial| denial.vis == Visibility::External)
-    );
+    assert!(denials.iter().any(|denial| denial.vis == Visibility::External));
 
     let (db, file) = make_test_db(
         r#"
@@ -397,10 +358,7 @@ fn bare_names_follow_the_access_matrix() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
 
     for name in ["inter", "pub_"] {
         assert!(
@@ -415,16 +373,8 @@ fn bare_names_follow_the_access_matrix() {
         );
     }
     let denials = recorded_denials(&resolver);
-    assert!(
-        denials
-            .iter()
-            .any(|denial| denial.vis == Visibility::Private)
-    );
-    assert!(
-        denials
-            .iter()
-            .any(|denial| denial.vis == Visibility::External)
-    );
+    assert!(denials.iter().any(|denial| denial.vis == Visibility::Private));
+    assert!(denials.iter().any(|denial| denial.vis == Visibility::External));
 }
 
 /// A nearer `private` overload does not hide a farther accessible one — the
@@ -446,13 +396,9 @@ fn inaccessible_inherited_member_is_skipped_not_shadowing() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
 
-    let Resolution::Callable(callable) = resolver.resolve_name(&"f".into(), None, 0).unwrap()
-    else {
+    let Resolution::Callable(callable) = resolver.resolve_name(&"f".into(), None, 0).unwrap() else {
         panic!("`f` should resolve past the private overload")
     };
     let DefId::Function(id) = callable.def().unwrap() else {
@@ -460,10 +406,7 @@ fn inaccessible_inherited_member_is_skipped_not_shadowing() {
     };
     let sig = db.function_signature(id).expect("a signature");
     assert!(
-        matches!(
-            sig.params[0].kind(&db),
-            TyKind::Primitive(Primitive::Boolean)
-        ),
+        matches!(sig.params[0].kind(&db), TyKind::Primitive(Primitive::Boolean)),
         "the farther public `f(bool)` should win over the nearer private `f(uint)`"
     );
     // This successful, non-reporting lookup neither resolves nor stores an
@@ -487,13 +430,9 @@ fn accessible_overloads_merge_across_bases() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
 
-    let Resolution::Callables(callables) = resolver.resolve_name(&"f".into(), None, 0).unwrap()
-    else {
+    let Resolution::Callables(callables) = resolver.resolve_name(&"f".into(), None, 0).unwrap() else {
         panic!("`f` should merge base overloads")
     };
     assert_eq!(callables.len(), 2, "both base overloads are candidates");
@@ -526,18 +465,14 @@ fn qualified_member_paths_follow_the_access_matrix() {
     let a = types_receiver(&db, contract_type(&db, file, "A"));
 
     for name in ["inter", "pub_"] {
-        let Resolution::Callable(callable) = lookup_member(&resolver, a, &name.into()).unwrap()
-        else {
+        let Resolution::Callable(callable) = lookup_member(&resolver, a, &name.into()).unwrap() else {
             panic!("`A.{name}` should resolve")
         };
         assert!(
             matches!(callable.kind(), CallKind::Base(BaseKind::Explicit)),
             "`A.{name}` should be a base call"
         );
-        assert!(
-            callable.is_invocable(&db),
-            "`A.{name}()` should be callable"
-        );
+        assert!(callable.is_invocable(&db), "`A.{name}()` should be callable");
     }
     let Resolution::Callable(callable) = lookup_member(&resolver, a, &"ext".into()).unwrap() else {
         panic!("`A.ext` should resolve")
@@ -549,11 +484,7 @@ fn qualified_member_paths_follow_the_access_matrix() {
     assert!(!callable.is_invocable(&db), "`A.ext()` is not callable");
     assert!(lookup_reported_member(&resolver, a, "priv", 40).is_none());
     let denials = recorded_denials(&resolver);
-    assert!(
-        denials
-            .iter()
-            .any(|denial| denial.vis == Visibility::Private)
-    );
+    assert!(denials.iter().any(|denial| denial.vis == Visibility::Private));
 
     // Self-qualified `C.m` inside `C` — the members are `C`'s own.
     let (db, file) = make_test_db(
@@ -571,8 +502,7 @@ fn qualified_member_paths_follow_the_access_matrix() {
     let c = types_receiver(&db, contract_type(&db, file, "C"));
 
     for name in ["inter", "pub_"] {
-        let Resolution::Callable(callable) = lookup_member(&resolver, c, &name.into()).unwrap()
-        else {
+        let Resolution::Callable(callable) = lookup_member(&resolver, c, &name.into()).unwrap() else {
             panic!("`C.{name}` should resolve")
         };
         assert!(
@@ -585,8 +515,7 @@ fn qualified_member_paths_follow_the_access_matrix() {
         panic!("`C.ext` should resolve")
     };
     assert!(
-        matches!(callable.kind(), CallKind::Base(BaseKind::SelfQualified))
-            && !callable.is_invocable(&db),
+        matches!(callable.kind(), CallKind::Base(BaseKind::SelfQualified)) && !callable.is_invocable(&db),
         "`C.ext` keeps its base path but remains declaration-only"
     );
 
@@ -600,9 +529,7 @@ fn qualified_member_paths_follow_the_access_matrix() {
     let super_ty = Ty::new(&db, TyKind::Super(c_id));
 
     for name in ["inter", "pub_"] {
-        let Resolution::Callable(callable) =
-            lookup_member(&resolver, super_ty, &name.into()).unwrap()
-        else {
+        let Resolution::Callable(callable) = lookup_member(&resolver, super_ty, &name.into()).unwrap() else {
             panic!("`super.{name}` should resolve")
         };
         assert!(
@@ -618,14 +545,8 @@ fn qualified_member_paths_follow_the_access_matrix() {
         );
     }
     let denials = recorded_denials(&resolver);
-    assert!(
-        denials
-            .iter()
-            .any(|denial| denial.vis == Visibility::External)
-    );
-    assert!(denials.iter().any(|denial| {
-        denial.vis == Visibility::Private
-    }));
+    assert!(denials.iter().any(|denial| denial.vis == Visibility::External));
+    assert!(denials.iter().any(|denial| { denial.vis == Visibility::Private }));
 }
 
 /// Member access on a contract type is declared-only in expression position:
@@ -646,10 +567,7 @@ fn contract_type_members_are_declared_only() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
     let b = types_receiver(&db, contract_type(&db, file, "B"));
 
     // Inherited into B, so invisible through `B.` in an expression.
@@ -683,15 +601,11 @@ fn contract_value_members_follow_the_external_interface() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
     let a = contract_type(&db, file, "A");
 
     for name in ["pub_", "ext"] {
-        let Resolution::Callable(callable) = lookup_member(&resolver, a, &name.into()).unwrap()
-        else {
+        let Resolution::Callable(callable) = lookup_member(&resolver, a, &name.into()).unwrap() else {
             panic!("`a.{name}` should resolve")
         };
         assert!(
@@ -732,10 +646,7 @@ fn bare_name_on_a_conflicted_member_reports_at_the_use_site() {
 
     assert!(resolve_reported_name(&resolver, "f", 10).is_none());
     let diagnostics = resolver.finish_diagnostics();
-    let [SemanticDiagnostic::AmbiguousMember {
-        name, declarations, ..
-    }] = diagnostics.as_ref()
-    else {
+    let [SemanticDiagnostic::AmbiguousMember { name, declarations, .. }] = diagnostics.as_ref() else {
         panic!("the conflicted use should report exactly one diagnostic");
     };
     assert_eq!(name.as_str(), "f");
@@ -763,10 +674,7 @@ fn conflicted_member_shadows_outer_scope_names() {
     assert!(resolve_reported_name(&resolver, "f", 10).is_none());
     let diagnostics = resolver.finish_diagnostics();
     assert_eq!(diagnostics.len(), 1);
-    assert!(matches!(
-        &diagnostics[0],
-        SemanticDiagnostic::AmbiguousMember { .. }
-    ));
+    assert!(matches!(&diagnostics[0], SemanticDiagnostic::AmbiguousMember { .. }));
 }
 
 /// A member access on a conflicted slot reports at the member range and
@@ -786,8 +694,7 @@ fn member_access_on_a_conflicted_slot_reports_at_the_use_site() {
 
     assert!(lookup_reported_member(&resolver, c, "f", 10).is_none());
     let diagnostics = resolver.finish_diagnostics();
-    let [SemanticDiagnostic::AmbiguousMember { declarations, .. }] = diagnostics.as_ref()
-    else {
+    let [SemanticDiagnostic::AmbiguousMember { declarations, .. }] = diagnostics.as_ref() else {
         panic!("the conflicted member access should report exactly one diagnostic");
     };
     assert_eq!(declarations.len(), 2);
@@ -813,15 +720,11 @@ fn inaccessible_invalid_slot_does_not_shadow_outer_scope() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
 
     // `B.f` is an invalid override of `A.f` (no `override` marker); both
     // declarations are `external`, so none is visible on the Direct path.
-    let Resolution::Callable(callable) = resolver.resolve_name(&"f".into(), None, 0).unwrap()
-    else {
+    let Resolution::Callable(callable) = resolver.resolve_name(&"f".into(), None, 0).unwrap() else {
         panic!("`f` should resolve past the invisible invalid slot");
     };
     let DefId::Function(id) = callable.def().unwrap() else {
@@ -829,10 +732,7 @@ fn inaccessible_invalid_slot_does_not_shadow_outer_scope() {
     };
     let sig = db.function_signature(id).expect("a signature");
     assert!(
-        matches!(
-            sig.params[0].kind(&db),
-            TyKind::Primitive(Primitive::Boolean)
-        ),
+        matches!(sig.params[0].kind(&db), TyKind::Primitive(Primitive::Boolean)),
         "the file-level `f(bool)` should win over the inaccessible contract member"
     );
 }
@@ -855,17 +755,13 @@ fn super_dispatches_past_a_bodyless_base_declaration() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
     let DefId::Contract(c_id) = find_contract(&db, file, "C") else {
         panic!("expected a contract")
     };
     let super_ty = Ty::new(&db, TyKind::Super(c_id));
 
-    let Resolution::Callable(callable) = lookup_member(&resolver, super_ty, &"f".into()).unwrap()
-    else {
+    let Resolution::Callable(callable) = lookup_member(&resolver, super_ty, &"f".into()).unwrap() else {
         panic!("`super.f` should dispatch to the implemented `A.f`");
     };
     // The bodyless `B.f` is skipped: the selected declaration is `A.f`,
@@ -876,9 +772,7 @@ fn super_dispatches_past_a_bodyless_base_declaration() {
         name_range.start < b_offset,
         "`super.f` should dispatch past the bodyless `B.f` to `A.f`"
     );
-    assert!(
-        matches!(callable.kind(), CallKind::Base(BaseKind::Super)) && callable.is_invocable(&db)
-    );
+    assert!(matches!(callable.kind(), CallKind::Base(BaseKind::Super)) && callable.is_invocable(&db));
 }
 
 /// Named lookup is demand-directed: only the requested member is
@@ -895,13 +789,9 @@ fn member_lookup_at_collects_only_the_requested_name() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
     let c = contract_type(&db, file, "C");
-    let resolution =
-        resolver.lookup_member_at(c, &"value".into(), ExprId::from_raw(0.into()));
+    let resolution = resolver.lookup_member_at(c, &"value".into(), ExprId::from_raw(0.into()));
     assert!(resolution.is_some());
 }
 
@@ -922,23 +812,18 @@ fn library_type_members() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
     let Resolution::Type(l_ty) = resolver.resolve_name(&"L".into(), None, 0).unwrap() else {
         panic!("`L` should resolve to a type")
     };
     let l = types_receiver(&db, l_ty.ty());
 
     for name in ["add", "ext"] {
-        let Resolution::Callable(callable) = lookup_member(&resolver, l, &name.into()).unwrap()
-        else {
+        let Resolution::Callable(callable) = lookup_member(&resolver, l, &name.into()).unwrap() else {
             panic!("`L.{name}` should resolve")
         };
         assert!(
-            matches!(callable.kind(), CallKind::ViaType(ViaTypeKind::Library))
-                && callable.is_invocable(&db),
+            matches!(callable.kind(), CallKind::ViaType(ViaTypeKind::Library)) && callable.is_invocable(&db),
             "`L.{name}` should be an invocable library member"
         );
     }
@@ -947,7 +832,7 @@ fn library_type_members() {
 
 /// A library's own members are reachable bare from inside the library:
 /// `internal`/`private` functions and an `internal` constant. A library has no
-/// C3 linearization, so "the caller is in the owner" must not be answered by
+/// C3 linearization, so "the caller is in the container" must not be answered by
 /// `bases_analysis` alone — otherwise the library is never in itself and its
 /// `internal` members are denied on the `Direct` path. `external` stays
 /// invisible bare, as it is in a contract.
@@ -965,10 +850,7 @@ fn library_members_are_reachable_bare_inside_the_library() {
         "#,
     );
     let probe = find_function(&db, file, "probe");
-    let resolver = Resolver::build(
-        &db,
-        probe,
-    );
+    let resolver = Resolver::build(&db, probe);
 
     for name in ["helper", "priv", "K"] {
         assert!(
@@ -982,9 +864,7 @@ fn library_members_are_reachable_bare_inside_the_library() {
     );
     let denials = recorded_denials(&resolver);
     assert!(
-        denials
-            .iter()
-            .any(|denial| denial.vis == Visibility::External),
+        denials.iter().any(|denial| denial.vis == Visibility::External),
         "the denied `external` member records its reason"
     );
 }

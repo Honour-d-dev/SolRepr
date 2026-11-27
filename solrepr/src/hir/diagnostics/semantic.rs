@@ -6,8 +6,8 @@ use triomphe::Arc;
 
 use crate::ast::ImportId;
 use crate::hir::access::AccessDenial;
-use crate::hir::body_map::LocalId;
 use crate::hir::exprs::{ExprId, Name};
+use crate::hir::item_data::SemanticId;
 use crate::hir::resolution::Callable;
 use crate::hir::signatures::OverrideMismatch;
 use crate::hir::types::{Location, Mutability, Ty, TyNameId, Type};
@@ -17,14 +17,33 @@ use crate::salsa::File;
 /// Where a diagnostic anchors, as an id rather than a position. The layout
 /// resolves it to a range at emit, so semantic outputs stay position-free.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DiagnosticAnchor {
-    Expr(ExprId),
-    TyRef(TyNameId),
-    Local(LocalId),
-    /// The def's written name — `def_range`.
-    Def(DefId),
-    /// The body block of a modifier.
-    Body(DefId),
+pub struct DiagnosticAnchor {
+    /// The declaration whose store holds the anchor; without a token, the
+    /// declaration itself.
+    def: DefId,
+    /// The exact spelling to anchor at, or `None` for the declaration's written
+    /// name (or its whole node when it has none).
+    token: Option<SemanticId>,
+}
+
+impl DiagnosticAnchor {
+    /// The declaration's written name, or its whole node when it has none.
+    pub fn def(def: DefId) -> DiagnosticAnchor {
+        DiagnosticAnchor { def, token: None }
+    }
+
+    /// The token `id` names, read in `def`'s store.
+    pub fn token(def: DefId, id: SemanticId) -> DiagnosticAnchor {
+        DiagnosticAnchor { def, token: Some(id) }
+    }
+
+    pub(crate) fn def_id(self) -> DefId {
+        self.def
+    }
+
+    pub(crate) fn token_id(self) -> Option<SemanticId> {
+        self.token
+    }
 }
 
 macro_rules! define_diagnostics {
@@ -86,144 +105,158 @@ pub struct DiagnosticKey(DiagnosticCode, DiagnosticAnchor);
 define_diagnostics! {
     codes { SyntaxError }
     UnresolvedName {
+        def: DefId,
         expr: ExprId,
         name: Name,
         denials: Vec<AccessDenial>,
-    } => DiagnosticAnchor::Expr(*expr),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*expr)),
     UnresolvedMember {
+        def: DefId,
         expr: ExprId,
         receiver: Ty,
         member: Name,
         denials: Vec<AccessDenial>,
-    } => DiagnosticAnchor::Expr(*expr),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*expr)),
     // A member reference whose slot holds more than one inherited
     // declaration with no effective winner. `declarations` are the
     // conflicting base declarations.
     AmbiguousMember {
+        def: DefId,
         expr: ExprId,
         name: Name,
         declarations: Vec<DefId>,
-    } => DiagnosticAnchor::Expr(*expr),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*expr)),
     InvalidArgumentCount {
+        def: DefId,
         call: ExprId,
         expected: usize,
         actual: usize,
-    } => DiagnosticAnchor::Expr(*call),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*call)),
     TypeMismatch {
+        def: DefId,
         expr: ExprId,
         expected: Ty,
         actual: Ty,
-    } => DiagnosticAnchor::Expr(*expr),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*expr)),
     InvalidExplicitConversion {
+        def: DefId,
         expr: ExprId,
         from: Ty,
         to: Type,
-    } => DiagnosticAnchor::Expr(*expr),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*expr)),
     InvalidDataLocation {
+        def: DefId,
         ty_ref_id: TyNameId,
         ty: Type,
         location: Location,
-    } => DiagnosticAnchor::TyRef(*ty_ref_id),
+    } => DiagnosticAnchor::token(*def, SemanticId::Type(*ty_ref_id)),
     DataLocationRequired {
+        def: DefId,
         ty_ref_id: TyNameId,
         ty: Type,
-    } => DiagnosticAnchor::TyRef(*ty_ref_id),
+    } => DiagnosticAnchor::token(*def, SemanticId::Type(*ty_ref_id)),
     UnknownNamedArgument {
+        def: DefId,
         call: ExprId,
         name: Name,
-    } => DiagnosticAnchor::Expr(*call),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*call)),
     DuplicateNamedArgument {
+        def: DefId,
         call: ExprId,
         name: Name,
-    } => DiagnosticAnchor::Expr(*call),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*call)),
     UnresolvedType {
+        def: DefId,
         ty_ref_id: TyNameId,
         name: Name,
-    } => DiagnosticAnchor::TyRef(*ty_ref_id),
+    } => DiagnosticAnchor::token(*def, SemanticId::Type(*ty_ref_id)),
     NoMatchingOverload {
+        def: DefId,
         call: ExprId,
         candidates: Vec<Callable>,
-    } => DiagnosticAnchor::Expr(*call),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*call)),
     AmbiguousOverload {
+        def: DefId,
         call: ExprId,
         candidates: Vec<Callable>,
-    } => DiagnosticAnchor::Expr(*call),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*call)),
     InferenceFailure {
         anchor: DiagnosticAnchor,
         message: String,
     } => *anchor,
     StateMutability {
+        def: DefId,
         expr: ExprId,
         declared: Mutability,
         required: Mutability,
         callee: Option<DefId>,
-    } => DiagnosticAnchor::Expr(*expr),
+    } => DiagnosticAnchor::token(*def, SemanticId::Expr(*expr)),
     InheritanceFailure {
         contract: DefId,
         problems: Vec<String>,
-    } => DiagnosticAnchor::Def(*contract),
+    } => DiagnosticAnchor::def(*contract),
     Redeclaration {
         rejected: DefId,
         name: Name,
         previous: DefId,
-    } => DiagnosticAnchor::Def(*rejected),
+    } => DiagnosticAnchor::def(*rejected),
     MissingOverride {
         declaration: DefId,
         bases: Vec<DefId>,
-    } => DiagnosticAnchor::Def(*declaration),
+    } => DiagnosticAnchor::def(*declaration),
     UnnecessaryOverride {
         declaration: DefId,
-    } => DiagnosticAnchor::Def(*declaration),
+    } => DiagnosticAnchor::def(*declaration),
     NotVirtual {
         declaration: DefId,
         base: DefId,
-    } => DiagnosticAnchor::Def(*declaration),
+    } => DiagnosticAnchor::def(*declaration),
     IncompatibleOverride {
         declaration: DefId,
         base: DefId,
         mismatch: OverrideMismatch,
-    } => DiagnosticAnchor::Def(*declaration),
+    } => DiagnosticAnchor::def(*declaration),
     UnimplementedOverride {
         declaration: DefId,
         base: DefId,
-    } => DiagnosticAnchor::Def(*declaration),
+    } => DiagnosticAnchor::def(*declaration),
     OverrideListMismatch {
         declaration: DefId,
         expected: Vec<DefId>,
-    } => DiagnosticAnchor::Def(*declaration),
+    } => DiagnosticAnchor::def(*declaration),
     OverrideConflict {
         contract: DefId,
         name: Name,
         declarations: Vec<DefId>,
-    } => DiagnosticAnchor::Def(*contract),
+    } => DiagnosticAnchor::def(*contract),
     DuplicateMemberSlot {
         declaration: DefId,
         previous: DefId,
-    } => DiagnosticAnchor::Def(*declaration),
+    } => DiagnosticAnchor::def(*declaration),
     InheritedMemberConflict {
         contract: DefId,
         name: Name,
         declarations: Vec<DefId>,
-    } => DiagnosticAnchor::Def(*contract),
+    } => DiagnosticAnchor::def(*contract),
     UnimplementedContract {
         contract: DefId,
-    } => DiagnosticAnchor::Def(*contract),
+    } => DiagnosticAnchor::def(*contract),
     // A declaration that may not be a member of its container. The rule is the
     // table's — see `ir::membership`.
     IllegalMember {
         declaration: DefId,
         container: DefId,
         violation: crate::ir::membership::Violation,
-    } => DiagnosticAnchor::Def(*declaration),
+    } => DiagnosticAnchor::def(*declaration),
     UnresolvedImport {
         import: ImportId,
         path: Name,
-    } => DiagnosticAnchor::Def(DefId::Import(*import)),
+    } => DiagnosticAnchor::def(DefId::Import(*import)),
     ImportSymbolNotFound {
         import: ImportId,
         name: Name,
         path: Name,
-    } => DiagnosticAnchor::Def(DefId::Import(*import)),
+    } => DiagnosticAnchor::def(DefId::Import(*import)),
 }
 
 impl DiagnosticCode {
@@ -236,18 +269,15 @@ impl DiagnosticCode {
 }
 
 impl SemanticDiagnostic {
-
     /// The file a def-map diagnostic belongs to. Inference diagnostics return `None`: their
-    /// owner is already file-scoped.
+    /// def is already file-scoped.
     pub fn declaration_file(&self) -> Option<File> {
         match self {
             Self::Redeclaration { rejected, .. } => Some(rejected.file()),
             Self::DuplicateMemberSlot { declaration, .. } => Some(declaration.file()),
             Self::IllegalMember { declaration, .. } => Some(declaration.file()),
             Self::InheritedMemberConflict { contract, .. } => Some(contract.file()),
-            Self::UnresolvedImport { import, .. } | Self::ImportSymbolNotFound { import, .. } => {
-                Some(import.file)
-            }
+            Self::UnresolvedImport { import, .. } | Self::ImportSymbolNotFound { import, .. } => Some(import.file),
             _ => None,
         }
     }
@@ -263,9 +293,7 @@ pub struct DiagnosticSink {
 
 impl DiagnosticSink {
     pub fn push(&mut self, diagnostic: SemanticDiagnostic) {
-        if diagnostic.code().allows_multiple()
-            || self.reported.insert(diagnostic.key())
-        {
+        if diagnostic.code().allows_multiple() || self.reported.insert(diagnostic.key()) {
             self.diagnostics.push(diagnostic);
         }
     }

@@ -11,12 +11,12 @@ use crate::ir::def_map::DefId;
 use crate::salsa::HirDb;
 use crate::salsa::root_db::def_range;
 
-/// Lowered syntax content for one owner — no positions.
+/// Lowered syntax content for one def — no positions.
 #[derive(PartialEq, Eq)]
 pub struct SyntaxStore {
     pub types: Arena<TyName>,
     pub exprs: Arena<Expr>,
-    /// The owner's own declared name, when it has one.
+    /// The def's own declared name, when it has one.
     pub name: Option<ExprId>,
 }
 
@@ -30,7 +30,7 @@ impl Default for SyntaxStore {
     }
 }
 
-/// Positions for one owner's lowered syntax — a leaf artifact. Inference and
+/// Positions for one def's lowered syntax — a leaf artifact. Inference and
 /// signatures never read this; only the capability and diagnostic boundary does.
 #[derive(Default, PartialEq, Eq)]
 pub struct SourceMap {
@@ -40,18 +40,13 @@ pub struct SourceMap {
     pub field_ranges: ArenaMap<FieldId, NodeRange>,
     pub variant_ranges: ArenaMap<VariantId, NodeRange>,
     pub vis_range: Option<NodeRange>,
-    pub body_range: Option<NodeRange>,
     pub override_ranges: Box<[NodeRange]>,
     pub range_to_semantic: FxHashMap<NodeRange, SemanticId>,
 }
 
-/// Runs `f` on the owner's content store and source map; `None` for a file.
-fn with_owner<R>(
-    db: &dyn HirDb,
-    owner: DefId,
-    f: impl FnOnce(&SyntaxStore, &SourceMap) -> R,
-) -> Option<R> {
-    Some(match owner {
+/// Runs `f` on the def's content store and source map; `None` for a file.
+fn with_stores<R>(db: &dyn HirDb, def: DefId, f: impl FnOnce(&SyntaxStore, &SourceMap) -> R) -> Option<R> {
+    Some(match def {
         DefId::Function(id) => {
             let body = db.body_map(BodyOwnerId::Function(id));
             let map = db.body_source_map(BodyOwnerId::Function(id));
@@ -64,66 +59,60 @@ fn with_owner<R>(
         }
         DefId::Contract(id) => {
             let data = db.contract_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Interface(id) => {
             let data = db.interface_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Library(id) => {
             let data = db.library_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Struct(id) => {
             let data = db.struct_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Enum(id) => {
             let data = db.enum_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Event(id) => {
             let data = db.event_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Error(id) => {
             let data = db.error_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Var(id) => {
             let data = db.var_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Udvt(id) => {
             let data = db.udvt_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Using(id) => {
             let data = db.using_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::Import(id) => {
             let data = db.import_data(id);
-            f(&data.syntax_store, &db.source_map(owner))
+            f(&data.syntax_store, &db.source_map(def))
         }
         DefId::File(_) => return None,
     })
 }
 
-pub fn semantic_at(db: &dyn HirDb, owner: DefId, range: NodeRange) -> Option<SemanticId> {
-    with_owner(db, owner, |_, map| {
-        map.range_to_semantic.get(&range).copied()
-    })?
+pub fn semantic_at(db: &dyn HirDb, def: DefId, range: NodeRange) -> Option<SemanticId> {
+    with_stores(db, def, |_, map| map.range_to_semantic.get(&range).copied())?
 }
 
-/// Every spelled occurrence in `owner`'s store; a file has none. A callback
-/// because the map borrows a per-owner `Arc` that must not outlive the call.
-pub(crate) fn for_each_semantic(
-    db: &dyn HirDb,
-    owner: DefId,
-    mut f: impl FnMut(NodeRange, SemanticId),
-) {
-    let _ = with_owner(db, owner, |_, map| {
+/// Every spelled occurrence in `def`'s store; a file has none. A callback
+/// because the map borrows a per-def `Arc` that must not outlive the call.
+pub(crate) fn for_each_semantic(db: &dyn HirDb, def: DefId, mut f: impl FnMut(NodeRange, SemanticId)) {
+    let _ = with_stores(db, def, |_, map| {
         for (&range, &id) in &map.range_to_semantic {
             f(range, id);
         }
@@ -135,44 +124,41 @@ pub(crate) fn for_each_semantic(
 ///
 /// `alloc_call_expr` remaps a bare-identifier callee's *own* range onto the
 /// call, so reading through the call is what makes the callee reachable.
-pub fn callee_at(db: &dyn HirDb, owner: DefId, range: NodeRange) -> Option<ExprId> {
-    with_owner(db, owner, |store, map| {
-        match map.range_to_semantic.get(&range) {
-            Some(SemanticId::Expr(expr)) => match &store.exprs[*expr] {
-                Expr::Call { callee, .. } | Expr::CallOptions { callee, .. } => Some(*callee),
-                _ => Some(*expr),
-            },
-            _ => None,
-        }
+pub fn callee_at(db: &dyn HirDb, def: DefId, range: NodeRange) -> Option<ExprId> {
+    with_stores(db, def, |store, map| match map.range_to_semantic.get(&range) {
+        Some(SemanticId::Expr(expr)) => match &store.exprs[*expr] {
+            Expr::Call { callee, .. } | Expr::CallOptions { callee, .. } => Some(*callee),
+            _ => Some(*expr),
+        },
+        _ => None,
     })?
 }
 
-/// Resolve a diagnostic anchor to a source range in `owner`'s store.
-pub(crate) fn anchor_range(
-    db: &dyn HirDb,
-    owner: DefId,
-    anchor: DiagnosticAnchor,
-) -> Option<NodeRange> {
-    match anchor {
-        DiagnosticAnchor::Expr(expr) => {
-            with_owner(db, owner, |_, map| map.expr_ranges.get(expr).copied())?
-        }
-        DiagnosticAnchor::TyRef(ty_ref) => {
-            with_owner(db, owner, |_, map| map.ty_ref_ranges.get(ty_ref).copied())?
-        }
-        DiagnosticAnchor::Local(local) => {
-            with_owner(db, owner, |_, map| map.local_ranges.get(local).copied())?
-        }
-        DiagnosticAnchor::Def(def) => def_range(db, def),
-        DiagnosticAnchor::Body(def) => match def {
-            DefId::Modifier(_) => db.source_map(def).body_range,
-            _ => None,
-        },
-    }
+/// Resolve a diagnostic anchor to a source range.
+///
+/// A function or modifier owns two stores — its item data (signatures, override
+/// lists) and its body — so a token may live in either; the item map is the
+/// fallback when the body map misses.
+pub(crate) fn anchor_range(db: &dyn HirDb, anchor: DiagnosticAnchor) -> Option<NodeRange> {
+    let def = anchor.def_id();
+    let Some(id) = anchor.token_id() else {
+        return def_range(db, def);
+    };
+
+    let lookup = |map: &SourceMap| match id {
+        SemanticId::Expr(expr) => map.expr_ranges.get(expr).copied(),
+        SemanticId::Type(ty_ref) => map.ty_ref_ranges.get(ty_ref).copied(),
+        SemanticId::Local(local) => map.local_ranges.get(local).copied(),
+        SemanticId::Field(field) => map.field_ranges.get(field).copied(),
+        SemanticId::Variant(variant) => map.variant_ranges.get(variant).copied(),
+    };
+    with_stores(db, def, |_, map| lookup(map))
+        .flatten()
+        .or_else(|| lookup(&db.source_map(def)))
 }
 
 #[derive(Clone, Copy)]
-pub struct OwnerStore<'a> {
+pub struct SemanticStore<'a> {
     pub store: &'a SyntaxStore,
     pub locals: Option<&'a Arena<Local>>,
     pub fields: Option<&'a Arena<Field>>,
@@ -181,7 +167,7 @@ pub struct OwnerStore<'a> {
     pub expr_orders: Option<&'a ArenaMap<ExprId, u32>>,
 }
 
-impl<'a> OwnerStore<'a> {
+impl<'a> SemanticStore<'a> {
     pub fn new(store: &'a SyntaxStore) -> Self {
         Self {
             store,
@@ -219,51 +205,47 @@ impl<'a> OwnerStore<'a> {
     }
 }
 
-/// Runs `f` with the owner's inputs; `None` for a file. A callback because the
-/// inputs borrow a per-owner `Arc` and must not outlive this call.
-pub(crate) fn with_owner_store<R>(
-    db: &dyn HirDb,
-    owner: DefId,
-    f: impl FnOnce(OwnerStore<'_>) -> R,
-) -> Option<R> {
-    Some(match owner {
+/// Runs `f` with the def's inputs; `None` for a file. A callback because the
+/// inputs borrow a per-def `Arc` and must not outlive this call.
+pub(crate) fn with_semantic_store<R>(db: &dyn HirDb, def: DefId, f: impl FnOnce(SemanticStore<'_>) -> R) -> Option<R> {
+    Some(match def {
         DefId::Function(id) => {
             let body = db.body_map(BodyOwnerId::Function(id));
-            f(OwnerStore::new(&body.syntax_store)
+            f(SemanticStore::new(&body.syntax_store)
                 .with_locals(&body.locals)
                 .with_expr_scopes(&body.expr_scopes)
                 .with_expr_orders(&body.expr_orders))
         }
         DefId::Modifier(id) => {
             let body = db.body_map(BodyOwnerId::Modifier(id));
-            f(OwnerStore::new(&body.syntax_store)
+            f(SemanticStore::new(&body.syntax_store)
                 .with_locals(&body.locals)
                 .with_expr_scopes(&body.expr_scopes)
                 .with_expr_orders(&body.expr_orders))
         }
         DefId::Event(id) => {
             let data = db.event_data(id);
-            f(OwnerStore::new(&data.syntax_store).with_locals(&data.parameters))
+            f(SemanticStore::new(&data.syntax_store).with_locals(&data.parameters))
         }
         DefId::Error(id) => {
             let data = db.error_data(id);
-            f(OwnerStore::new(&data.syntax_store).with_locals(&data.parameters))
+            f(SemanticStore::new(&data.syntax_store).with_locals(&data.parameters))
         }
         DefId::Struct(id) => {
             let data = db.struct_data(id);
-            f(OwnerStore::new(&data.syntax_store).with_fields(&data.fields))
+            f(SemanticStore::new(&data.syntax_store).with_fields(&data.fields))
         }
         DefId::Enum(id) => {
             let data = db.enum_data(id);
-            f(OwnerStore::new(&data.syntax_store).with_variants(&data.variants))
+            f(SemanticStore::new(&data.syntax_store).with_variants(&data.variants))
         }
-        DefId::Import(id) => f(OwnerStore::new(&db.import_data(id).syntax_store)),
-        DefId::Udvt(id) => f(OwnerStore::new(&db.udvt_data(id).syntax_store)),
-        DefId::Using(id) => f(OwnerStore::new(&db.using_data(id).syntax_store)),
-        DefId::Contract(id) => f(OwnerStore::new(&db.contract_data(id).syntax_store)),
-        DefId::Interface(id) => f(OwnerStore::new(&db.interface_data(id).syntax_store)),
-        DefId::Library(id) => f(OwnerStore::new(&db.library_data(id).syntax_store)),
-        DefId::Var(id) => f(OwnerStore::new(&db.var_data(id).syntax_store)),
+        DefId::Import(id) => f(SemanticStore::new(&db.import_data(id).syntax_store)),
+        DefId::Udvt(id) => f(SemanticStore::new(&db.udvt_data(id).syntax_store)),
+        DefId::Using(id) => f(SemanticStore::new(&db.using_data(id).syntax_store)),
+        DefId::Contract(id) => f(SemanticStore::new(&db.contract_data(id).syntax_store)),
+        DefId::Interface(id) => f(SemanticStore::new(&db.interface_data(id).syntax_store)),
+        DefId::Library(id) => f(SemanticStore::new(&db.library_data(id).syntax_store)),
+        DefId::Var(id) => f(SemanticStore::new(&db.var_data(id).syntax_store)),
         DefId::File(_) => return None,
     })
 }

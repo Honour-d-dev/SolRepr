@@ -7,8 +7,8 @@ use crate::hir::resolution::{Field, Resolution};
 use crate::hir::syntax_store::{for_each_semantic, semantic_at};
 use crate::hir::tests::helper::{def_name_range, find_contract, find_function, make_test_db};
 use crate::ir::def_map::DefId;
-use crate::salsa::root_db::RootDb;
 use crate::salsa::HirDb;
+use crate::salsa::root_db::RootDb;
 
 /// One fixture holding every declaration kind that carries a name.
 const EVERY_KIND: &str = r#"
@@ -56,13 +56,9 @@ fn every_declaration_name_maps_to_its_own_identity() {
         let Some(range) = def_name_range(&db, file, def) else {
             continue;
         };
-        let id = semantic_at(&db, def, range)
-            .unwrap_or_else(|| panic!("`{def:?}` lowers no name at its declaration"));
+        let id = semantic_at(&db, def, range).unwrap_or_else(|| panic!("`{def:?}` lowers no name at its declaration"));
         let identity = identity_of_semantic(&db, def, id);
-        assert!(
-            identity == Some(Identity::Def(def)),
-            "`{def:?}` resolves to {identity:?}"
-        );
+        assert!(identity == Some(Identity::Def(def)), "`{def:?}` resolves to {identity:?}");
         checked.insert(kind(def));
     }
 
@@ -79,10 +75,7 @@ fn every_declaration_name_maps_to_its_own_identity() {
         "event",
         "error",
     ] {
-        assert!(
-            checked.contains(expected),
-            "`{expected}` is not covered: {checked:?}"
-        );
+        assert!(checked.contains(expected), "`{expected}` is not covered: {checked:?}");
     }
 }
 
@@ -110,9 +103,7 @@ fn kind(def: DefId) -> &'static str {
 fn a_local_use_site_and_its_declaration_share_an_identity() {
     let (db, file) = make_test_db("contract C { function f() external { uint x = 1; x = 2; } }");
     let f = find_function(&db, file, "f");
-    let DefId::Function(id) = f else {
-        unreachable!()
-    };
+    let DefId::Function(id) = f else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(id));
     let inference = db.inference(f);
 
@@ -125,40 +116,32 @@ fn a_local_use_site_and_its_declaration_share_an_identity() {
         })
         .expect("the fixture declares a local");
 
-    let (decl_range, use_range) =
-        map.range_to_semantic
-            .iter()
-            .fold((None, None), |(decl, used), (range, id)| match id {
-                SemanticId::Local(declared) if *declared == local => (Some(*range), used),
-                SemanticId::Expr(expr) => match inference.expr_resolution(*expr) {
-                    Some(Resolution::Local(resolved)) if resolved.id == local => {
-                        (decl, Some(*range))
-                    }
-                    _ => (decl, used),
-                },
+    let (decl_range, use_range) = map
+        .range_to_semantic
+        .iter()
+        .fold((None, None), |(decl, used), (range, id)| match id {
+            SemanticId::Local(declared) if *declared == local => (Some(*range), used),
+            SemanticId::Expr(expr) => match inference.expr_resolution(*expr) {
+                Some(Resolution::Local(resolved)) if resolved.id == local => (decl, Some(*range)),
                 _ => (decl, used),
-            });
+            },
+            _ => (decl, used),
+        });
 
-    assert_ne!(
-        decl_range, use_range,
-        "the declaration and the use are distinct ranges"
-    );
+    assert_ne!(decl_range, use_range, "the declaration and the use are distinct ranges");
     assert_eq!(
         identity_of_semantic(&db, f, SemanticId::Local(local)),
         identity_of_semantic(
             &db,
             f,
-            semantic_at(&db, f, use_range.expect("the use site is lowered"))
-                .expect("the use site has a semantic id")
+            semantic_at(&db, f, use_range.expect("the use site is lowered")).expect("the use site has a semantic id")
         ),
     );
 }
 
 #[test]
 fn a_member_use_site_and_its_field_share_an_identity() {
-    let (db, file) = make_test_db(
-        "struct S { uint256 a; } contract C { S s; function f() external { s.a = 1; } }",
-    );
+    let (db, file) = make_test_db("struct S { uint256 a; } contract C { S s; function f() external { s.a = 1; } }");
     let defmap = db.file_def_map(file);
     let structure = defmap
         .defs
@@ -177,9 +160,7 @@ fn a_member_use_site_and_its_field_share_an_identity() {
 
     let f = find_function(&db, file, "f");
     let inference = db.inference(f);
-    let DefId::Function(function) = f else {
-        unreachable!()
-    };
+    let DefId::Function(function) = f else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(function));
     let (range, id) = map
         .range_to_semantic
@@ -202,13 +183,10 @@ fn a_member_use_site_and_its_field_share_an_identity() {
 
 #[test]
 fn a_contract_is_one_identity_from_every_spelling() {
-    let (db, file) =
-        make_test_db("contract B {} contract E { function f() external { B b = new B(); } }");
+    let (db, file) = make_test_db("contract B {} contract E { function f() external { B b = new B(); } }");
     let b = find_contract(&db, file, "B");
     let f = find_function(&db, file, "f");
-    let DefId::Function(function) = f else {
-        unreachable!()
-    };
+    let DefId::Function(function) = f else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(function));
 
     let mut spellings = 0;
@@ -249,12 +227,9 @@ fn a_collided_declaration_still_denotes_itself() {
 
 #[test]
 fn a_builtin_or_a_primitive_names_nothing() {
-    let (db, file) =
-        make_test_db("contract C { function f() external { uint x = 1; msg.sender; } }");
+    let (db, file) = make_test_db("contract C { function f() external { uint x = 1; msg.sender; } }");
     let f = find_function(&db, file, "f");
-    let DefId::Function(function) = f else {
-        unreachable!()
-    };
+    let DefId::Function(function) = f else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(function));
     let inference = db.inference(f);
 
@@ -262,24 +237,13 @@ fn a_builtin_or_a_primitive_names_nothing() {
     let mut primitive = false;
     for id in map.range_to_semantic.values() {
         match id {
-            SemanticId::Expr(expr)
-                if matches!(
-                    inference.expr_resolution(*expr),
-                    Some(Resolution::Field(Field::Builtin(_)))
-                ) =>
-            {
+            SemanticId::Expr(expr) if matches!(inference.expr_resolution(*expr), Some(Resolution::Field(Field::Builtin(_)))) => {
                 builtin_field = true;
-                assert!(
-                    identity_of_semantic(&db, f, *id).is_none(),
-                    "`msg.sender` names no declaration"
-                );
+                assert!(identity_of_semantic(&db, f, *id).is_none(), "`msg.sender` names no declaration");
             }
             SemanticId::Type(ty) if inference.ty(*ty).ty().def_id(&db).is_none() => {
                 primitive = true;
-                assert!(
-                    identity_of_semantic(&db, f, *id).is_none(),
-                    "`uint` names no declaration"
-                );
+                assert!(identity_of_semantic(&db, f, *id).is_none(), "`uint` names no declaration");
             }
             _ => {}
         }
@@ -289,14 +253,12 @@ fn a_builtin_or_a_primitive_names_nothing() {
 }
 
 /// The iteration surface the scan walks: every `(range, semantic)` pair the
-/// owner's store holds, and nothing for a file, which owns no store.
+/// def's store holds, and nothing for a file, which owns no store.
 #[test]
 fn for_each_semantic_visits_every_spelled_occurrence() {
     let (db, file) = make_test_db("contract C { function f() external { uint x = 1; x = 2; } }");
     let f = find_function(&db, file, "f");
-    let DefId::Function(id) = f else {
-        unreachable!()
-    };
+    let DefId::Function(id) = f else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(id));
 
     let mut visited = Vec::new();
@@ -307,19 +269,13 @@ fn for_each_semantic_visits_every_spelled_occurrence() {
         assert!(map.range_to_semantic.get(range) == Some(id));
     }
     assert!(
-        visited
-            .iter()
-            .any(|(_, id)| matches!(id, SemanticId::Local(_))),
+        visited.iter().any(|(_, id)| matches!(id, SemanticId::Local(_))),
         "the declaration is visited"
     );
     assert!(
-        visited
-            .iter()
-            .any(|(_, id)| matches!(id, SemanticId::Expr(_))),
+        visited.iter().any(|(_, id)| matches!(id, SemanticId::Expr(_))),
         "the use is visited"
     );
 
-    for_each_semantic(&db, DefId::File(file), |_, _| {
-        panic!("a file owns no store")
-    });
+    for_each_semantic(&db, DefId::File(file), |_, _| panic!("a file owns no store"));
 }

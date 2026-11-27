@@ -38,8 +38,6 @@ pub fn option_type(name: &str) -> Option<Primitive> {
     }
 }
 
-
-
 impl Fn<Type> {
     pub fn options(&self) -> Option<&'static [StaticName]> {
         (self.visibility == Visibility::External).then_some(EXTERNAL_CALL_OPTIONS)
@@ -80,7 +78,7 @@ impl Fn<Type> {
                 return Some(Fn {
                     visibility: Visibility::External,
                     ..self.external_abi(db)
-                })
+                });
             }
             // A bare name is a jump, so an `external` declaration has no internal reference.
             CallKind::Direct => {
@@ -96,9 +94,7 @@ impl Fn<Type> {
             CallKind::Base(_) if self.visibility == Visibility::External => return None,
             CallKind::Base(_) => Visibility::Internal,
             // `L.f` is a jump only for an *internal* library function:
-            CallKind::ViaType(ViaTypeKind::Library) if self.visibility == Visibility::Internal => {
-                Visibility::Internal
-            }
+            CallKind::ViaType(ViaTypeKind::Library) if self.visibility == Visibility::Internal => Visibility::Internal,
             // A declaration-only reference, a `using`-attached function, or a
             // static builtin is not a value.
             CallKind::ViaType(_) | CallKind::Bound | CallKind::Static => return None,
@@ -110,24 +106,14 @@ impl Fn<Type> {
     }
 
     pub fn display(&self, db: &dyn HirDb) -> String {
-        let params = self
-            .params
-            .iter()
-            .map(|p| p.display(db))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let params = self.params.iter().map(|p| p.display(db)).collect::<Vec<_>>().join(", ");
         let mut out = format!("function({params}) {}", self.visibility.as_str());
         if self.mutability != Mutability::NonPayable {
             out.push(' ');
             out.push_str(self.mutability.as_str());
         }
         if !self.returns.is_empty() {
-            let ret = self
-                .returns
-                .iter()
-                .map(|r| r.display(db))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let ret = self.returns.iter().map(|r| r.display(db)).collect::<Vec<_>>().join(", ");
             out.push_str(&format!(" returns ({ret})"));
         }
         out
@@ -188,7 +174,6 @@ impl CallKind {
     }
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BaseKind {
     /// `C.f` inside `C`; the name is contract-qualified but selects an
@@ -200,7 +185,6 @@ pub enum BaseKind {
     Super,
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViaTypeKind {
     Library,
@@ -208,8 +192,8 @@ pub enum ViaTypeKind {
 }
 
 impl ViaTypeKind {
-    pub fn from_owner(owner: DefId) -> Self {
-        match owner {
+    pub fn from_type(ty: DefId) -> Self {
+        match ty {
             DefId::Library(_) => Self::Library,
             _ => Self::NonLibrary,
         }
@@ -238,4 +222,3 @@ impl Callee {
         }
     }
 }
-

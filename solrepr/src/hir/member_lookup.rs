@@ -101,43 +101,42 @@ impl<'db> Resolver<'db> {
     /// header signatures never depend on the effective-member fold.
     pub fn declaration_member_named(&self, receiver: Ty, name: &Name) -> MemberLookupResult {
         if let TyKind::Type(inner) = receiver.kind(self.db)
-            && let Some(owner @ (DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_))) =
-                inner.def_id(self.db)
+            && let Some(container @ (DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_))) = inner.def_id(self.db)
         {
             let mut result = MemberLookupResult::default();
-            self.own_scope_member(&mut result, owner, name, self.access.type_access_kind(owner));
+            self.own_scope_member(&mut result, container, name, self.access.type_access_kind(container));
             return result;
         }
         self.member_named(receiver, name)
     }
 
-    /// The projected outcome `owner`'s scope contributes for `name` —
-    /// including inherited slots for contract owners.
-    pub fn direct_member_named(&self, owner: DefId, name: &Name) -> MemberLookupResult {
+    /// The projected outcome `container`'s scope contributes for `name` —
+    /// including inherited slots for contract containers.
+    pub fn direct_member_named(&self, container: DefId, name: &Name) -> MemberLookupResult {
         let mut result = MemberLookupResult::default();
-        match owner {
+        match container {
             DefId::Contract(_) | DefId::Interface(_) => {
-                self.contract_member_named(owner, CallKind::Direct, true, false, name, &mut result);
+                self.contract_member_named(container, CallKind::Direct, true, false, name, &mut result);
             }
             DefId::Library(_) => {
-                self.own_scope_member(&mut result, owner, name, CallKind::Direct);
+                self.own_scope_member(&mut result, container, name, CallKind::Direct);
             }
             _ => {}
         }
         result
     }
 
-    /// Declaration-context counterpart of `direct_member_named`: the owner's
+    /// Declaration-context counterpart of `direct_member_named`: the container's
     /// declaring scope, then its bases in linearization order, without the
-    /// effective-member fold. Only the owner's own scope is consulted when it
+    /// effective-member fold. Only the container's own scope is consulted when it
     /// hits, so the bases query is not demanded for locally declared names.
-    pub fn declaration_direct_member_named(&self, owner: DefId, name: &Name) -> MemberLookupResult {
+    pub fn declaration_direct_member_named(&self, container: DefId, name: &Name) -> MemberLookupResult {
         let mut result = MemberLookupResult::default();
-        self.own_scope_member(&mut result, owner, name, CallKind::Direct);
-        if result.is_hit() || !matches!(owner, DefId::Contract(_) | DefId::Interface(_)) {
+        self.own_scope_member(&mut result, container, name, CallKind::Direct);
+        if result.is_hit() || !matches!(container, DefId::Contract(_) | DefId::Interface(_)) {
             return result;
         }
-        for &base in self.db.bases(owner).iter().skip(1) {
+        for &base in self.db.bases(container).iter().skip(1) {
             self.own_scope_member(&mut result, base, name, CallKind::Direct);
             if result.is_hit() {
                 break;
@@ -146,18 +145,12 @@ impl<'db> Resolver<'db> {
         result
     }
 
-    fn own_scope_member(
-        &self,
-        result: &mut MemberLookupResult,
-        owner: DefId,
-        name: &Name,
-        path: CallKind,
-    ) {
-        let defmap = self.db.file_def_map(owner.file());
-        if let Some(scope) = defmap.defs.get(&owner).and_then(|data| data.child_scope)
+    fn own_scope_member(&self, result: &mut MemberLookupResult, container: DefId, name: &Name, path: CallKind) {
+        let defmap = self.db.file_def_map(container.file());
+        if let Some(scope) = defmap.defs.get(&container).and_then(|data| data.child_scope)
             && let Some(member) = defmap.scopes[scope].by_name.get(name)
         {
-            self.scope_member(result, owner, member, path);
+            self.scope_member(result, container, member, path);
         }
     }
 
@@ -176,28 +169,28 @@ impl<'db> Resolver<'db> {
             .collect()
     }
 
-    /// Every member `owner`'s scope contributes — for bare-name completion.
-    pub fn direct_members_of(&self, owner: DefId) -> BTreeMap<Name, MemberLookupResult> {
+    /// Every member `container`'s scope contributes — for bare-name completion.
+    pub fn direct_members_of(&self, container: DefId) -> BTreeMap<Name, MemberLookupResult> {
         let mut names = BTreeSet::new();
-        if matches!(owner, DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_)) {
-            self.scope_names(owner, &mut names);
+        if matches!(container, DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_)) {
+            self.scope_names(container, &mut names);
         }
         names
             .into_iter()
             .map(|name| {
-                let result = self.direct_member_named(owner, &name);
+                let result = self.direct_member_named(container, &name);
                 (name, result)
             })
             .filter(|(_, result)| result.is_hit())
             .collect()
     }
 
-    fn scope_names(&self, owner: DefId, names: &mut BTreeSet<Name>) {
-        if matches!(owner, DefId::Contract(_) | DefId::Interface(_)) {
-            names.extend(self.db.member_map(owner).data.by_name.keys().cloned());
+    fn scope_names(&self, container: DefId, names: &mut BTreeSet<Name>) {
+        if matches!(container, DefId::Contract(_) | DefId::Interface(_)) {
+            names.extend(self.db.member_map(container).data.by_name.keys().cloned());
         } else {
-            let defmap = self.db.file_def_map(owner.file());
-            if let Some(scope) = defmap.defs.get(&owner).and_then(|data| data.child_scope) {
+            let defmap = self.db.file_def_map(container.file());
+            if let Some(scope) = defmap.defs.get(&container).and_then(|data| data.child_scope) {
                 names.extend(defmap.scopes[scope].by_name.keys().cloned());
             }
         }
@@ -244,9 +237,7 @@ impl<'db> Resolver<'db> {
                             names.insert(data.name.clone());
                         }
                     }
-                    TyKind::TypeDef(id)
-                        if matches!(id, TypeDefId::Contract(_) | TypeDefId::Interface(_)) =>
-                    {
+                    TyKind::TypeDef(id) if matches!(id, TypeDefId::Contract(_) | TypeDefId::Interface(_)) => {
                         self.scope_names(id.into(), names);
                     }
                     _ => {}
@@ -267,17 +258,17 @@ impl<'db> Resolver<'db> {
         match ty.peel_loc(self.db).kind(self.db) {
             TyKind::Module(file) => self.file_member_named(file, name, result),
             TyKind::TypeDef(id) if id.is_contract_like() => {
-                let owner = id.into();
-                let path = self.access.type_access_kind(owner);
+                let container = id.into();
+                let path = self.access.type_access_kind(container);
                 // Members declared in the type itself — functions, modifiers,
                 // events, errors, constants and nested types. Member access on
                 // a contract type is declared-only in solc: `B.E`/`B.f` do not
                 // reach members `B` merely inherits (inherited *type* members
                 // are still reachable in type positions via `lookup_type`).
-                if matches!(owner, DefId::Contract(_) | DefId::Interface(_)) {
-                    self.contract_member_named(owner, path, true, true, name, result);
+                if matches!(container, DefId::Contract(_) | DefId::Interface(_)) {
+                    self.contract_member_named(container, path, true, true, name, result);
                 } else {
-                    self.own_scope_member(result, owner, name, path);
+                    self.own_scope_member(result, container, name, path);
                 }
             }
             TyKind::TypeDef(TypeDefId::Enum(enum_id)) => {
@@ -302,25 +293,16 @@ impl<'db> Resolver<'db> {
         let base = ty.peel_loc(self.db);
         match base.kind(self.db) {
             TyKind::TypeDef(TypeDefId::Struct(id)) => {
-                let owner = DefId::Struct(id);
+                let container = DefId::Struct(id);
                 for (field, data) in self.db.struct_data(id).fields.iter() {
                     if data.name == *name {
-                        result.push_effective(Resolution::Field(Field::new_struct(owner, field)));
+                        result.push_effective(Resolution::Field(Field::new_struct(container, field)));
                     }
                 }
             }
-            TyKind::TypeDef(id)
-                if matches!(id, TypeDefId::Contract(_) | TypeDefId::Interface(_)) =>
-            {
-                let owner = id.into();
-                self.contract_member_named(
-                    owner,
-                    CallKind::External,
-                    false,
-                    false,
-                    name,
-                    result,
-                );
+            TyKind::TypeDef(id) if matches!(id, TypeDefId::Contract(_) | TypeDefId::Interface(_)) => {
+                let container = id.into();
+                self.contract_member_named(container, CallKind::External, false, false, name, result);
             }
             _ => {}
         }
@@ -330,14 +312,14 @@ impl<'db> Resolver<'db> {
 
     fn contract_member_named(
         &self,
-        owner: DefId,
+        container: DefId,
         path: CallKind,
         include_types: bool,
         declared_only: bool,
         name: &Name,
         result: &mut MemberLookupResult,
     ) {
-        let members = self.db.member_map(owner).data;
+        let members = self.db.member_map(container).data;
         let Some(group) = members.by_name.get(name) else {
             return;
         };
@@ -351,7 +333,7 @@ impl<'db> Resolver<'db> {
                 && !slot.candidates.iter().any(|declaration| {
                     members
                         .declaration(*declaration)
-                        .is_some_and(|declaration| declaration.owner == owner)
+                        .is_some_and(|declaration| declaration.declarer == container)
                 })
             {
                 continue;
@@ -360,13 +342,7 @@ impl<'db> Resolver<'db> {
         }
     }
 
-    fn slot_candidate(
-        &self,
-        result: &mut MemberLookupResult,
-        members: &MemberMap,
-        path: CallKind,
-        slot: &MemberSlot,
-    ) {
+    fn slot_candidate(&self, result: &mut MemberLookupResult, members: &MemberMap, path: CallKind, slot: &MemberSlot) {
         match slot.effective {
             // A denied declaration records its denials while projecting and
             // yields no hit — it does not shadow the scopes lookup continues
@@ -390,19 +366,10 @@ impl<'db> Resolver<'db> {
         }
     }
 
-    fn project_def(
-        &self,
-        result: &mut MemberLookupResult,
-        members: &MemberMap,
-        def: DefId,
-        path: CallKind,
-    ) -> Option<Resolution> {
+    fn project_def(&self, result: &mut MemberLookupResult, members: &MemberMap, def: DefId, path: CallKind) -> Option<Resolution> {
         let declaration = members.declaration(def)?;
-        match self
-            .access
-            .scan(path, declaration.owner, &declaration.namespace, &[def])
-        {
-            MemberScan::Hit { .. } => Some(self.resolution_for_def(def, declaration.owner, path)),
+        match self.access.scan(path, declaration.declarer, &declaration.namespace, &[def]) {
+            MemberScan::Hit { .. } => Some(self.resolution_for_def(def, declaration.declarer, path)),
             MemberScan::Denied(denials) => {
                 result.denials.extend(denials);
                 None
@@ -412,22 +379,13 @@ impl<'db> Resolver<'db> {
     }
 
     /// Apply the namespace-aware access policy to one declaration group.
-    /// `owner` is the scope the definitions were read from; `caller` is
+    /// `container` is the scope the definitions were read from; `caller` is
     /// the lexical caller.
-    fn scope_member(
-        &self,
-        result: &mut MemberLookupResult,
-        owner: DefId,
-        member: &ScopeData,
-        path: CallKind,
-    ) {
-        match self
-            .access
-            .scan(path, owner, &member.namespace, &member.defs)
-        {
+    fn scope_member(&self, result: &mut MemberLookupResult, container: DefId, member: &ScopeData, path: CallKind) {
+        match self.access.scan(path, container, &member.namespace, &member.defs) {
             MemberScan::Hit { defs, .. } => {
                 for def in defs {
-                    result.push_effective(self.resolution_for_def(def, owner, path));
+                    result.push_effective(self.resolution_for_def(def, container, path));
                 }
             }
             MemberScan::Denied(denials) => result.denials.extend(denials),
@@ -435,25 +393,18 @@ impl<'db> Resolver<'db> {
         }
     }
 
-    fn resolution_for_def(&self, def: DefId, owner: DefId, path: CallKind) -> Resolution {
+    fn resolution_for_def(&self, def: DefId, container: DefId, path: CallKind) -> Resolution {
         match def {
             DefId::File(file) => Resolution::Module(file),
-            DefId::Contract(_)
-            | DefId::Interface(_)
-            | DefId::Library(_)
-            | DefId::Struct(_)
-            | DefId::Enum(_)
-            | DefId::Udvt(_) => Resolution::from_type(self.db, def),
-            DefId::Var(id) if path == CallKind::External => {
-                Resolution::Callable(Callable::new_getter(id))
+            DefId::Contract(_) | DefId::Interface(_) | DefId::Library(_) | DefId::Struct(_) | DefId::Enum(_) | DefId::Udvt(_) => {
+                Resolution::from_type(self.db, def)
             }
+            DefId::Var(id) if path == CallKind::External => Resolution::Callable(Callable::new_getter(id)),
             DefId::Var(_) => Resolution::Var(def),
-            DefId::Function(_) => {
-                Resolution::Callable(Callable::new_direct(def).with_kind(path))
-            }
+            DefId::Function(_) => Resolution::Callable(Callable::new_direct(def).with_kind(path)),
             DefId::Error(_) | DefId::Event(_) | DefId::Modifier(_) => {
                 let path = if matches!(path, CallKind::Base(_)) {
-                    CallKind::ViaType(ViaTypeKind::from_owner(owner))
+                    CallKind::ViaType(ViaTypeKind::from_type(container))
                 } else {
                     path
                 };
@@ -469,28 +420,24 @@ impl<'db> Resolver<'db> {
     /// The merged slot's outcome does not govern dispatch — except a
     /// conflicted slot, which never produced a dispatch order and stays a
     /// conflict candidate.
-    fn super_member_named(&self, owner: DefId, name: &Name, result: &mut MemberLookupResult) {
-        let members = self.db.member_map(owner).data;
+    fn super_member_named(&self, container: DefId, name: &Name, result: &mut MemberLookupResult) {
+        let members = self.db.member_map(container).data;
         let Some(group) = members.by_name.get(name) else {
             return;
         };
         for slot in &group.values {
-            // `slot.declarations` is already ordered by `owner`'s C3
-            // linearization; skip `owner`'s own declarations.
+            // `slot.declarations` is already ordered by `container`'s C3
+            // linearization; skip `container`'s own declarations.
             let base_declarations = slot.candidates.iter().copied().filter(|&def| {
                 members
                     .declaration(def)
-                    .is_some_and(|declaration| declaration.owner != owner)
+                    .is_some_and(|declaration| declaration.declarer != container)
             });
             if slot.effective.is_none() {
-                let declarations: Vec<_> = base_declarations
-                    .filter(|def| matches!(def, DefId::Function(_)))
-                    .collect();
+                let declarations: Vec<_> = base_declarations.filter(|def| matches!(def, DefId::Function(_))).collect();
                 let before = result.conflicts.len();
                 for &def in &declarations {
-                    if let Some(resolution) =
-                        self.project_def(result, &members, def, CallKind::Base(BaseKind::Super))
-                    {
+                    if let Some(resolution) = self.project_def(result, &members, def, CallKind::Base(BaseKind::Super)) {
                         result.conflicts.push(resolution);
                     }
                 }
@@ -502,8 +449,7 @@ impl<'db> Resolver<'db> {
                     let DefId::Function(id) = def else {
                         continue;
                     };
-                    if let Some(resolution) =
-                        self.project_def(result, &members, def, CallKind::Base(BaseKind::Super))
+                    if let Some(resolution) = self.project_def(result, &members, def, CallKind::Base(BaseKind::Super))
                         && self.db.function_data(id).has_body
                     {
                         result.push_effective(resolution);
@@ -518,23 +464,13 @@ impl<'db> Resolver<'db> {
         for (defmap, scope) in self.file_scopes(file) {
             if let Some(member) = defmap.scopes[scope].by_name.get(name) {
                 for &def in &member.defs {
-                    result.push_effective(self.resolution_for_def(
-                        def,
-                        self.access.caller(),
-                        CallKind::Direct,
-                    ));
+                    result.push_effective(self.resolution_for_def(def, self.access.caller(), CallKind::Direct));
                 }
             }
         }
     }
 
-    fn add_builtins_named(
-        &self,
-        result: &mut MemberLookupResult,
-        ty: Ty,
-        namespace: MemberNamespace,
-        name: &Name,
-    ) {
+    fn add_builtins_named(&self, result: &mut MemberLookupResult, ty: Ty, namespace: MemberNamespace, name: &Name) {
         for builtin in self.builtins().members(ty, namespace).iter() {
             if builtin.name() == name.as_str() {
                 result.push_effective(Resolution::from(*builtin));

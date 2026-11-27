@@ -5,14 +5,15 @@ use triomphe::Arc;
 use crate::hir::access::{AccessChecker, AccessDenial};
 use crate::hir::body_map::{BodyMap, BodyOwnerId, ScopeId};
 use crate::hir::builtins::BuiltinDb;
+use crate::hir::diagnostics::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::exprs::{ExprId, Name};
+use crate::hir::item_data::SemanticId;
 use crate::hir::member_lookup::MemberLookupResult;
 use crate::hir::resolution::{Callable, Local, Resolution};
-use crate::hir::diagnostics::{DiagnosticAnchor, DiagnosticSink, SemanticDiagnostic};
 use crate::hir::types::{Primitive, Ty, Type};
 use crate::ir::def_map::{DefId, DefMap, DefNamespace, ScopeData, ScopeId as DefScopeId};
-use crate::salsa::{File, HirDb};
 use crate::salsa::hir_db::def_name;
+use crate::salsa::{File, HirDb};
 
 /// The outcome of a bare-name lookup walk.
 enum NameOutcome {
@@ -50,12 +51,7 @@ impl<'db> Resolver<'db> {
         Self::new(db, this, None, true)
     }
 
-    fn new(
-        db: &'db dyn HirDb,
-        this: DefId,
-        body: Option<Arc<BodyMap>>,
-        declaration_only: bool,
-    ) -> Resolver<'db> {
+    fn new(db: &'db dyn HirDb, this: DefId, body: Option<Arc<BodyMap>>, declaration_only: bool) -> Resolver<'db> {
         let defmap = db.file_def_map(this.file());
         let data = defmap.defs.get(&this).unwrap();
         let container = defmap.scopes[data.child_scope.unwrap_or(data.scope)].owner;
@@ -82,7 +78,8 @@ impl<'db> Resolver<'db> {
         self.diagnostics.borrow_mut().push(diagnostic);
     }
 
-    pub fn builtins(&self) -> BuiltinDb<'db> {//FIXME: this is only used by completion but completion can just build/instantiate a db
+    pub fn builtins(&self) -> BuiltinDb<'db> {
+        //FIXME: this is only used by completion but completion can just build/instantiate a db
         BuiltinDb::new(self.db)
     }
 
@@ -111,25 +108,14 @@ impl<'db> Resolver<'db> {
     /// Resolution without reporting or the self-name check — the test-facing
     /// convenience over [`Self::resolve_name_in`].
     #[cfg(test)]
-    pub fn resolve_name(
-        &self,
-        name: &Name,
-        local_scope: Option<ScopeId>,
-        order: u32,
-    ) -> Option<Resolution> {
+    pub fn resolve_name(&self, name: &Name, local_scope: Option<ScopeId>, order: u32) -> Option<Resolution> {
         self.resolve_name_in(name, local_scope, order, false)
     }
 
     /// Name lookup at a source expression: `order` is the expression's
     /// allocation order, `is_self_name` whether it is the def's own name at its
     /// declaration site.
-    pub fn resolve_name_in(
-        &self,
-        name: &Name,
-        local_scope: Option<ScopeId>,
-        order: u32,
-        is_self_name: bool,
-    ) -> Option<Resolution> {
+    pub fn resolve_name_in(&self, name: &Name, local_scope: Option<ScopeId>, order: u32, is_self_name: bool) -> Option<Resolution> {
         match self.resolve_name_inner(name, local_scope, order, is_self_name) {
             NameOutcome::Found(resolution) => Some(resolution),
             NameOutcome::Conflict(_) | NameOutcome::Missed(_) => None,
@@ -150,6 +136,7 @@ impl<'db> Resolver<'db> {
             NameOutcome::Conflict(declarations) => {
                 if !declarations.is_empty() {
                     self.record_lookup_failure(SemanticDiagnostic::AmbiguousMember {
+                        def: self.this,
                         expr,
                         name: name.clone(),
                         declarations,
@@ -159,6 +146,7 @@ impl<'db> Resolver<'db> {
             }
             NameOutcome::Missed(denials) => {
                 self.record_lookup_failure(SemanticDiagnostic::UnresolvedName {
+                    def: self.this,
                     expr,
                     name: name.clone(),
                     denials,
@@ -168,24 +156,17 @@ impl<'db> Resolver<'db> {
         }
     }
 
-    fn resolve_name_inner(
-        &self,
-        name: &Name,
-        local_scope: Option<ScopeId>,
-        order: u32,
-        is_self_name: bool,
-    ) -> NameOutcome {
-        self
-            .resolve_primitive(name)
+    fn resolve_name_inner(&self, name: &Name, local_scope: Option<ScopeId>, order: u32, is_self_name: bool) -> NameOutcome {
+        self.resolve_primitive(name)
             .or_else(|| self.resolve_local(name, local_scope, order))
             .or_else(|| self.resolve_self(name, is_self_name))
             .map(NameOutcome::Found)
-            .or_else(|| Some(self.resolve_def(name))).map(|o| match o {
-                NameOutcome::Missed(denials) => self
-                .resolve_builtin(name)
-                .map_or(NameOutcome::Missed(denials), NameOutcome::Found),
-            outcome => outcome,
-            }).expect("should always have be some")
+            .or_else(|| Some(self.resolve_def(name)))
+            .map(|o| match o {
+                NameOutcome::Missed(denials) => self.resolve_builtin(name).map_or(NameOutcome::Missed(denials), NameOutcome::Found),
+                outcome => outcome,
+            })
+            .expect("should always have be some")
     }
 
     fn resolve_primitive(&self, name: &Name) -> Option<Resolution> {
@@ -200,12 +181,7 @@ impl<'db> Resolver<'db> {
         self.builtins().resolve_global(name).map(Resolution::from)
     }
 
-    fn resolve_local(
-        &self,
-        name: &Name,
-        local_scope: Option<ScopeId>,
-        order: u32,
-    ) -> Option<Resolution> {
+    fn resolve_local(&self, name: &Name, local_scope: Option<ScopeId>, order: u32) -> Option<Resolution> {
         let body = self.body()?;
         let mut scope_id = local_scope?;
         loop {
@@ -229,10 +205,7 @@ impl<'db> Resolver<'db> {
     fn resolve_self(&self, name: &Name, is_self_name: bool) -> Option<Resolution> {
         let self_name = def_name(self.db, self.this);
         if name == &self_name && is_self_name {
-            Some(self.defs_resolution(
-                DefNamespace::from(&self.this),
-                std::slice::from_ref(&self.this),
-            ))
+            Some(self.defs_resolution(DefNamespace::from(&self.this), std::slice::from_ref(&self.this)))
         } else {
             None
         }
@@ -255,7 +228,9 @@ impl<'db> Resolver<'db> {
                     if !scope.by_name.contains_key(name) {
                         match name.as_str() {
                             "this" => return NameOutcome::Found(Resolution::This(id)),
-                            "super" if matches!(id, DefId::Contract(_)|DefId::Interface(_)) => return NameOutcome::Found(Resolution::Super(id)),
+                            "super" if matches!(id, DefId::Contract(_) | DefId::Interface(_)) => {
+                                return NameOutcome::Found(Resolution::Super(id));
+                            }
                             _ => {}
                         }
                     }
@@ -281,14 +256,14 @@ impl<'db> Resolver<'db> {
         }
     }
 
-    /// Direct member lookup on a contract-ish scope owner: the effective-member
+    /// Direct member lookup on a contract-ish scope container: the effective-member
     /// fold, or the declaring scopes when this resolver is in declaration
     /// context.
-    fn scoped_member(&self, owner: DefId, name: &Name) -> NameOutcome {
+    fn scoped_member(&self, container: DefId, name: &Name) -> NameOutcome {
         let lookup = if self.declaration_only {
-            self.declaration_direct_member_named(owner, name)
+            self.declaration_direct_member_named(container, name)
         } else {
-            self.direct_member_named(owner, name)
+            self.direct_member_named(container, name)
         };
         if !lookup.is_hit() {
             return NameOutcome::Missed(lookup.denials);
@@ -307,9 +282,7 @@ impl<'db> Resolver<'db> {
             DefNamespace::Variables => Resolution::Var(defs[0]),
             _ => match defs {
                 [def] => Resolution::Callable(Callable::new_direct(*def)),
-                _ => Resolution::Callables(
-                    defs.iter().map(|def| Callable::new_direct(*def)).collect(),
-                ),
+                _ => Resolution::Callables(defs.iter().map(|def| Callable::new_direct(*def)).collect()),
             },
         }
     }
@@ -349,11 +322,7 @@ impl<'db> Resolver<'db> {
             DefId::Contract(_) | DefId::Interface(_) => {
                 for base in self.db.bases(*def).iter().skip(1) {
                     let base_map = self.def_map(base);
-                    let Some(scope) = base_map
-                        .defs
-                        .get(base)
-                        .and_then(|data| data.child_scope)
-                    else {
+                    let Some(scope) = base_map.defs.get(base).and_then(|data| data.child_scope) else {
                         continue;
                     };
                     if let Some(member) = base_map.scopes[scope]
@@ -366,17 +335,12 @@ impl<'db> Resolver<'db> {
                 }
                 None
             }
-            DefId::File(file) => self
-                .lookup_file(*file, name) 
-                .filter(|r| matches!(r, Resolution::Type(_))),
+            DefId::File(file) => self.lookup_file(*file, name).filter(|r| matches!(r, Resolution::Type(_))),
             _ => None,
         }
     }
 
-    pub(super) fn file_scopes(
-        &self,
-        file: File,
-    ) -> impl Iterator<Item = (Arc<DefMap>, DefScopeId)> + '_ {
+    pub(super) fn file_scopes(&self, file: File) -> impl Iterator<Item = (Arc<DefMap>, DefScopeId)> + '_ {
         let defmap = self.def_map(&DefId::File(file));
         let file_data = defmap.files.get(&file).cloned();
         file_data.into_iter().flat_map(move |file_data| {
@@ -397,21 +361,14 @@ impl<'db> Resolver<'db> {
     }
 
     fn lookup_file(&self, file: File, name: &Name) -> Option<Resolution> {
-        self.file_scopes(file).find_map(|(defmap, scope)| {
-            defmap.scopes[scope]
-                .by_name
-                .get(name)
-                .map(|member| self.def_resolution(member))
-        })
+        self.file_scopes(file)
+            .find_map(|(defmap, scope)| defmap.scopes[scope].by_name.get(name).map(|member| self.def_resolution(member)))
     }
 
     fn lookup_imports(&self, file: File, name: &Name) -> Option<Resolution> {
-        self.file_scopes(file).skip(1).find_map(|(defmap, scope)| {
-            defmap.scopes[scope]
-                .by_name
-                .get(name)
-                .map(|member| self.def_resolution(member))
-        })
+        self.file_scopes(file)
+            .skip(1)
+            .find_map(|(defmap, scope)| defmap.scopes[scope].by_name.get(name).map(|member| self.def_resolution(member)))
     }
 
     fn def_resolution(&self, def: &ScopeData) -> Resolution {
@@ -425,12 +382,7 @@ impl<'db> Resolver<'db> {
     /// Member lookup at a source expression — only `name`'s members are
     /// collected. A total miss or ambiguity is retained by the resolver and
     /// merged into inference diagnostics at body finalization.
-    pub fn lookup_member_at(
-        &self,
-        ty: Ty,
-        name: &Name,
-        expr: ExprId,
-    ) -> Option<Resolution> {
+    pub fn lookup_member_at(&self, ty: Ty, name: &Name, expr: ExprId) -> Option<Resolution> {
         let lookup = if self.declaration_only {
             self.declaration_member_named(ty, name)
         } else {
@@ -439,15 +391,10 @@ impl<'db> Resolver<'db> {
         self.finish_member_lookup(lookup, ty, name, expr)
     }
 
-    fn finish_member_lookup(
-        &self,
-        lookup: MemberLookupResult,
-        ty: Ty,
-        name: &Name,
-        expr: ExprId,
-    ) -> Option<Resolution> {
+    fn finish_member_lookup(&self, lookup: MemberLookupResult, ty: Ty, name: &Name, expr: ExprId) -> Option<Resolution> {
         if !lookup.is_hit() {
             self.record_lookup_failure(SemanticDiagnostic::UnresolvedMember {
+                def: self.this,
                 expr,
                 receiver: ty,
                 member: name.clone(),
@@ -457,7 +404,7 @@ impl<'db> Resolver<'db> {
         }
         if lookup.is_ambiguous_value() {
             self.record_lookup_failure(SemanticDiagnostic::InferenceFailure {
-                anchor: DiagnosticAnchor::Expr(expr),
+                anchor: DiagnosticAnchor::token(self.this, SemanticId::Expr(expr)),
                 message: "member access is ambiguous".to_string(),
             });
             return None;
@@ -466,6 +413,7 @@ impl<'db> Resolver<'db> {
             let declarations = lookup.ambiguous;
             if !declarations.is_empty() {
                 self.record_lookup_failure(SemanticDiagnostic::AmbiguousMember {
+                    def: self.this,
                     expr,
                     name: name.clone(),
                     declarations,
@@ -476,4 +424,3 @@ impl<'db> Resolver<'db> {
         Some(resolution)
     }
 }
-

@@ -2,9 +2,7 @@ use rustc_hash::FxHashSet;
 
 use crate::paths::NormalizedPath;
 use crate::workspace::diff::{WorkspaceDiff, diff};
-use crate::workspace::{
-    Package, PackageId, Remapping, Root, RootWithFiles, Workspace, WorkspaceWithFiles,
-};
+use crate::workspace::{Package, PackageId, Remapping, Root, RootWithFiles, Workspace, WorkspaceWithFiles};
 
 /// The live facts: what the index currently holds. Files are absent because a
 /// reload compares roots, never their file lists.
@@ -48,11 +46,8 @@ fn workspace(roots: &[(&str, &str)], ignored: &[&str]) -> WorkspaceWithFiles<Nor
     }
 }
 
-fn added(diff: &WorkspaceDiff<NormalizedPath>) -> Vec<&str> {
-    diff.roots_added
-        .iter()
-        .map(|root| root.path.as_str())
-        .collect()
+fn added(diff: &WorkspaceDiff<NormalizedPath>) -> Vec<NormalizedPath> {
+    diff.roots_added.iter().map(|root| root.path.clone()).collect()
 }
 
 #[test]
@@ -69,31 +64,19 @@ fn identical_discoveries_produce_an_empty_diff() {
 
 #[test]
 fn a_new_root_is_added_with_the_files_under_it() {
-    let (_, result) = diff(
-        &facts(&[("/w", "/w")], &[]),
-        workspace(&[("/w", "/w"), ("/w/lib/dep", "/w")], &[]),
-    );
+    let (_, result) = diff(&facts(&[("/w", "/w")], &[]), workspace(&[("/w", "/w"), ("/w/lib/dep", "/w")], &[]));
 
     assert!(!result.is_empty());
-    assert_eq!(added(&result), vec!["/w/lib/dep"]);
-    assert_eq!(
-        result.roots_added[0].files,
-        vec![NormalizedPath::new("/w/lib/dep/A.sol")]
-    );
+    assert_eq!(added(&result), vec![NormalizedPath::new("/w/lib/dep")]);
+    assert_eq!(result.roots_added[0].files, vec![NormalizedPath::new("/w/lib/dep/A.sol")]);
     assert!(result.removed.is_empty());
 }
 
 #[test]
 fn a_vanished_root_is_removed() {
-    let (_, result) = diff(
-        &facts(&[("/w", "/w"), ("/w/lib/dep", "/w")], &[]),
-        workspace(&[("/w", "/w")], &[]),
-    );
+    let (_, result) = diff(&facts(&[("/w", "/w"), ("/w/lib/dep", "/w")], &[]), workspace(&[("/w", "/w")], &[]));
 
-    assert_eq!(
-        result.removed,
-        FxHashSet::from_iter([NormalizedPath::new("/w/lib/dep")])
-    );
+    assert_eq!(result.removed, FxHashSet::from_iter([NormalizedPath::new("/w/lib/dep")]));
     assert!(result.roots_added.is_empty());
 }
 
@@ -107,11 +90,8 @@ fn a_root_that_changes_owner_is_replaced() {
     );
 
     assert!(!result.is_empty());
-    assert_eq!(
-        result.removed,
-        FxHashSet::from_iter([NormalizedPath::new("/w/lib/dep")])
-    );
-    assert_eq!(added(&result), vec!["/w/lib/dep"]);
+    assert_eq!(result.removed, FxHashSet::from_iter([NormalizedPath::new("/w/lib/dep")]));
+    assert_eq!(added(&result), vec![NormalizedPath::new("/w/lib/dep")]);
 }
 
 #[test]
@@ -145,10 +125,7 @@ fn the_ignored_set_travels_whole() {
     );
 
     assert!(!result.is_empty());
-    assert_eq!(
-        result.ignored,
-        Some(vec![NormalizedPath::new("/w/lib/dep/script")])
-    );
+    assert_eq!(result.ignored, Some(vec![NormalizedPath::new("/w/lib/dep/script")]));
     assert!(result.roots_added.is_empty());
     assert!(result.removed.is_empty());
 }

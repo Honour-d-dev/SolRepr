@@ -3,8 +3,8 @@ use num_bigint::{BigInt, Sign};
 
 use crate::hir::body_map::ScopeId;
 use crate::hir::builtins::BuiltinFn;
-use crate::hir::diagnostics::DiagnosticAnchor;
 use crate::hir::exprs::{BinaryOp, Expr, ExprId, Literal, Name, UnaryOp};
+use crate::hir::item_data::SemanticId;
 use crate::hir::resolution::{Callable, CallableOrigin, Resolution};
 use crate::hir::resolver::Resolver;
 use crate::hir::syntax_store::SyntaxStore;
@@ -59,9 +59,7 @@ impl ConstValue {
     /// The literal fitness this value denotes, when folding fixed it exactly.
     fn literal_kind(&self) -> Option<LiteralKind> {
         match self {
-            Self::Rational(num, den) => {
-                Some(LiteralKind::from_rational(num.clone(), den.clone(), None))
-            }
+            Self::Rational(num, den) => Some(LiteralKind::from_rational(num.clone(), den.clone(), None)),
             Self::Wide(kind) => Some(*kind),
             _ => None,
         }
@@ -283,15 +281,12 @@ impl<'db, 'store> Inferer<'db, 'store> {
     pub(super) fn const_size(&mut self, expr: ExprId) -> Option<BigInt> {
         match self.eval_const(expr) {
             // solc keeps the length as `u256` — positive and < 2^256.
-            Ok(value) => match value
-                .as_int()
-                .filter(|size| *size > BigInt::from(0u8) && *size < two_pow(256))
-            {
+            Ok(value) => match value.as_int().filter(|size| *size > BigInt::from(0u8) && *size < two_pow(256)) {
                 Some(size) => Some(size),
                 // An opaque constant can't size the array — the type
                 // lowers without one, but it is not an error.
                 None if value.is_opaque() => None,
-                None => self.fail(DiagnosticAnchor::Expr(expr), "invalid array length", None),
+                None => self.fail(SemanticId::Expr(expr), "invalid array length", None),
             },
             Err(error) => {
                 self.report_const_error(error, "array size must be a constant expression");
@@ -313,19 +308,11 @@ impl<'db, 'store> Inferer<'db, 'store> {
         let message = match &error.kind {
             ConstErrorKind::Foreign => return,
             ConstErrorKind::NotConstant => not_constant.into(),
-            ConstErrorKind::Cyclic(via) => format!(
-                "The value of the constant {} has a cyclic dependency.",
-                def_name(self.db, *via)
-            ),
-            ConstErrorKind::ZeroDivision { modulo } => if *modulo {
-                "Modulo by zero."
-            } else {
-                "Division by zero."
-            }
-            .into(),
+            ConstErrorKind::Cyclic(via) => format!("The value of the constant {} has a cyclic dependency.", def_name(self.db, *via)),
+            ConstErrorKind::ZeroDivision { modulo } => if *modulo { "Modulo by zero." } else { "Division by zero." }.into(),
             ConstErrorKind::Eval(message) => message.clone(),
         };
-        self.fail(DiagnosticAnchor::Expr(error.expr), message, ());
+        self.fail(SemanticId::Expr(error.expr), message, ());
     }
 }
 
@@ -376,13 +363,9 @@ impl<'a, 'db> ConstEval<'a, 'db> {
     }
     fn resolve_ident(&self, expr: ExprId, name: &Name) -> Option<Resolution> {
         let scope = self.expr_scopes.and_then(|map| map.get(expr).copied());
-        let order = self
-            .expr_orders
-            .and_then(|map| map.get(expr).copied())
-            .unwrap_or_default();
+        let order = self.expr_orders.and_then(|map| map.get(expr).copied()).unwrap_or_default();
         let is_self_name = self.store.name == Some(expr);
-        self.resolver
-            .resolve_name_in(name, scope, order, is_self_name)
+        self.resolver.resolve_name_in(name, scope, order, is_self_name)
     }
 
     pub(super) fn eval(&mut self, expr: ExprId) -> Result<ConstValue, ConstError> {
@@ -390,9 +373,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             Expr::Literal(literal) => self.eval_literal(expr, &literal),
             Expr::Ident(name) => match self.resolve_ident(expr, &name) {
                 Some(Resolution::Var(def)) => self.eval_var(expr, def),
-                Some(Resolution::Variant(variant)) => {
-                    Ok(ConstValue::int(u32::from(variant.id.into_raw())))
-                }
+                Some(Resolution::Variant(variant)) => Ok(ConstValue::int(u32::from(variant.id.into_raw()))),
                 _ => Err(self.not_constant(expr)),
             },
             Expr::Binary { op, left, right } => self.eval_binary(expr, op, left, right),
@@ -436,10 +417,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             }
             Expr::Member { obj, prop } => self.eval_member(expr, obj, &prop),
             Expr::Call { callee, args } => self.eval_call(expr, callee, &args),
-            Expr::ArrayAccess {
-                base,
-                index: Some(index),
-            } => self.eval_index(expr, base, index),
+            Expr::ArrayAccess { base, index: Some(index) } => self.eval_index(expr, base, index),
             // `(x)` lowers as a single-element tuple — peel it like solc's
             // parens. Real tuples are not foldable values.
             Expr::Tuple(elems) => match &elems[..] {
@@ -471,13 +449,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         }
     }
 
-    fn eval_binary(
-        &mut self,
-        expr: ExprId,
-        op: BinaryOp,
-        left: ExprId,
-        right: ExprId,
-    ) -> Result<ConstValue, ConstError> {
+    fn eval_binary(&mut self, expr: ExprId, op: BinaryOp, left: ExprId, right: ExprId) -> Result<ConstValue, ConstError> {
         let left = self.eval(left)?;
         let right = self.eval(right)?;
         // `x / 0` errors whatever `x` is — even an opaque constant.
@@ -506,9 +478,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 }))
             }
             BinaryOp::Eq | BinaryOp::Ne => {
-                let equal = self
-                    .values_equal(&left, &right)
-                    .ok_or_else(|| self.not_constant(expr))?;
+                let equal = self.values_equal(&left, &right).ok_or_else(|| self.not_constant(expr))?;
                 Ok(ConstValue::Bool(matches!(op, BinaryOp::Eq) == equal))
             }
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
@@ -540,14 +510,11 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             BinaryOp::Pow => {
                 let (num, den) = left.rational().ok_or_else(|| self.not_constant(expr))?;
                 let exponent = right.as_int().ok_or_else(|| self.not_constant(expr))?;
-                let exponent = i64::try_from(&exponent)
-                    .map_err(|_| self.eval_error(expr, "exponent too large"))?;
-                let unsigned = u32::try_from(exponent.unsigned_abs())
-                    .map_err(|_| self.eval_error(expr, "exponent too large"))?;
+                let exponent = i64::try_from(&exponent).map_err(|_| self.eval_error(expr, "exponent too large"))?;
+                let unsigned = u32::try_from(exponent.unsigned_abs()).map_err(|_| self.eval_error(expr, "exponent too large"))?;
                 // Not built: `(2 ** 4096) ** 4096` is two megabytes, so the result's width is
                 // capped first. Its kind stays exact, so the conversion rejects it on width.
-                let too_wide =
-                    |base: &BigInt| base.bits().saturating_mul(u64::from(unsigned)) > BIGINT_BITS;
+                let too_wide = |base: &BigInt| base.bits().saturating_mul(u64::from(unsigned)) > BIGINT_BITS;
                 if unsigned > POW_LIMIT || too_wide(&num) || too_wide(&den) {
                     return Ok(ConstValue::Wide(saturated_kind(&num, &den, exponent)));
                 }
@@ -565,14 +532,11 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             BinaryOp::Shl | BinaryOp::Shr => {
                 let value = left.as_int().ok_or_else(|| self.not_constant(expr))?;
                 let shift = right.as_int().ok_or_else(|| self.not_constant(expr))?;
-                let shift = u32::try_from(&shift)
-                    .map_err(|_| self.eval_error(expr, "invalid shift amount"))?;
+                let shift = u32::try_from(&shift).map_err(|_| self.eval_error(expr, "invalid shift amount"))?;
                 // `1 << 4_000_000_000` would allocate half a gigabyte; past the width cap a
                 // nonzero value is left unbuilt but keeps an exact-enough kind, so the
                 // conversion rejects it on width. Zero folds outright.
-                if matches!(op, BinaryOp::Shl)
-                    && value.bits().saturating_add(u64::from(shift)) > BIGINT_BITS
-                {
+                if matches!(op, BinaryOp::Shl) && value.bits().saturating_add(u64::from(shift)) > BIGINT_BITS {
                     return Ok(if value == BigInt::from(0u8) {
                         ConstValue::int(0u8)
                     } else {
@@ -609,12 +573,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
         }
     }
 
-    fn eval_member(
-        &mut self,
-        expr: ExprId,
-        obj: ExprId,
-        prop: &Name,
-    ) -> Result<ConstValue, ConstError> {
+    fn eval_member(&mut self, expr: ExprId, obj: ExprId, prop: &Name) -> Result<ConstValue, ConstError> {
         if let Expr::MetaType(inner) = self.store.exprs[obj] {
             return self.eval_meta(expr, inner, prop);
         }
@@ -636,12 +595,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
     /// its [`Callable`]: UDVT conversions are the identity on the value,
     /// the other foldable builtins (`keccak256`, `addmod`, …) yield `Opaque`,
     /// and every other callable is not a constant.
-    fn eval_call(
-        &mut self,
-        expr: ExprId,
-        callee: ExprId,
-        args: &[ExprId],
-    ) -> Result<ConstValue, ConstError> {
+    fn eval_call(&mut self, expr: ExprId, callee: ExprId, args: &[ExprId]) -> Result<ConstValue, ConstError> {
         match self.resolve_const_expr(callee) {
             Some(Resolution::Type(ty)) => {
                 let [arg] = args else {
@@ -662,15 +616,11 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     values.push(self.eval(*arg)?);
                 }
                 match callable.origin() {
-                    CallableOrigin::Builtin(BuiltinFn::Wrap(_) | BuiltinFn::Unwrap(_)) => {
-                        match values.as_slice() {
-                            [value] => Ok(value.clone()),
-                            _ => Err(self.not_constant(expr)),
-                        }
-                    }
-                    CallableOrigin::Builtin(builtin) if builtin.is_const() => {
-                        Ok(ConstValue::Opaque)
-                    }
+                    CallableOrigin::Builtin(BuiltinFn::Wrap(_) | BuiltinFn::Unwrap(_)) => match values.as_slice() {
+                        [value] => Ok(value.clone()),
+                        _ => Err(self.not_constant(expr)),
+                    },
+                    CallableOrigin::Builtin(builtin) if builtin.is_const() => Ok(ConstValue::Opaque),
                     // `new bytes(n)` / `new string(n)`
                     CallableOrigin::Allocation(ty)
                         if values.len() == 1
@@ -689,12 +639,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
     }
 
     /// `b[i]` on a constant `bytes` value.
-    fn eval_index(
-        &mut self,
-        expr: ExprId,
-        base: ExprId,
-        index: ExprId,
-    ) -> Result<ConstValue, ConstError> {
+    fn eval_index(&mut self, expr: ExprId, base: ExprId, index: ExprId) -> Result<ConstValue, ConstError> {
         let value = self.eval(base)?;
         let index = self.eval(index)?;
         if value.is_opaque() || index.is_opaque() {
@@ -713,25 +658,16 @@ impl<'a, 'db> ConstEval<'a, 'db> {
     /// `type(T).min` / `.max` / `.name`. `.interfaceId` and `.*Code` are
     /// `Opaque` — solc computes them but no consumer needs the bytes. On the
     /// wrong receiver kind they are plain `NotConstant` errors.
-    fn eval_meta(
-        &mut self,
-        expr: ExprId,
-        inner: ExprId,
-        prop: &Name,
-    ) -> Result<ConstValue, ConstError> {
+    fn eval_meta(&mut self, expr: ExprId, inner: ExprId, prop: &Name) -> Result<ConstValue, ConstError> {
         let Some(Resolution::Type(ty)) = self.resolve_const_expr(inner) else {
             return Err(self.not_constant(expr));
         };
         let bits = |width: u16| -> BigInt { two_pow(u32::from(width)) };
         match (ty.kind(self.db), prop.as_str()) {
             (TyKind::Primitive(Primitive::Uint(_)), "min") => Ok(ConstValue::int(0u8)),
-            (TyKind::Primitive(Primitive::Uint(n)), "max") => {
-                Ok(ConstValue::int(bits(n) - BigInt::from(1u8)))
-            }
+            (TyKind::Primitive(Primitive::Uint(n)), "max") => Ok(ConstValue::int(bits(n) - BigInt::from(1u8))),
             (TyKind::Primitive(Primitive::Int(n)), "min") => Ok(ConstValue::int(-bits(n - 1))),
-            (TyKind::Primitive(Primitive::Int(n)), "max") => {
-                Ok(ConstValue::int(bits(n - 1) - BigInt::from(1u8)))
-            }
+            (TyKind::Primitive(Primitive::Int(n)), "max") => Ok(ConstValue::int(bits(n - 1) - BigInt::from(1u8))),
             (TyKind::TypeDef(TypeDefId::Enum(_)), "min") => Ok(ConstValue::int(0u8)),
             (TyKind::TypeDef(TypeDefId::Enum(id)), "max") => {
                 let variants = self.db.enum_data(id).variants.len();
@@ -747,9 +683,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 _ => Err(self.not_constant(expr)),
             },
             (TyKind::TypeDef(TypeDefId::Interface(_)), "interfaceId") => Ok(ConstValue::Opaque),
-            (TyKind::TypeDef(TypeDefId::Contract(_)), "creationCode" | "runtimeCode") => {
-                Ok(ConstValue::Opaque)
-            }
+            (TyKind::TypeDef(TypeDefId::Contract(_)), "creationCode" | "runtimeCode") => Ok(ConstValue::Opaque),
             _ => Err(self.not_constant(expr)),
         }
     }
@@ -757,12 +691,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
     /// A member on a type namespace — an enum variant (`E.X`), or a contract
     /// constant (`C.K`). Contract-type member access is declared-only in
     /// solc: `D.K` does not reach constants `D` inherits.
-    fn type_member(
-        &mut self,
-        expr: ExprId,
-        ty: &Type,
-        prop: &Name,
-    ) -> Result<ConstValue, ConstError> {
+    fn type_member(&mut self, expr: ExprId, ty: &Type, prop: &Name) -> Result<ConstValue, ConstError> {
         match ty.kind(self.db) {
             TyKind::TypeDef(TypeDefId::Enum(id)) => {
                 let data = self.db.enum_data(id);
@@ -781,12 +710,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
 
     /// `prop` on a file module — a file-scope constant (`lib.K`), through
     /// the file's own scope and its imported scopes.
-    fn file_member(
-        &mut self,
-        expr: ExprId,
-        file: FileId,
-        prop: &Name,
-    ) -> Result<ConstValue, ConstError> {
+    fn file_member(&mut self, expr: ExprId, file: FileId, prop: &Name) -> Result<ConstValue, ConstError> {
         match self
             .resolver
             .member_named(Ty::new(self.db, TyKind::Module(file)), prop)
@@ -815,18 +739,12 @@ impl<'a, 'db> ConstEval<'a, 'db> {
             Expr::New { ty } => match self.resolve_const_expr(*ty)? {
                 Resolution::Type(name) => {
                     let name = name.peel_loc(self.db);
-                    matches!(
-                        name.kind(self.db),
-                        TyKind::Primitive(Primitive::Bytes | Primitive::String)
-                    )
-                    .then(|| Resolution::Callable(Callable::new_allocation(name)))
+                    matches!(name.kind(self.db), TyKind::Primitive(Primitive::Bytes | Primitive::String))
+                        .then(|| Resolution::Callable(Callable::new_allocation(name)))
                 }
                 _ => None,
             },
-            Expr::Path(path) => self
-                .db
-                .resolve_to_file(self.resolver.this().file(), path)
-                .map(Resolution::Module),
+            Expr::Path(path) => self.db.resolve_to_file(self.resolver.this().file(), path).map(Resolution::Module),
             // A member is answered by the member-lookup module given the receiver's type: declared-only,
             // builtin, or a builtin object's member.
             Expr::Member { obj, prop } => {
@@ -836,9 +754,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     Resolution::Builtin(object) => Ty::new(self.db, TyKind::Builtin(object)),
                     _ => return None,
                 };
-                self.resolver
-                    .member_named(receiver, prop)
-                    .effective_resolution()
+                self.resolver.member_named(receiver, prop).effective_resolution()
             }
             _ => None,
         }
@@ -894,12 +810,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
     /// `T(x)` — evaluates `x` to a `ConstValue`, then applies the target
     /// type's wrap/pad semantics. Conversions the type level rejects still
     /// fail here
-    fn convert(
-        &self,
-        expr: ExprId,
-        ty: &Type,
-        value: ConstValue,
-    ) -> Result<ConstValue, ConstError> {
+    fn convert(&self, expr: ExprId, ty: &Type, value: ConstValue) -> Result<ConstValue, ConstError> {
         // `uint256(keccak256(x))` is a legal constant of unknown value.
         if value.is_opaque() {
             return Ok(ConstValue::Opaque);
@@ -917,24 +828,15 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     Ok(ConstValue::int(value))
                 }
             }
-            TyKind::TypeDef(TypeDefId::Udvt(id)) => {
-                self.convert_primitive(expr, self.db.udvt_data(id).underlying, value)
-            }
+            TyKind::TypeDef(TypeDefId::Udvt(id)) => self.convert_primitive(expr, self.db.udvt_data(id).underlying, value),
             // A contract or interface value is an address, so `D(address(0))` is a constant of the
             // contract type; whether the conversion is legal is the call checker's question.
-            TyKind::TypeDef(TypeDefId::Contract(_) | TypeDefId::Interface(_)) => {
-                self.convert_primitive(expr, Primitive::Address, value)
-            }
+            TyKind::TypeDef(TypeDefId::Contract(_) | TypeDefId::Interface(_)) => self.convert_primitive(expr, Primitive::Address, value),
             _ => Err(self.not_constant(expr)),
         }
     }
 
-    fn convert_primitive(
-        &self,
-        expr: ExprId,
-        target: Primitive,
-        value: ConstValue,
-    ) -> Result<ConstValue, ConstError> {
+    fn convert_primitive(&self, expr: ExprId, target: Primitive, value: ConstValue) -> Result<ConstValue, ConstError> {
         match target {
             Primitive::Uint(bits) => value
                 .as_int()
@@ -959,10 +861,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                     _ => Err(self.not_constant(expr)),
                 },
             },
-            Primitive::Boolean => value
-                .as_bool()
-                .map(ConstValue::Bool)
-                .ok_or_else(|| self.not_constant(expr)),
+            Primitive::Boolean => value.as_bool().map(ConstValue::Bool).ok_or_else(|| self.not_constant(expr)),
             Primitive::FixedBytes(width) => {
                 let width = usize::from(width);
                 if let Some(value) = value.as_int() {
@@ -985,10 +884,7 @@ impl<'a, 'db> ConstEval<'a, 'db> {
                 .as_bytes()
                 .map(|bytes| ConstValue::Bytes(bytes.into()))
                 .ok_or_else(|| self.not_constant(expr)),
-            Primitive::String => match value
-                .as_bytes()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-            {
+            Primitive::String => match value.as_bytes().and_then(|bytes| String::from_utf8(bytes).ok()) {
                 Some(text) => Ok(ConstValue::String(text.into())),
                 None => Err(self.not_constant(expr)),
             },
