@@ -12,7 +12,7 @@ use crate::salsa::HirDb;
 use crate::salsa::root_db::def_range;
 
 /// Lowered syntax content for one def — no positions.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SyntaxStore {
     pub types: Arena<TyName>,
     pub exprs: Arena<Expr>,
@@ -32,7 +32,7 @@ impl Default for SyntaxStore {
 
 /// Positions for one def's lowered syntax — a leaf artifact. Inference and
 /// signatures never read this; only the capability and diagnostic boundary does.
-#[derive(Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct SourceMap {
     pub expr_ranges: ArenaMap<ExprId, NodeRange>,
     pub ty_ref_ranges: ArenaMap<TyNameId, NodeRange>,
@@ -40,7 +40,6 @@ pub struct SourceMap {
     pub field_ranges: ArenaMap<FieldId, NodeRange>,
     pub variant_ranges: ArenaMap<VariantId, NodeRange>,
     pub vis_range: Option<NodeRange>,
-    pub override_ranges: Box<[NodeRange]>,
     pub range_to_semantic: FxHashMap<NodeRange, SemanticId>,
 }
 
@@ -136,9 +135,8 @@ pub fn callee_at(db: &dyn HirDb, def: DefId, range: NodeRange) -> Option<ExprId>
 
 /// Resolve a diagnostic anchor to a source range.
 ///
-/// A function or modifier owns two stores — its item data (signatures, override
-/// lists) and its body — so a token may live in either; the item map is the
-/// fallback when the body map misses.
+/// A function's or modifier's body store extends its header, so one store holds
+/// every spelling the def writes.
 pub(crate) fn anchor_range(db: &dyn HirDb, anchor: DiagnosticAnchor) -> Option<NodeRange> {
     let def = anchor.def_id();
     let Some(id) = anchor.token_id() else {
@@ -152,9 +150,7 @@ pub(crate) fn anchor_range(db: &dyn HirDb, anchor: DiagnosticAnchor) -> Option<N
         SemanticId::Field(field) => map.field_ranges.get(field).copied(),
         SemanticId::Variant(variant) => map.variant_ranges.get(variant).copied(),
     };
-    with_stores(db, def, |_, map| lookup(map))
-        .flatten()
-        .or_else(|| lookup(&db.source_map(def)))
+    with_stores(db, def, |_, map| lookup(map)).flatten()
 }
 
 #[derive(Clone, Copy)]

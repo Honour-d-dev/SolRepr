@@ -1,5 +1,6 @@
 use rustc_hash::FxHashSet;
 
+use crate::ast::NodeRange;
 use crate::capabilities::{Identity, identity_of_semantic};
 use crate::hir::body_map::BodyOwnerId;
 use crate::hir::item_data::SemanticId;
@@ -179,6 +180,61 @@ fn a_member_use_site_and_its_field_share_an_identity() {
         identity_of_semantic(&db, f, *id),
         "`s.a` at {range:?} denotes the declared field"
     );
+}
+
+/// A callable's header is part of its store, so an `override` path is a
+/// spelling the function owns — the seam hover, goto and rename all read.
+#[test]
+fn an_override_path_denotes_the_contract_it_names() {
+    let source = r#"
+        contract A { function g() public virtual {} }
+        contract C is A { function g() public override(A) {} }
+    "#;
+    let (db, file) = make_test_db(source);
+    let a = find_contract(&db, file, "A");
+    let c = find_contract(&db, file, "C");
+    let g = db
+        .file_def_map(file)
+        .defs
+        .keys()
+        .copied()
+        .find(|def| matches!(def, DefId::Function(_)) && db.container(*def) == Some(c))
+        .expect("`C` declares `g`");
+
+    let text = db.text(file);
+    let start = text.find("override(A)").expect("the fixture writes an override list") + "override(".len();
+    let range = NodeRange {
+        start: start as u32,
+        end: start as u32 + 1,
+    };
+
+    let id = semantic_at(&db, g, range).expect("the override path is a spelling of `g`'s store");
+    assert_eq!(identity_of_semantic(&db, g, id), Some(Identity::Def(a)));
+}
+
+/// An unnamed parameter's node range is its type's range, so the parameter must
+/// not claim it — the type would stop being a spelling.
+#[test]
+fn an_unnamed_parameter_keeps_its_type() {
+    let source = "struct S { uint256 a; } contract C { function f(S) external {} }";
+    let (db, file) = make_test_db(source);
+    let f = find_function(&db, file, "f");
+    let s = db
+        .file_def_map(file)
+        .defs
+        .keys()
+        .copied()
+        .find(|def| matches!(def, DefId::Struct(_)))
+        .expect("the fixture declares a struct");
+
+    let start = source.find("function f(S)").expect("the fixture writes the parameter") + "function f(".len();
+    let range = NodeRange {
+        start: start as u32,
+        end: start as u32 + 1,
+    };
+
+    let id = semantic_at(&db, f, range).expect("the parameter's type is a spelling of `f`");
+    assert_eq!(identity_of_semantic(&db, f, id), Some(Identity::Def(s)));
 }
 
 #[test]

@@ -36,7 +36,7 @@ impl Scope {
 
 pub type LocalId = Idx<Local>;
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Local {
     name: Name,
     kind: VariableKind,
@@ -122,6 +122,15 @@ impl Local {
     }
 }
 
+/// A callable's header, as `ItemBuilder` lowered it. The body extends this
+/// rather than lowering it again, so both stores share one arena numbering and
+/// every header id is valid in either.
+pub struct Header<'a> {
+    pub syntax_store: &'a SyntaxStore,
+    pub source_map: &'a SourceMap,
+    pub parameters: &'a Arena<Local>,
+}
+
 pub struct BodyBuilder {
     current_scope: ScopeId,
     ast_root: AstNode,
@@ -136,27 +145,31 @@ pub struct BodyBuilder {
 }
 
 impl BodyBuilder {
-    pub fn build(ast_root: AstNode, owner: AstNode) -> Option<(BodyMap, BodySourceMap)> {
+    pub fn build(ast_root: AstNode, owner: AstNode, header: Header<'_>) -> Option<(BodyMap, BodySourceMap)> {
         let mut scopes = Arena::new();
         let root_scope = scopes.alloc(Scope {
             parent: None,
             by_name: FxHashMap::default(),
         });
+        for (local_id, local) in header.parameters.iter() {
+            if !local.name.is_empty() {
+                scopes[root_scope].by_name.insert(local.name.clone(), local_id);
+            }
+        }
 
         let mut builder = BodyBuilder {
             current_scope: root_scope,
             ast_root,
             root_scope,
             scopes,
-            locals: Arena::new(),
-            syntax_store: SyntaxStore::default(),
-            source_map: SourceMap::default(),
+            locals: header.parameters.clone(),
+            syntax_store: header.syntax_store.clone(),
+            source_map: header.source_map.clone(),
             expr_scopes: ArenaMap::new(),
             expr_orders: ArenaMap::new(),
-            order: 1,
+            order: header.parameters.len() as u32 + 1,
         };
-
-        builder.collect_parameters(owner.node());
+        builder.adopt_header_exprs();
 
         if let Some(body) = owner.node().child_by_field_id(FieldKind::BODY.into()) {
             //Interface fns dont have bodies
@@ -164,6 +177,23 @@ impl BodyBuilder {
         }
 
         Some(builder.finish())
+    }
+
+    /// The header's expressions — a callable's modifier invocations — are
+    /// evaluated in the root scope, after the parameters. The def's own name is
+    /// not: scoping it would let `function f(uint f)` bind the name to the
+    /// parameter.
+    fn adopt_header_exprs(&mut self) {
+        let name = self.syntax_store.name;
+        let header_exprs = self.syntax_store.exprs.iter().map(|(expr_id, _)| expr_id).collect::<Vec<_>>();
+        for expr_id in header_exprs {
+            if Some(expr_id) == name {
+                continue;
+            }
+            let order = self.next_order();
+            self.expr_orders.insert(expr_id, order);
+            self.expr_scopes.insert(expr_id, self.root_scope);
+        }
     }
 
     /// Monotonic source order shared by locals and expressions.
@@ -229,28 +259,6 @@ impl BodyBuilder {
                         self.add_local(child, VariableKind::LocalVariable, None);
                     }
                 }
-                _ => {}
-            }
-        }
-    }
-
-    fn collect_parameters(&mut self, owner_node: Node<'_>) {
-        for child in owner_node.named_children(&mut owner_node.walk()) {
-            match child.kind_id().into() {
-                NodeKind::IDENTIFIER => {
-                    // The owner's own name at its declaration — an id, not a
-                    // range, so the resolver never reads the source map.
-                    if let Some(expr_id) = self.lower_expr(child) {
-                        self.syntax_store.name = Some(expr_id);
-                    }
-                }
-                NodeKind::PARAMETER => {
-                    self.add_local(child, VariableKind::Parameter, None);
-                }
-                NodeKind::MODIFIER_INVOCATION => {
-                    self.lower_expr(child);
-                }
-                NodeKind::RETURN_DEFINITION => self.collect_parameters(child),
                 _ => {}
             }
         }

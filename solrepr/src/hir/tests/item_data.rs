@@ -36,15 +36,14 @@ fn function_header_facts_preserve_authored_specifiers() {
         panic!("expected an override list");
     };
     assert_eq!(paths.len(), 2);
-    let override_ranges = db.source_map(DefId::Function(listed_id)).override_ranges.clone();
-    assert_eq!(
-        &source[override_ranges[0].start as usize..override_ranges[0].end as usize],
-        "override(A.B, D)"
-    );
-    assert_eq!(
-        &source[override_ranges[1].start as usize..override_ranges[1].end as usize],
-        "A.B"
-    );
+    let item_map = db.source_map(DefId::Function(listed_id));
+    let text_of = |path: &OverridePath| {
+        let ty_ref = path.ty_ref.expect("path should lower to a type reference");
+        let range = item_map.ty_ref_ranges[ty_ref];
+        &source[range.start as usize..range.end as usize]
+    };
+    assert_eq!(text_of(&paths[0]), "B");
+    assert_eq!(text_of(&paths[1]), "D");
     let ty_of = |path: &OverridePath| {
         let ty_ref = path.ty_ref.expect("path should lower to a type reference");
         listed.syntax_store.types[ty_ref].to_string(&listed.syntax_store.types)

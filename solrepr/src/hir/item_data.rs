@@ -335,23 +335,16 @@ impl ItemBuilder {
     }
 
     fn lower_override_specifier(&mut self, node: Node) -> OverrideSpecifier {
-        let range = NodeRange::from(&node);
         if !node.children(&mut node.walk()).any(|child| child.kind_id() == NodeKind::LPAREN) {
-            self.source_map.override_ranges = Box::from([range]);
             return OverrideSpecifier::Bare;
         }
-        let mut ranges = vec![range];
         let paths = node
             .named_children(&mut node.walk())
             .filter(|path| path.kind_id() == NodeKind::USER_DEFINED_TYPE)
-            .map(|path| {
-                ranges.push(NodeRange::from(&path));
-                OverridePath {
-                    ty_ref: self.lower_type(path),
-                }
+            .map(|path| OverridePath {
+                ty_ref: self.lower_type(path),
             })
             .collect();
-        self.source_map.override_ranges = ranges.into_boxed_slice();
         OverrideSpecifier::List { paths }
     }
 
@@ -495,6 +488,11 @@ impl ItemBuilder {
 
         for child in node.named_children(&mut node.walk()) {
             match child.kind_id().into() {
+                NodeKind::IDENTIFIER => {
+                    if let Some(expr_id) = self.lower_expr(child) {
+                        self.syntax_store.name = Some(expr_id);
+                    }
+                }
                 NodeKind::PARAMETER => {
                     self.build_parameter(&mut parameters, child);
                 }
@@ -540,6 +538,11 @@ impl ItemBuilder {
 
         for child in node.children(&mut node.walk()) {
             match child.kind_id().into() {
+                NodeKind::IDENTIFIER => {
+                    if let Some(expr_id) = self.lower_expr(child) {
+                        self.syntax_store.name = Some(expr_id);
+                    }
+                }
                 NodeKind::PARAMETER => {
                     args.push(self.build_parameter(&mut parameters, child));
                 }
@@ -557,6 +560,9 @@ impl ItemBuilder {
                 }
                 NodeKind::OVERRIDE_SPECIFIER => {
                     override_specifier = Some(self.lower_override_specifier(child));
+                }
+                NodeKind::MODIFIER_INVOCATION => {
+                    self.lower_expr(child);
                 }
                 _ => {}
             }
@@ -610,10 +616,9 @@ impl ItemBuilder {
         let decl_order = parameters.len() as u32;
         let local_id = parameters.alloc(Local::new(name, VariableKind::Parameter, ty_ref, decl_order, None));
         self.source_map.local_ranges.insert(local_id, local_range);
-        self.source_map
-            .range_to_semantic
-            .insert(parameter_range, SemanticId::Local(local_id));
 
+        // Only the written name denotes the local. An unnamed parameter's node
+        // range is its type's range, and claiming it would hide the type.
         if let Some(range) = name_range {
             self.source_map.range_to_semantic.insert(range, SemanticId::Local(local_id));
         }

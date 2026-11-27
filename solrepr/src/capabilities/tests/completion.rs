@@ -332,6 +332,52 @@ fn editing_a_call_option_key_does_not_duplicate_its_colon() {
     assert_eq!(item.insert_text.as_deref(), Some("value"));
 }
 
+const OVERLOAD_FIXTURE: &str = r#"
+    contract C {
+        function f() internal {}
+        function f(uint256 a, uint256 b) internal {}
+        function f(uint256 a, uint256 b, uint256 c, uint256 d, uint256 e) internal {}
+        function f(uint256 a, uint256 b, uint256 c, uint256 d, uint256 e, uint256 f) internal {}
+        function g() external {
+            f({ /*all*/ });
+            f({ c: 1, /*two*/ });
+            f({ c: 1, f: 1, /*one*/ });
+            f({ bogus: 1, /*bogus*/ });
+        }
+    }
+"#;
+
+/// A key is optional when a surviving overload does not take it. The `f()`
+/// overload has no named parameters, so it cannot mark `a`/`b` optional; the
+/// keys already written prune overloads that do not take them, and a key no
+/// overload takes falls back to the whole set.
+#[test]
+fn named_arg_keys_mark_overload_optional_parameters() {
+    let (db, file) = make_test_db(OVERLOAD_FIXTURE);
+    assert_eq!(group_labels(&db, file, "/*all*/"), ["a", "b", "?c", "?d", "?e", "?f"]);
+    assert_eq!(group_labels(&db, file, "/*two*/"), ["a", "b", "d", "e", "?f"]);
+    assert_eq!(group_labels(&db, file, "/*one*/"), ["a", "b", "d", "e"]);
+    assert_eq!(group_labels(&db, file, "/*bogus*/"), ["a", "b", "?c", "?d", "?e", "?f"]);
+}
+
+/// The `?` is a label marker only: the filter and insert text use the bare
+/// name, and required keys sort before optional ones.
+#[test]
+fn optional_keys_filter_and_insert_the_bare_name() {
+    let (db, file) = make_test_db(OVERLOAD_FIXTURE);
+    let items = group_items(&db, file, "/*all*/");
+    let optional = items.iter().find(|item| item.label == "?c").expect("`?c` should be offered");
+    assert_eq!(optional.filter_text.as_deref(), Some("c"));
+    assert_eq!(optional.insert_text.as_deref(), Some("c: $0"));
+    let required = items.iter().find(|item| item.label == "a").expect("`a` should be offered");
+    assert!(
+        required.sort_text < optional.sort_text,
+        "required keys sort before optional ones: {:?} vs {:?}",
+        required.sort_text,
+        optional.sort_text
+    );
+}
+
 // MARK: Partial and broken source
 
 /// The state a user is in the moment they type the `,`: the closing brace may

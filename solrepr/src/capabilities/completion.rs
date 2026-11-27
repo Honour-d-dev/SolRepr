@@ -333,17 +333,16 @@ pub(crate) fn complete_braced_group(
         return Vec::new();
     };
     let (keys, item_kind) = match (kind, callee) {
-        (GroupKind::NamedArgs, CalleeKind::Callables(callables)) => (callable_keys(db, &callables), CompletionItemKind::FIELD),
+        (GroupKind::NamedArgs, CalleeKind::Callables(callables)) => (callable_keys(db, &callables, existing), CompletionItemKind::FIELD),
         (GroupKind::NamedArgs, CalleeKind::Struct(id)) => {
             let data = db.struct_data(id);
             let keys = data
                 .fields
                 .iter()
-                .map(|(_, field)| {
-                    (
-                        field.name.clone(),
-                        data.syntax_store.types[field.ty_ref].to_string(&data.syntax_store.types),
-                    )
+                .map(|(_, field)| Key {
+                    name: field.name.clone(),
+                    ty: data.syntax_store.types[field.ty_ref].to_string(&data.syntax_store.types),
+                    optional: false,
                 })
                 .collect();
             (keys, CompletionItemKind::FIELD)
@@ -360,51 +359,78 @@ pub(crate) fn complete_braced_group(
     key_items(keys, existing, item_kind, insert_separator)
 }
 
-fn option_keys(options: &[&str]) -> Vec<(Name, String)> {
+struct Key {
+    name: Name,
+    ty: String,
+    optional: bool,
+}
+
+fn option_keys(options: &[&str]) -> Vec<Key> {
     options
         .iter()
-        .filter_map(|name| option_type(name).map(|ty| (Name::from(*name), ty.to_string())))
+        .filter_map(|name| {
+            option_type(name).map(|ty| Key {
+                name: Name::from(*name),
+                ty: ty.to_string(),
+                optional: false,
+            })
+        })
         .collect()
 }
 
 /// The union of an overload set's parameter names, keeping the first type seen
-/// for each name.
-fn callable_keys(db: &Db, callables: &[Callable]) -> Vec<(Name, String)> {
-    let mut keys: Vec<(Name, String)> = Vec::new();
-    for callable in callables {
-        let Some(parameters) = callable.named_parameters(db) else {
-            continue;
-        };
-        for (name, ty) in parameters.iter() {
-            if !name.is_empty() && !keys.iter().any(|(seen, _)| seen == name) {
-                keys.push((name.clone(), ty.clone()));
+/// for each name. A name is optional when some surviving overload does not take it.
+fn callable_keys(db: &Db, callables: &[Callable], existing: &FxHashSet<Name>) -> Vec<Key> {
+    let declared: Vec<Box<[(Name, String)]>> = callables
+        .iter()
+        .filter_map(|c| c.named_parameters(db))
+        .filter(|params| params.iter().any(|(name, _)| !name.is_empty()))
+        .collect();
+    let remaining: Vec<&[(Name, String)]> = declared
+        .iter()
+        .map(Box::as_ref)
+        .filter(|params| existing.iter().all(|written| params.iter().any(|(name, _)| name == written)))
+        .collect();
+    let remaining = if remaining.is_empty() {
+        declared.iter().map(Box::as_ref).collect::<Vec<_>>()
+    } else {
+        remaining
+    };
+    let mut keys: Vec<Key> = Vec::new();
+    for params in &remaining {
+        for (name, ty) in params.iter() {
+            if !name.is_empty() && !keys.iter().any(|key| key.name == *name) {
+                let optional = remaining.iter().any(|other| !other.iter().any(|(n, _)| n == name));
+                keys.push(Key {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    optional,
+                });
             }
         }
     }
     keys
 }
 
-/// One item per key, skipping the ones already written.
-fn key_items(
-    keys: Vec<(Name, String)>,
-    existing: &FxHashSet<Name>,
-    kind: CompletionItemKind,
-    insert_separator: bool,
-) -> Vec<LspCompletionItem> {
+/// One item per key, skipping the ones already written. Optional keys are
+/// marked with a leading `?` in the label and sort after required keys, ordered
+/// alphabetically by bare name within each group.
+fn key_items(keys: Vec<Key>, existing: &FxHashSet<Name>, kind: CompletionItemKind, insert_separator: bool) -> Vec<LspCompletionItem> {
     keys.into_iter()
-        .filter(|(name, _)| !existing.contains(name))
-        .map(|(name, ty)| LspCompletionItem {
-            label: name.to_string(),
+        .filter(|key| !existing.contains(&key.name))
+        .map(|key| LspCompletionItem {
+            label: if key.optional { format!("?{}", key.name) } else { key.name.to_string() },
             kind: Some(kind),
             label_details: Some(CompletionItemLabelDetails {
                 detail: None,
-                description: Some(ty),
+                description: Some(key.ty),
             }),
-            filter_text: Some(name.to_string()),
+            sort_text: Some(format!("{}{}", if key.optional { "1_" } else { "0_" }, key.name)),
+            filter_text: Some(key.name.to_string()),
             insert_text: Some(if insert_separator {
-                format!("{name}: $0")
+                format!("{}: $0", key.name)
             } else {
-                name.to_string()
+                key.name.to_string()
             }),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
@@ -622,6 +648,9 @@ pub(crate) fn complete_expr(db: &Db, resolver: &Resolver, container: DefId, offs
             _ => None,
         };
         for (local_id, local) in body.locals.iter() {
+            if local.name().is_empty() {
+                continue;
+            }
             let visible = local_ranges
                 .as_ref()
                 .is_some_and(|map| map.local_ranges.get(local_id).is_some_and(|range| range.start <= offset));

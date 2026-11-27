@@ -9,9 +9,9 @@ use super::interned_db::{
     Using, Var,
 };
 use super::root_db::RootDb;
-use crate::ast::{self, FunctionKind, NodeRange, ToAstNode};
+use crate::ast::{self, AstId, FunctionKind, NodeRange, ToAstNode};
 use crate::hir::analysis::Analysis;
-use crate::hir::body_map::{BodyBuilder, BodyMap, BodyOwnerId, BodySourceMap, ByteOffset, LocalId};
+use crate::hir::body_map::{BodyBuilder, BodyMap, BodyOwnerId, BodySourceMap, ByteOffset, Header, LocalId};
 use crate::hir::diagnostics::SemanticDiagnostic;
 use crate::hir::docs::{docs, inline_docs};
 use crate::hir::exprs::Name;
@@ -267,19 +267,41 @@ pub fn def_name(db: &dyn HirDb, def: DefId) -> String {
 
 #[salsa::tracked]
 fn build_body<'db>(db: &'db dyn RootDb, owner: BodyOwner<'db>) -> (Arc<BodyMap>, Arc<BodySourceMap>) {
-    let (owner, ast_root) = match owner.id(db) {
+    match owner.id(db) {
         BodyOwnerId::Function(id) => {
-            let ast_root = db.ast(id.file).root();
-            let ast_id_map = db.ast_id_map(id.file);
-            (ast_id_map.get(&ast_root, id.id).unwrap().to_node(), ast_root)
+            let (data, map) = build_function(db, Function::new(db, id));
+            finish_body(
+                db,
+                id.file,
+                id.id,
+                Header {
+                    syntax_store: &data.syntax_store,
+                    source_map: &map,
+                    parameters: &data.parameters,
+                },
+            )
         }
         BodyOwnerId::Modifier(id) => {
-            let ast_root = db.ast(id.file).root();
-            let ast_id_map = db.ast_id_map(id.file);
-            (ast_id_map.get(&ast_root, id.id).unwrap().to_node(), ast_root)
+            let (data, map) = build_modifier(db, Modifier::new(db, id));
+            finish_body(
+                db,
+                id.file,
+                id.id,
+                Header {
+                    syntax_store: &data.syntax_store,
+                    source_map: &map,
+                    parameters: &data.parameters,
+                },
+            )
         }
-    };
-    let (body, map) = BodyBuilder::build(ast_root, owner).unwrap();
+    }
+}
+
+/// Extends a callable's header with its body block.
+fn finish_body<T: ToAstNode>(db: &dyn RootDb, file: File, ast_id: AstId<T>, header: Header<'_>) -> (Arc<BodyMap>, Arc<BodySourceMap>) {
+    let ast_root = db.ast(file).root();
+    let owner = db.ast_id_map(file).get(&ast_root, ast_id).unwrap().to_node();
+    let (body, map) = BodyBuilder::build(ast_root, owner, header).unwrap();
     (Arc::new(body), Arc::new(map))
 }
 
@@ -304,7 +326,7 @@ fn lower_params(inferer: &Inference, ids: &[LocalId], db: &dyn HirDb) -> Option<
 pub fn function_signature<'db>(db: &'db dyn HirDb, f: Function<'db>) -> Option<Fn<Type>> {
     let id = f.id(db);
     let data = function_data(db, f);
-    let fn_inference = Inferer::run(
+    let fn_inference = Inferer::run_signature(
         db,
         DefId::Function(id),
         SemanticStore::new(&data.syntax_store).with_locals(&data.parameters),
@@ -357,7 +379,7 @@ pub fn error_signature<'db>(db: &'db dyn HirDb, e: Error<'db>) -> Option<Fn<Type
 pub fn modifier_signature<'db>(db: &'db dyn HirDb, m: Modifier<'db>) -> Option<Fn<Type>> {
     let id = m.id(db);
     let data = modifier_data(db, m);
-    let mod_inference = Inferer::run(
+    let mod_inference = Inferer::run_signature(
         db,
         DefId::Modifier(id),
         SemanticStore::new(&data.syntax_store).with_locals(&data.parameters),

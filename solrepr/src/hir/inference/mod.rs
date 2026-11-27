@@ -58,13 +58,30 @@ pub struct Inferer<'db, 'store> {
 
 impl<'db, 'store> Inferer<'db, 'store> {
     pub fn run(db: &'db dyn HirDb, def: DefId, input: SemanticStore<'store>) -> Inference {
+        let mut inferer = Self::new(db, def, input);
+        inferer.check_definition();
+        inferer.infer_all();
+        inferer.finish()
+    }
+
+    /// The declaration phase: the locals and types a signature needs, without
+    /// the header's expressions. A callable's modifier invocations are body
+    /// phase — resolving them here would make a signature depend on the member
+    /// map that is asking for it.
+    pub fn run_signature(db: &'db dyn HirDb, def: DefId, input: SemanticStore<'store>) -> Inference {
+        let mut inferer = Self::new(db, def, input);
+        inferer.infer_declarations();
+        inferer.finish()
+    }
+
+    fn new(db: &'db dyn HirDb, def: DefId, input: SemanticStore<'store>) -> Self {
         // No source map means a declaration-context query: declaring scopes only.
         let resolver = if input.expr_scopes.is_some() {
             Resolver::build(db, def)
         } else {
             Resolver::for_declaration(db, def)
         };
-        let mut inferer = Self {
+        Self {
             db,
             def,
             input,
@@ -77,17 +94,33 @@ impl<'db, 'store> Inferer<'db, 'store> {
             },
             effective_mutability: Mutability::Pure,
             context: UsageContext::Empty,
-        };
-        inferer.check_definition();
-        inferer.infer_all();
+        }
+    }
 
-        inferer.sink.extend(inferer.resolver.finish_diagnostics().iter());
-        inferer.tables.effect = inferer.effective_mutability;
-        inferer.tables.diagnostics = inferer.sink.finish();
-        inferer.tables
+    fn finish(mut self) -> Inference {
+        self.sink.extend(self.resolver.finish_diagnostics().iter());
+        self.tables.effect = self.effective_mutability;
+        self.tables.diagnostics = self.sink.finish();
+        self.tables
     }
 
     fn infer_all(&mut self) {
+        self.infer_declarations();
+
+        // Reverse arena order: lowering allocates a child before its parent.
+        for (expr_id, _) in self.input.store.exprs.iter().rev() {
+            if self.tables.try_expr_ty(expr_id).is_none() {
+                self.check_rvalue(expr_id);
+            }
+        }
+    
+        // Types lower last: their locations come from the attached expression.
+        for (ty_ref_id, _) in self.input.store.types.iter().rev() {
+            self.lower_type(ty_ref_id, false);
+        }
+    }
+
+    fn infer_declarations(&mut self) {
         if let Some(locals) = self.input.locals {
             for (local_id, _) in locals.iter() {
                 let ty = self.infer_local(local_id);
@@ -111,19 +144,8 @@ impl<'db, 'store> Inferer<'db, 'store> {
                 self.tables.set_variant(variant_id, ty);
             }
         }
-
-        // Reverse arena order: lowering allocates a child before its parent.
-        for (expr_id, _) in self.input.store.exprs.iter().rev() {
-            if self.tables.try_expr_ty(expr_id).is_none() {
-                self.check_rvalue(expr_id);
-            }
-        }
-
-        // Types lower last: their locations come from the attached expression.
-        for (ty_ref_id, _) in self.input.store.types.iter().rev() {
-            self.lower_type(ty_ref_id, false);
-        }
     }
+
 
     #[inline]
     fn is_current(&self, def: DefId) -> bool {

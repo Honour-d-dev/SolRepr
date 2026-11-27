@@ -78,9 +78,9 @@ pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
     })
 }
 
-/// Dump the expressions the selection encloses in one container's stores.
-/// Functions and modifiers have two stores — item-level signature and
-/// body-level body; every other item has one.
+/// Dump the expressions the selection encloses in one container's store.
+/// A function's or modifier's body store extends its header, so it is the only
+/// store either owns.
 fn process_container(
     db: &Db,
     container: &DefId,
@@ -104,24 +104,14 @@ fn process_container(
 
     match container {
         DefId::Function(id) => {
-            let fn_data = db.function_data(*id);
             let body = db.body_map(BodyOwnerId::Function(*id));
-            process_store!(
-                &fn_data.syntax_store,
-                db.source_map(DefId::Function(*id))
-            );
             process_store!(
                 &body.syntax_store,
                 db.body_source_map(BodyOwnerId::Function(*id))
             );
         }
         DefId::Modifier(id) => {
-            let mod_data = db.modifier_data(*id);
             let body = db.body_map(BodyOwnerId::Modifier(*id));
-            process_store!(
-                &mod_data.syntax_store,
-                db.source_map(DefId::Modifier(*id))
-            );
             process_store!(
                 &body.syntax_store,
                 db.body_source_map(BodyOwnerId::Modifier(*id))

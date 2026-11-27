@@ -2,9 +2,10 @@ use crate::ast::kinds::NodeKind;
 use crate::hir::body_map::*;
 use crate::hir::exprs::Expr;
 use crate::hir::types::TyName;
-use crate::ast::ToAstNode;
 use crate::hir::tests::helper::make_test_db;
 use crate::hir::types::{Mutability, Primitive, Visibility};
+use crate::salsa::hir_db::HirDb;
+use triomphe::Arc;
 use tree_sitter::Node;
 
 use crate::{ast, hir::exprs::Literal, salsa::root_db::RootDb};
@@ -41,7 +42,7 @@ fn find_first_kind<'a>(node: Node<'a>, kind: NodeKind) -> Option<Node<'a>> {
     None
 }
 
-fn build_maps_for_first_function(source: &str) -> (BodyMap, BodySourceMap) {
+fn build_maps_for_first_function(source: &str) -> (Arc<BodyMap>, Arc<BodySourceMap>) {
     let (db, file) = make_test_db(source);
     let ast = db.ast(file);
     let root = ast.root();
@@ -53,11 +54,8 @@ fn build_maps_for_first_function(source: &str) -> (BodyMap, BodySourceMap) {
         .id_of_node::<ast::Function>(fn_node)
         .expect("fixture function should map to AstId<Function>");
 
-    let ast_root = db.ast(file).root();
-    let ast_id_map = db.ast_id_map(file);
-    let owner = ast_id_map.get(&ast_root, fn_id).unwrap().to_node();
-
-    BodyBuilder::build(ast_root, owner).expect("BodyBuilder::build should succeed for fixture")
+    let owner = BodyOwnerId::Function(ast::FunctionId { file, id: fn_id });
+    (db.body_map(owner), db.body_source_map(owner))
 }
 
 fn local_type<'a>(body_map: &'a BodyMap, _source_map: &'a BodySourceMap, name: &str) -> &'a TyName {

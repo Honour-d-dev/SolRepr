@@ -7,7 +7,7 @@ use crate::hir::types::func::Fn;
 use crate::hir::types::primitive::Primitive;
 
 pub type TyNameId = Idx<TyName>;
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TyName {
     Primitive(Primitive),
     UserDefined { base: Option<TyNameId>, name: Name },
