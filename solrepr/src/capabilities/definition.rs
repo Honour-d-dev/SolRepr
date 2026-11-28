@@ -80,7 +80,7 @@ fn location_of(db: &Db, identity: Identity) -> Option<LspLocation> {
 
 /// A local's declaration range: body owners keep theirs in the body map, event
 /// and error parameters in the item's own map.
-fn local_range(db: &Db, def: DefId, local: LocalId) -> Option<NodeRange> {
+pub(crate) fn local_range(db: &Db, def: DefId, local: LocalId) -> Option<NodeRange> {
     match def {
         DefId::Function(id) => db.body_source_map(BodyOwnerId::Function(id)).local_ranges.get(local).copied(),
         DefId::Modifier(id) => db.body_source_map(BodyOwnerId::Modifier(id)).local_ranges.get(local).copied(),

@@ -1,5 +1,5 @@
 use camino::Utf8Path;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 
 use crate::salsa::FileId;
@@ -20,33 +20,9 @@ impl ImportMap {
         self.0.entry(target).or_default().push(importer);
     }
 
-    pub fn merge(&mut self, other: &ImportMap) {
-        for (&target, importers) in &other.0 {
-            self.0.entry(target).or_default().extend_from_slice(importers);
-        }
-    }
-
-    /// The files importing `target` directly. Empty for a dependency target,
-    /// which is outside the index's scope by design.
+    /// The files importing `target` directly.
     pub fn of(&self, target: FileId) -> &[FileId] {
         self.0.get(&target).map_or(&[], Vec::as_slice)
-    }
-
-    /// Every file that transitively imports any of `seeds`.
-    ///
-    /// Import cycles are legal Solidity, so the walk carries a visited set; a
-    /// seed is absent unless a cycle brings it back.
-    pub fn dependents_of(&self, seeds: impl IntoIterator<Item = FileId>) -> FxHashSet<FileId> {
-        let mut dependents = FxHashSet::default();
-        let mut pending: Vec<FileId> = seeds.into_iter().collect();
-        while let Some(file) = pending.pop() {
-            for &importer in self.of(file) {
-                if dependents.insert(importer) {
-                    pending.push(importer);
-                }
-            }
-        }
-        dependents
     }
 }
 

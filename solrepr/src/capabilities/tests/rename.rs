@@ -6,7 +6,8 @@ use ropey::Rope;
 use rustc_hash::FxHashSet;
 
 use crate::capabilities::Identity;
-use crate::capabilities::rename::{Target, is_identifier, prepare_rename, references, rename};
+use crate::capabilities::references::{Target, occurrences};
+use crate::capabilities::rename::{is_identifier, prepare_rename, rename, rename_target};
 use crate::hir::body_map::BodyOwnerId;
 use crate::hir::item_data::SemanticId;
 use crate::hir::resolution::{Field, Resolution};
@@ -16,13 +17,10 @@ use crate::paths::NormalizedPath;
 use crate::salsa::root_db::RootDb;
 use crate::salsa::{Db, HirDb};
 use crate::utilities::{byte_to_position, to_url};
-use crate::workspace::{
-    LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles,
-};
+use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles};
 
 fn root() -> Utf8PathBuf {
-    Utf8PathBuf::from_path_buf(std::env::temp_dir().join("rename_tests"))
-        .expect("temp dir is UTF-8")
+    Utf8PathBuf::from_path_buf(std::env::temp_dir().join("rename_tests")).expect("temp dir is UTF-8")
 }
 
 fn path(relative: &str) -> Utf8PathBuf {
@@ -53,12 +51,7 @@ fn db_with(files: &[(&str, &str)]) -> Db {
 }
 
 fn defs_of(db: &Db, file: crate::salsa::File, kind: impl Fn(&DefId) -> bool) -> Vec<DefId> {
-    db.file_def_map(file)
-        .defs
-        .keys()
-        .copied()
-        .filter(kind)
-        .collect()
+    db.file_def_map(file).defs.keys().copied().filter(kind).collect()
 }
 
 /// solc 0.8.x, probed with `contract C { bool <name>; }`: canonical type sizes
@@ -128,9 +121,7 @@ fn identifier_validation_matches_solc() {
 fn a_local_declaration_targets_its_local() {
     let (db, file) = make_test_db("contract C { function f() external { uint x = 1; x = 2; } }");
     let f = find_function(&db, file, "f");
-    let DefId::Function(id) = f else {
-        unreachable!()
-    };
+    let DefId::Function(id) = f else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(id));
     let (range, local) = map
         .range_to_semantic
@@ -192,13 +183,7 @@ fn a_struct_field_targets_its_field() {
 
     let target = Target::at(&db, structure, range).expect("a field is renameable");
     assert_eq!(target.name, "a");
-    assert_eq!(
-        target.identity,
-        Identity::Field {
-            owner: structure,
-            field
-        }
-    );
+    assert_eq!(target.identity, Identity::Field { owner: structure, field });
 }
 
 #[test]
@@ -217,9 +202,7 @@ fn an_enum_variant_targets_its_variant() {
             _ => None,
         })
         .expect("the enum declares a variant");
-    let DefId::Enum(enum_) = enumeration else {
-        unreachable!()
-    };
+    let DefId::Enum(enum_) = enumeration else { unreachable!() };
     let text = db.text(file);
     let spelling = text[range.start as usize..range.end as usize].to_string();
 
@@ -232,19 +215,14 @@ fn an_enum_variant_targets_its_variant() {
 /// edit from here covers the siblings is the scan's policy, not the target's.
 #[test]
 fn a_declaration_targets_one_overload_not_the_set() {
-    let (db, file) =
-        make_test_db("contract C { function f(uint256) external {} function f(bool) external {} }");
+    let (db, file) = make_test_db("contract C { function f(uint256) external {} function f(bool) external {} }");
     let overloads = defs_of(&db, file, |def| matches!(def, DefId::Function(_)));
     assert_eq!(overloads.len(), 2);
 
     for overload in overloads {
         let range = def_name_range(&db, file, overload).expect("a function has a name");
         let target = Target::at(&db, overload, range).expect("an overload is renameable");
-        assert_eq!(
-            target.identity,
-            Identity::Def(overload),
-            "the cursor's own declaration only"
-        );
+        assert_eq!(target.identity, Identity::Def(overload), "the cursor's own declaration only");
     }
 }
 
@@ -259,9 +237,7 @@ fn keywords_builtins_and_paths_are_not_renameable() {
     ]);
     let main = db.file(&path("Main.sol")).unwrap();
     let f = find_function(&db, main, "f");
-    let DefId::Function(id) = f else {
-        unreachable!()
-    };
+    let DefId::Function(id) = f else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(id));
     let inference = db.inference(f);
 
@@ -383,13 +359,9 @@ fn prepare_rename_is_null_where_nothing_is_renameable() {
 
 #[test]
 fn a_local_renames_its_declaration_and_use_only() {
-    let (db, file) = make_test_db(
-        "contract C { function f() external { uint x = 1; x = 2; } function g() external { uint x = 3; } }",
-    );
+    let (db, file) = make_test_db("contract C { function f() external { uint x = 1; x = 2; } function g() external { uint x = 3; } }");
     let f = find_function(&db, file, "f");
-    let DefId::Function(f_id) = f else {
-        unreachable!()
-    };
+    let DefId::Function(f_id) = f else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(f_id));
     let inference = db.inference(f);
     let (decl_range, local) = map
@@ -413,7 +385,7 @@ fn a_local_renames_its_declaration_and_use_only() {
         .expect("f uses the local");
 
     let target = Target::at(&db, f, decl_range).expect("a local is renameable");
-    let hits = references(&db, &target, f.file());
+    let hits = occurrences(&db, &target, f.file());
 
     assert_eq!(
         hits,
@@ -440,7 +412,7 @@ fn a_state_variable_renames_its_uses_across_files() {
     let range = def_name_range(&db, a, var).expect("the variable has a name");
 
     let target = Target::at(&db, var, range).expect("a state variable is renameable");
-    let hits = references(&db, &target, var.file());
+    let hits = occurrences(&db, &target, var.file());
 
     assert_eq!(hits.len(), 2, "the declaration and `c.state`: {hits:?}");
     assert!(hits.iter().any(|(file, _)| *file == b), "the use in B.sol");
@@ -460,24 +432,20 @@ fn an_overload_renames_itself_and_its_calls_only() {
     for &overload in &overloads {
         let range = def_name_range(&db, file, overload).expect("an overload has a name");
         let target = Target::at(&db, overload, range).expect("an overload is renameable");
-        let hits = references(&db, &target, overload.file());
+        let hits = occurrences(&db, &target, overload.file());
 
         assert_eq!(hits.len(), 2, "declaration + its call: {hits:?}");
         for &sibling in overloads.iter().filter(|other| **other != overload) {
             let sibling_decl = def_name_range(&db, file, sibling).expect("the sibling has a name");
-            assert!(
-                !hits.contains(&(file, sibling_decl)),
-                "the sibling declaration is untouched"
-            );
+            assert!(!hits.contains(&(file, sibling_decl)), "the sibling declaration is untouched");
         }
     }
 }
 
 #[test]
 fn a_tied_call_site_is_left_untouched() {
-    let (db, file) = make_test_db(
-        "contract C { function f(uint8 a) public {} function f(uint16 b) public {} function g() external { f(1); } }",
-    );
+    let (db, file) =
+        make_test_db("contract C { function f(uint8 a) public {} function f(uint16 b) public {} function g() external { f(1); } }");
     let overloads = defs_of(&db, file, |def| match def {
         DefId::Function(id) => db.function_data(*id).name == "f",
         _ => false,
@@ -486,28 +454,17 @@ fn a_tied_call_site_is_left_untouched() {
     let target = Target::at(&db, overloads[0], range).expect("an overload is renameable");
 
     let g = find_function(&db, file, "g");
-    let DefId::Function(id) = g else {
-        unreachable!()
-    };
+    let DefId::Function(id) = g else { unreachable!() };
     let call = db
         .body_source_map(BodyOwnerId::Function(id))
         .range_to_semantic
         .iter()
-        .find_map(|(range, _)| {
-            (&db.text(file)[range.start as usize..range.end as usize] == "f").then_some(*range)
-        })
+        .find_map(|(range, _)| (&db.text(file)[range.start as usize..range.end as usize] == "f").then_some(*range))
         .expect("the fixture calls f");
 
-    let hits = references(&db, &target, overloads[0].file());
-    assert_eq!(
-        hits,
-        FxHashSet::from_iter([(file, range)]),
-        "only the declaration"
-    );
-    assert!(
-        !hits.contains(&(file, call)),
-        "the tied call is left untouched"
-    );
+    let hits = occurrences(&db, &target, overloads[0].file());
+    assert_eq!(hits, FxHashSet::from_iter([(file, range)]), "only the declaration");
+    assert!(!hits.contains(&(file, call)), "the tied call is left untouched");
 }
 
 #[test]
@@ -525,13 +482,9 @@ fn a_contract_renames_every_spelling_across_files() {
     let range = def_name_range(&db, base_file, base).expect("the contract has a name");
 
     let target = Target::at(&db, base, range).expect("a contract is renameable");
-    let hits = references(&db, &target, base.file());
+    let hits = occurrences(&db, &target, base.file());
 
-    assert_eq!(
-        hits.len(),
-        4,
-        "declaration, import specifier, `is Base`, `new Base()`: {hits:?}"
-    );
+    assert_eq!(hits.len(), 4, "declaration, import specifier, `is Base`, `new Base()`: {hits:?}");
     assert_eq!(hits.iter().filter(|(file, _)| *file == main).count(), 3);
 }
 
@@ -559,7 +512,7 @@ fn a_struct_field_renames_its_member_uses() {
         .expect("the struct declares a field");
 
     let target = Target::at(&db, structure, decl_range).expect("a field is renameable");
-    let hits = references(&db, &target, structure.file());
+    let hits = occurrences(&db, &target, structure.file());
 
     assert_eq!(hits.len(), 2, "the declaration and `s.a`: {hits:?}");
     assert!(hits.iter().any(|(file, _)| *file == main));
@@ -581,16 +534,12 @@ fn an_import_alias_is_not_mistaken_for_the_imported_name() {
     let range = def_name_range(&db, a_file, a).expect("the contract has a name");
 
     let target = Target::at(&db, a, range).expect("a contract is renameable");
-    let hits = references(&db, &target, a.file());
+    let hits = occurrences(&db, &target, a.file());
 
     assert_eq!(hits.len(), 2, "the declaration and the specifier: {hits:?}");
     for (file, range) in &hits {
         let text = db.text(*file);
-        assert_eq!(
-            &text[range.start as usize..range.end as usize],
-            "A",
-            "only the `A` spelling"
-        );
+        assert_eq!(&text[range.start as usize..range.end as usize], "A", "only the `A` spelling");
     }
 }
 
@@ -629,18 +578,14 @@ fn a_dependency_root_is_never_edited() {
     let dep = find_contract(&db, dep_file, "Dep");
     let range = def_name_range(&db, dep_file, dep).expect("the contract has a name");
 
+    let position = byte_to_position(&db.rope(dep_file), range.start as usize);
     assert!(
-        Target::at(&db, dep, range).is_none(),
+        rename_target(&db, dep_file.path(&db), position).is_none(),
         "a dependency root is never edited"
     );
 }
 
-fn rename_request(
-    db: &Db,
-    file: crate::salsa::File,
-    position: Position,
-    new_name: &str,
-) -> Request {
+fn rename_request(db: &Db, file: crate::salsa::File, position: Position, new_name: &str) -> Request {
     Request {
         id: RequestId::from(7),
         method: Rename::METHOD.to_string(),
@@ -660,8 +605,7 @@ fn rename_request(
 
 #[test]
 fn rename_returns_edits_for_every_spelling() {
-    let (db, file) =
-        make_test_db("contract C { uint256 public state; function f() external { state = 1; } }");
+    let (db, file) = make_test_db("contract C { uint256 public state; function f() external { state = 1; } }");
     let var = defs_of(&db, file, |def| matches!(def, DefId::Var(_)))
         .into_iter()
         .next()
@@ -701,9 +645,8 @@ fn rename_rejects_a_keyword() {
 
 #[test]
 fn a_tied_call_site_does_not_block_a_rename() {
-    let (db, file) = make_test_db(
-        "contract C { function f(uint8 a) public {} function f(uint16 b) public {} function g() external { f(1); } }",
-    );
+    let (db, file) =
+        make_test_db("contract C { function f(uint8 a) public {} function f(uint16 b) public {} function g() external { f(1); } }");
     let overloads = defs_of(&db, file, |def| match def {
         DefId::Function(id) => db.function_data(*id).name == "f",
         _ => false,
@@ -712,10 +655,7 @@ fn a_tied_call_site_does_not_block_a_rename() {
     let position = byte_to_position(&db.rope(file), range.start as usize);
 
     let response = rename(&db, rename_request(&db, file, position, "h")).unwrap();
-    assert!(
-        response.error.is_none(),
-        "the tied call is skipped, not fatal"
-    );
+    assert!(response.error.is_none(), "the tied call is skipped, not fatal");
     let result = response.result.expect("rename answers");
     let edits = result["changes"]
         .as_object()
@@ -728,20 +668,13 @@ fn a_tied_call_site_does_not_block_a_rename() {
 }
 
 /// The alias's semantic entry, found by spelling.
-fn import_alias_range(
-    db: &Db,
-    file: crate::salsa::File,
-    import: DefId,
-    spelling: &str,
-) -> crate::ast::NodeRange {
+fn import_alias_range(db: &Db, file: crate::salsa::File, import: DefId, spelling: &str) -> crate::ast::NodeRange {
     db.source_map(import)
         .range_to_semantic
         .iter()
         .find_map(|(range, id)| {
             let text = &db.text(file)[range.start as usize..range.end as usize];
-            matches!(id, SemanticId::Expr(_))
-                .then_some(*range)
-                .filter(|_| text == spelling)
+            matches!(id, SemanticId::Expr(_)).then_some(*range).filter(|_| text == spelling)
         })
         .expect("the alias has a semantic entry")
 }
@@ -764,7 +697,7 @@ fn a_namespace_alias_renames_its_spelling() {
 
     let target = Target::at(&db, import, alias).expect("a namespace alias is renameable");
     assert_eq!(target.name, "NS");
-    let hits = references(&db, &target, main);
+    let hits = occurrences(&db, &target, main);
     assert_eq!(hits.len(), 2, "alias declaration + `NS.B` use: {hits:?}");
 }
 
@@ -790,7 +723,7 @@ fn two_importers_aliasing_one_file_stay_independent() {
     let alias = import_alias_range(&db, one, import, "NS");
 
     let target = Target::at(&db, import, alias).expect("a namespace alias is renameable");
-    let hits = references(&db, &target, one);
+    let hits = occurrences(&db, &target, one);
     assert_eq!(hits.len(), 2, "only this importer's spellings: {hits:?}");
     assert!(
         !hits.iter().any(|(file, _)| *file == two),
@@ -821,7 +754,7 @@ fn a_named_alias_is_file_local() {
 
     let target = Target::at(&db, import, alias).expect("an import alias is renameable");
     assert_eq!(target.name, "B");
-    let hits = references(&db, &target, one);
+    let hits = occurrences(&db, &target, one);
     assert_eq!(hits.len(), 2, "alias declaration + `new B()`: {hits:?}");
     assert!(
         !hits.iter().any(|(file, _)| *file == two),
@@ -871,8 +804,9 @@ fn a_dependency_declaration_is_not_renamed_from_the_workspace() {
 
     // The edit would change the specifier and the uses but not the declaration,
     // which lives in a regenerated root.
+    let position = byte_to_position(&db.rope(main), specifier.start as usize);
     assert!(
-        Target::at(&db, import, specifier).is_none(),
+        rename_target(&db, main.path(&db), position).is_none(),
         "a dependency declaration must not be renamed from the workspace"
     );
 }
@@ -919,7 +853,7 @@ fn a_namespace_alias_to_a_dependency_file_is_renameable() {
 
     // The alias is file-local: renaming it never edits the dependency file.
     let target = Target::at(&db, import, alias).expect("a namespace alias is renameable");
-    let hits = references(&db, &target, main);
+    let hits = occurrences(&db, &target, main);
     assert_eq!(hits.len(), 2, "alias declaration + `NS.Dep` use: {hits:?}");
 }
 
@@ -928,9 +862,7 @@ fn a_tied_call_is_not_a_rename_target() {
     let source = "contract C { function f(uint8) public {} function f(uint16) public {} function g() external { f(1); } }";
     let (db, file) = make_test_db(source);
     let g = find_function(&db, file, "g");
-    let DefId::Function(id) = g else {
-        unreachable!()
-    };
+    let DefId::Function(id) = g else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(id));
     let call = map
         .range_to_semantic

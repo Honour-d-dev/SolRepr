@@ -19,12 +19,10 @@ use crate::hir::tests::helper::test_workspace;
 use crate::ir::def_map::DefId;
 use crate::paths::NormalizedPath;
 use crate::salsa::db::{Db, File};
-use crate::salsa::root_db::{import_map_of, imports};
+use crate::salsa::root_db::{import_map, imports};
 use crate::salsa::{HirDb, RootDb};
 use crate::workspace::diff::diff;
-use crate::workspace::{
-    LoadedFile, Package, PackageId, Remapping, RootWithFiles, WorkspaceWithFiles,
-};
+use crate::workspace::{LoadedFile, Package, PackageId, Remapping, RootWithFiles, WorkspaceWithFiles};
 
 const SOURCE: &str = r#"
 contract C {
@@ -195,8 +193,7 @@ fn opening_an_unchanged_document_keeps_parse_cached() {
     recorder.take();
 
     let path = file.path(&db).to_path_buf();
-    db.open_file(path, SOURCE.to_string())
-        .expect("the document is indexed");
+    db.open_file(path, SOURCE.to_string()).expect("the document is indexed");
 
     let _ = db.item_tree(file);
     let events = recorder.take();
@@ -304,25 +301,22 @@ fn a_new_file_re_collects_one_roots_inversion() {
     let (mut db, recorder) = recording(workspace);
     let src = db.source_roots()[0];
     let test = db.source_roots()[1];
-    let _ = import_map_of(&db, src);
-    let _ = import_map_of(&db, test);
+    let _ = import_map(&db, src);
+    let _ = import_map(&db, test);
     recorder.take();
 
-    db.open_file(
-        Utf8PathBuf::from("/w/src/New.sol"),
-        "contract New {}".to_string(),
-    )
-    .expect("indexed under src");
+    db.open_file(Utf8PathBuf::from("/w/src/New.sol"), "contract New {}".to_string())
+        .expect("indexed under src");
 
     // The untouched root: neither its map nor its files' imports re-run.
-    let _ = import_map_of(&db, test);
+    let _ = import_map(&db, test);
     let events = recorder.take();
     assert_eq!(ran(&events, "import_map_of"), 0, "{events:#?}");
     assert_eq!(ran(&events, "imports"), 0, "{events:#?}");
 
     // The root that gained the file: its map re-collects, and only `A`
     // re-resolves — `New.sol` is computed for the first time.
-    let _ = import_map_of(&db, src);
+    let _ = import_map(&db, src);
     let events = recorder.take();
     assert_eq!(ran(&events, "import_map_of"), 1, "{events:#?}");
     assert_eq!(ran(&events, "imports"), 2, "{events:#?}");
@@ -333,27 +327,17 @@ fn a_new_file_re_collects_one_roots_inversion() {
 fn an_unresolved_import_resolves_when_the_file_appears() {
     let workspace = workspace_of(vec![root(
         "/w/src",
-        vec![loaded(
-            "/w/src/A.sol",
-            "import \"./Missing.sol\";\ncontract A {}\n",
-        )],
+        vec![loaded("/w/src/A.sol", "import \"./Missing.sol\";\ncontract A {}\n")],
     )]);
     let (mut db, recorder) = recording(workspace);
     let a = db.file(&Utf8PathBuf::from("/w/src/A.sol")).unwrap();
     assert!(imports(&db, a).resolved.is_empty());
     recorder.take();
 
-    db.open_file(
-        Utf8PathBuf::from("/w/src/Missing.sol"),
-        "contract Missing {}".to_string(),
-    )
-    .expect("indexed under src");
+    db.open_file(Utf8PathBuf::from("/w/src/Missing.sol"), "contract Missing {}".to_string())
+        .expect("indexed under src");
 
-    assert_eq!(
-        imports(&db, a).resolved.len(),
-        1,
-        "the import resolves once the file exists"
-    );
+    assert_eq!(imports(&db, a).resolved.len(), 1, "the import resolves once the file exists");
 }
 
 /// A reload that moves only package facts does not rewrite the root set.
@@ -366,7 +350,7 @@ fn manifest_only_reload_does_not_invalidate_root_set() {
     let (mut db, recorder) = recording(workspace);
     let test = db.source_roots()[1];
     let _ = root_count(&db);
-    let _ = import_map_of(&db, test);
+    let _ = import_map(&db, test);
     recorder.take();
 
     let mut reloaded = workspace_of(vec![
@@ -388,7 +372,7 @@ fn manifest_only_reload_does_not_invalidate_root_set() {
     db.reload_workspace(prepared);
 
     let _ = root_count(&db);
-    let _ = import_map_of(&db, test);
+    let _ = import_map(&db, test);
 
     let events = recorder.take();
     assert_eq!(ran(&events, "root_count"), 0, "{events:#?}");
@@ -409,7 +393,7 @@ fn adding_a_new_root_does_not_re_run_resolved_imports() {
     let src = db.source_roots()[0];
     let a = db.file(&Utf8PathBuf::from("/w/src/A.sol")).unwrap();
     let _ = imports(&db, a);
-    let _ = import_map_of(&db, src);
+    let _ = import_map(&db, src);
     recorder.take();
 
     let reloaded = workspace_of(vec![
@@ -420,16 +404,13 @@ fn adding_a_new_root_does_not_re_run_resolved_imports() {
                 loaded("/w/src/B.sol", "contract B {}\n"),
             ],
         ),
-        root(
-            "/w/lib/dep",
-            vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")],
-        ),
+        root("/w/lib/dep", vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")]),
     ]);
     let (_, prepared) = diff(&db.workspace(), reloaded);
     db.reload_workspace(prepared);
 
     let _ = imports(&db, a);
-    let _ = import_map_of(&db, src);
+    let _ = import_map(&db, src);
 
     let events = recorder.take();
     assert_eq!(ran(&events, "imports"), 0, "{events:#?}");
@@ -440,10 +421,7 @@ fn adding_a_new_root_does_not_re_run_resolved_imports() {
 /// parse and the item tree keep their memos.
 #[test]
 fn re_parenting_a_file_does_not_re_parse_it() {
-    let workspace = workspace_of(vec![root(
-        "/w",
-        vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")],
-    )]);
+    let workspace = workspace_of(vec![root("/w", vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")])]);
     let (mut db, recorder) = recording(workspace);
     let dep = db.file(&Utf8PathBuf::from("/w/lib/dep/Dep.sol")).unwrap();
     let _ = db.item_tree(dep);
@@ -451,10 +429,7 @@ fn re_parenting_a_file_does_not_re_parse_it() {
 
     let narrowed = workspace_of(vec![
         root("/w", Vec::new()),
-        root(
-            "/w/lib/dep",
-            vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")],
-        ),
+        root("/w/lib/dep", vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")]),
     ]);
     let (_, prepared) = diff(&db.workspace(), narrowed);
     db.reload_workspace(prepared);

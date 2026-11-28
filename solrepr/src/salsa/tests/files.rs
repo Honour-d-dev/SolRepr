@@ -1,5 +1,5 @@
 use crate::paths::NormalizedPath;
-use crate::salsa::root_db::{import_map, imports, imports_closure};
+use crate::salsa::root_db::{dependents_of, import_map, imports, imports_closure};
 use crate::salsa::{Db, File};
 use crate::utilities::fixture_path;
 use crate::workspace::loader::load_roots;
@@ -20,8 +20,7 @@ fn standalone_db() -> Db {
 fn stray_file_under_a_source_root_attaches_to_that_root() {
     let root = fixture_path("fixtures/workspaces/foundry/container");
     let mut db = Db::new(load_roots(root.clone()));
-    let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/container/a/b/inner/stray.sol");
+    let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/workspaces/foundry/container/a/b/inner/stray.sol");
 
     let file = db
         .open_file(path.clone(), "contract Stray {}".to_string())
@@ -37,13 +36,9 @@ fn stray_file_under_a_source_root_attaches_to_that_root() {
 fn stray_file_outside_source_dirs_is_not_indexed() {
     let root = fixture_path("fixtures/workspaces/foundry/nested");
     let mut db = Db::new(load_roots(root));
-    let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/workspaces/foundry/nested/stray.sol");
+    let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/workspaces/foundry/nested/stray.sol");
 
-    assert!(
-        db.open_file(path.clone(), "contract Stray {}".to_string())
-            .is_none()
-    );
+    assert!(db.open_file(path.clone(), "contract Stray {}".to_string()).is_none());
     assert!(db.file(&path).is_none());
 }
 
@@ -52,13 +47,9 @@ fn stray_file_outside_source_dirs_is_not_indexed() {
 #[test]
 fn file_outside_every_source_root_is_not_indexed() {
     let mut db = standalone_db();
-    let path =
-        Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/workspaces/AdHocScratch.sol");
+    let path = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/workspaces/AdHocScratch.sol");
 
-    assert!(
-        db.open_file(path.clone(), "contract AdHocScratch {}".to_string())
-            .is_none()
-    );
+    assert!(db.open_file(path.clone(), "contract AdHocScratch {}".to_string()).is_none());
     assert!(db.file(&path).is_none());
 }
 
@@ -68,9 +59,7 @@ fn file_outside_every_source_root_is_not_indexed() {
 fn remappings_only_workspace_resolves_vendored_imports() {
     let fixture = fixture_path("fixtures/workspaces/foundry/remappings/vendor");
     let db = Db::new(load_roots(fixture.clone()));
-    let main = db
-        .file(&fixture.join("Main.sol"))
-        .expect("the workspace indexes Main.sol");
+    let main = db.file(&fixture.join("Main.sol")).expect("the workspace indexes Main.sol");
     let dep = db
         .resolve_to_file(main, "dep/Dep.sol")
         .expect("dep/ resolves through remappings.txt");
@@ -84,9 +73,7 @@ fn remappings_only_workspace_resolves_vendored_imports() {
 fn namespace_import_qualifies_type_references() {
     let root = fixture_path("fixtures/workspaces/namespaces");
     let db = Db::new(load_roots(root.clone()));
-    let user = db
-        .file(&root.join("src/User.sol"))
-        .expect("the workspace indexes User.sol");
+    let user = db.file(&root.join("src/User.sol")).expect("the workspace indexes User.sol");
 
     let diagnostics = crate::hir::diagnostics::collect_diagnostics(&db, user);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -99,9 +86,7 @@ fn namespace_import_qualifies_type_references() {
 fn namespace_alias_cannot_type_a_declaration() {
     let root = fixture_path("fixtures/workspaces/namespaces");
     let db = Db::new(load_roots(root.clone()));
-    let bad = db
-        .file(&root.join("src/Bad.sol"))
-        .expect("the workspace indexes Bad.sol");
+    let bad = db.file(&root.join("src/Bad.sol")).expect("the workspace indexes Bad.sol");
 
     let diagnostics = crate::hir::diagnostics::collect_diagnostics(&db, bad);
     let refusals = diagnostics
@@ -125,9 +110,7 @@ fn a_refused_namespace_type_leaves_no_namespace_behind() {
 
     let root = fixture_path("fixtures/workspaces/namespaces");
     let db = Db::new(load_roots(root.clone()));
-    let bad = db
-        .file(&root.join("src/Bad.sol"))
-        .expect("the workspace indexes Bad.sol");
+    let bad = db.file(&root.join("src/Bad.sol")).expect("the workspace indexes Bad.sol");
 
     for name in ["local", "param", "array"] {
         let DefId::Function(id) = find_function(&db, bad, name) else {
@@ -158,9 +141,7 @@ fn a_refused_namespace_type_leaves_no_namespace_behind() {
 fn manifestless_library_resolves_through_the_synthesized_remapping() {
     let fixture = fixture_path("fixtures/workspaces/foundry/nested");
     let db = Db::new(load_roots(fixture.clone()));
-    let main = db
-        .file(&fixture.join("src/Root.sol"))
-        .expect("the workspace indexes src/Root.sol");
+    let main = db.file(&fixture.join("src/Root.sol")).expect("the workspace indexes src/Root.sol");
     let dep = db
         .resolve_to_file(main, "plain/Plain.sol")
         .expect("plain/ resolves into the named dependency");
@@ -173,9 +154,7 @@ fn manifestless_library_resolves_through_the_synthesized_remapping() {
 fn remapping_into_src_dir_resolves_imports() {
     let fixture = fixture_path("fixtures/workspaces/foundry/nested");
     let db = Db::new(load_roots(fixture.clone()));
-    let main = db
-        .file(&fixture.join("src/Root.sol"))
-        .expect("the workspace indexes src/Root.sol");
+    let main = db.file(&fixture.join("src/Root.sol")).expect("the workspace indexes src/Root.sol");
     let dep = db
         .resolve_to_file(main, "fs/Lib.sol")
         .expect("fs/ resolves into the library's src dir");
@@ -186,14 +165,11 @@ fn remapping_into_src_dir_resolves_imports() {
 fn deduplicated_library_files_are_never_indexed() {
     let root = fixture_path("fixtures/workspaces/foundry/nested");
     let mut db = Db::new(load_roots(root));
-    let path = fixture_path(
-        "fixtures/workspaces/foundry/nested/dependencies/dep-a/lib/duplicate/src/Duplicate.sol",
-    );
+    let path = fixture_path("fixtures/workspaces/foundry/nested/dependencies/dep-a/lib/duplicate/src/Duplicate.sol");
 
     assert!(db.is_ignored_path(&path));
     assert!(
-        db.open_file(path.clone(), "contract OpenedDuplicate {}".to_string())
-            .is_none(),
+        db.open_file(path.clone(), "contract OpenedDuplicate {}".to_string()).is_none(),
         "an ignored file gets no File and no source root"
     );
     assert!(db.file(&path).is_none());
@@ -210,8 +186,7 @@ fn dependency_dev_files_are_never_indexed() {
 
     assert!(db.is_ignored_path(&path));
     assert!(
-        db.open_file(path.clone(), "contract T {}".to_string())
-            .is_none(),
+        db.open_file(path.clone(), "contract T {}".to_string()).is_none(),
         "a dependency dev file gets no File and no source root"
     );
     assert!(db.file(&path).is_none());
@@ -232,9 +207,7 @@ fn live_root_set_matches_a_fresh_discovery() {
     for fixture in fixtures {
         let root = fixture_path(fixture);
         let db = Db::new(load_roots(root.clone()));
-        let discovered = crate::workspace::Workspace::<()>::from(
-            &crate::workspace::discover_workspaces(std::slice::from_ref(&root)),
-        );
+        let discovered = crate::workspace::Workspace::<()>::from(&crate::workspace::discover_workspaces(std::slice::from_ref(&root)));
         assert_eq!(db.workspace(), discovered, "{fixture}");
     }
 }
@@ -274,9 +247,7 @@ fn a_project_rooted_import_resolves_against_the_package_root() {
         ],
     };
     let db = Db::new(workspace);
-    let from = db
-        .file(&root.join("test/Foo.t.sol"))
-        .expect("test file is indexed");
+    let from = db.file(&root.join("test/Foo.t.sol")).expect("test file is indexed");
     let resolved = db.resolve_to_file(from, "src/Foo.sol");
     assert_eq!(
         resolved.map(|file| file.path(&db).clone()),
@@ -285,8 +256,7 @@ fn a_project_rooted_import_resolves_against_the_package_root() {
 }
 
 fn indexed(db: &Db, path: Utf8PathBuf) -> File {
-    db.file(&path)
-        .unwrap_or_else(|| panic!("{path} is indexed"))
+    db.file(&path).unwrap_or_else(|| panic!("{path} is indexed"))
 }
 
 /// One root, one package, files given as text — the smallest workspace that
@@ -324,10 +294,7 @@ fn imports_resolve_through_the_remapping_table() {
 
     let edges = imports(&db, main);
     assert_eq!(edges.resolved, vec![dep]);
-    assert!(
-        edges.unresolved.is_empty(),
-        "every import in the fixture resolves"
-    );
+    assert!(edges.unresolved.is_empty(), "every import in the fixture resolves");
 }
 
 #[test]
@@ -337,9 +304,9 @@ fn importers_invert_the_table() {
     let main = indexed(&db, fixture.join("Main.sol"));
     let dep = indexed(&db, fixture.join("vendor/dep/Dep.sol"));
 
-    let map = import_map(&db);
+    let map = import_map(&db, dep.root(&db));
     assert_eq!(map.of(dep), &[main]);
-    assert_eq!(map.dependents_of([dep]), FxHashSet::from_iter([main]));
+    assert_eq!(dependents_of(&db, dep), &FxHashSet::from_iter([main]));
 }
 
 #[test]
@@ -356,8 +323,7 @@ fn dependents_are_transitive_and_survive_a_cycle() {
     let b = indexed(&db, Utf8PathBuf::from("/tmp/solrepr_deps_cycle/B.sol"));
     let c = indexed(&db, Utf8PathBuf::from("/tmp/solrepr_deps_cycle/C.sol"));
 
-    let map = import_map(&db);
-    assert_eq!(map.dependents_of([c]), FxHashSet::from_iter([a, b]));
+    assert_eq!(dependents_of(&db, c), &FxHashSet::from_iter([a, b]));
 
     // `A` imports `B` and `B` imports `A`: the seed comes back through the cycle
     // instead of the walk failing to terminate.
@@ -370,9 +336,59 @@ fn dependents_are_transitive_and_survive_a_cycle() {
     ));
     let a = indexed(&db, Utf8PathBuf::from("/tmp/solrepr_deps_cycle_two/A.sol"));
     let b = indexed(&db, Utf8PathBuf::from("/tmp/solrepr_deps_cycle_two/B.sol"));
+    assert_eq!(dependents_of(&db, a), &FxHashSet::from_iter([a, b]));
+}
+
+#[test]
+fn dependents_walk_crosses_dependency_roots() {
+    let root = Utf8PathBuf::from("/tmp/solrepr_deps_cross_root");
+    let package = PackageId(NormalizedPath::new(root.clone()));
+    let db = Db::new(WorkspaceWithFiles {
+        ignored_roots: Vec::new(),
+        packages: vec![Package {
+            root: NormalizedPath::new(root.clone()),
+            remappings: Vec::new(),
+        }],
+        roots: vec![
+            RootWithFiles {
+                path: NormalizedPath::new(root.join("src")),
+                package_id: package.clone(),
+                is_dependency: false,
+                files: vec![LoadedFile {
+                    path: NormalizedPath::new(root.join("src/A1.sol")),
+                    text: Some(Rope::from_str("import \"lib/d/D1.sol\";\ncontract A1 {}")),
+                }],
+            },
+            RootWithFiles {
+                path: NormalizedPath::new(root.join("lib/d")),
+                package_id: package.clone(),
+                is_dependency: true,
+                files: vec![LoadedFile {
+                    path: NormalizedPath::new(root.join("lib/d/D1.sol")),
+                    text: Some(Rope::from_str("import \"lib/e/E.sol\";\ncontract D1 {}")),
+                }],
+            },
+            RootWithFiles {
+                path: NormalizedPath::new(root.join("lib/e")),
+                package_id: package,
+                is_dependency: true,
+                files: vec![LoadedFile {
+                    path: NormalizedPath::new(root.join("lib/e/E.sol")),
+                    text: Some(Rope::from_str("contract E {}")),
+                }],
+            },
+        ],
+    });
+    let a1 = indexed(&db, root.join("src/A1.sol"));
+    let d1 = indexed(&db, root.join("lib/d/D1.sol"));
+    let e = indexed(&db, root.join("lib/e/E.sol"));
+
+    assert_eq!(imports(&db, d1).resolved, vec![e]);
+    assert_eq!(imports(&db, a1).resolved, vec![d1]);
     assert_eq!(
-        import_map(&db).dependents_of([a]),
-        FxHashSet::from_iter([a, b])
+        dependents_of(&db, e),
+        &FxHashSet::from_iter([d1, a1]),
+        "E is reached through D1, which lives in another dependency root"
     );
 }
 
@@ -382,20 +398,14 @@ fn closure_names_are_relative_to_the_entry_package() {
     let db = Db::new(load_roots(fixture.clone()));
     let main = indexed(&db, fixture.join("Main.sol"));
 
-    let names = imports_closure(&db, main)
-        .iter()
-        .map(|unit| unit.name.as_ref())
-        .collect::<Vec<_>>();
+    let names = imports_closure(&db, main).iter().map(|unit| unit.name.as_ref()).collect::<Vec<_>>();
     assert_eq!(names, ["Main.sol", "vendor/dep/Dep.sol"]);
 }
 
 #[test]
 fn an_unresolved_import_keeps_its_literal() {
     let root = "/tmp/solrepr_deps_unresolved";
-    let db = Db::new(workspace(
-        root,
-        &[("Main.sol", "import \"./Missing.sol\";\ncontract Main {}")],
-    ));
+    let db = Db::new(workspace(root, &[("Main.sol", "import \"./Missing.sol\";\ncontract Main {}")]));
     let main = indexed(&db, Utf8PathBuf::from(root).join("Main.sol"));
 
     let edges = imports(&db, main);
@@ -408,18 +418,12 @@ fn an_unresolved_import_keeps_its_literal() {
 #[test]
 fn a_file_appearing_resolves_a_previously_unresolved_import() {
     let root = "/tmp/solrepr_deps_appears";
-    let mut db = Db::new(workspace(
-        root,
-        &[("Main.sol", "import \"./Missing.sol\";\ncontract Main {}")],
-    ));
+    let mut db = Db::new(workspace(root, &[("Main.sol", "import \"./Missing.sol\";\ncontract Main {}")]));
     let main = indexed(&db, Utf8PathBuf::from(root).join("Main.sol"));
     assert_eq!(imports(&db, main).unresolved.len(), 1);
 
-    db.open_file(
-        Utf8PathBuf::from(root).join("Missing.sol"),
-        "contract Missing {}".to_string(),
-    )
-    .expect("the path is under a source root");
+    db.open_file(Utf8PathBuf::from(root).join("Missing.sol"), "contract Missing {}".to_string())
+        .expect("the path is under a source root");
 
     let edges = imports(&db, main);
     assert!(edges.unresolved.is_empty());
@@ -434,10 +438,7 @@ fn two_directives_to_one_file_are_one_edge() {
     let db = Db::new(workspace(
         root,
         &[
-            (
-                "A.sol",
-                "import \"./B.sol\";\nimport {B} from \"./B.sol\";\ncontract A {}",
-            ),
+            ("A.sol", "import \"./B.sol\";\nimport {B} from \"./B.sol\";\ncontract A {}"),
             ("B.sol", "contract B {}"),
         ],
     ));
@@ -445,7 +446,7 @@ fn two_directives_to_one_file_are_one_edge() {
     let b = indexed(&db, Utf8PathBuf::from(root).join("B.sol"));
 
     assert_eq!(imports(&db, a).resolved, vec![b]);
-    assert_eq!(import_map(&db).of(b), &[a]);
+    assert_eq!(import_map(&db, b.root(&db)).of(b), &[a]);
 }
 
 /// The reverse index covers workspace roots only, but the forward direction
@@ -486,7 +487,7 @@ fn a_dependency_imports_the_workspace_but_is_not_in_the_index() {
 
     assert_eq!(imports(&db, d).resolved, vec![a]);
     assert!(
-        import_map(&db).of(a).is_empty(),
-        "a dependency root is outside the reverse index"
+        dependents_of(&db, a).is_empty(),
+        "a dependency root is outside the workspace reverse index"
     );
 }

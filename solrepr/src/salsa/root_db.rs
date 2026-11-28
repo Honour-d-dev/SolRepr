@@ -39,7 +39,7 @@ pub trait RootDb: salsa::Database {
     fn is_ignored_path(&self, path: &Utf8Path) -> bool;
     fn imports(&self, file: File) -> &Imports;
     fn imports_closure(&self, file: File) -> &[SourceUnit];
-    fn import_map(&self) -> &ImportMap;
+    fn dependents_of(&self, anchor: File) -> &FxHashSet<File>;
 }
 
 #[salsa::db]
@@ -104,8 +104,8 @@ impl RootDb for Db {
         imports_closure(self, file)
     }
 
-    fn import_map(&self) -> &ImportMap {
-        import_map(self)
+    fn dependents_of(&self, anchor: File) -> &FxHashSet<File> {
+        dependents_of(self, anchor)
     }
 }
 
@@ -152,11 +152,7 @@ pub fn root_def_map_analysis(db: &dyn RootDb, root: SourceRootId) -> Analysis<De
 }
 
 /// The bottom of the domain: a root that has bound no names yet.
-fn root_def_map_analysis_initial(
-    _db: &dyn RootDb,
-    _id: salsa::Id,
-    root: SourceRootId,
-) -> Analysis<DefMap> {
+fn root_def_map_analysis_initial(_db: &dyn RootDb, _id: salsa::Id, root: SourceRootId) -> Analysis<DefMap> {
     Analysis::new(DefMap::empty(root), Arc::from(Vec::new()))
 }
 
@@ -193,7 +189,7 @@ pub fn imports(db: &dyn RootDb, file: File) -> Imports {
 
 /// The inversion of [`imports`] for one root: for each file, its importers.
 #[salsa::tracked(returns(ref))]
-pub fn import_map_of(db: &dyn RootDb, root: SourceRootId) -> ImportMap {
+pub fn import_map(db: &dyn RootDb, root: SourceRootId) -> ImportMap {
     let mut map = ImportMap::default();
     for &file in root.files(db).iter() {
         for &target in &imports(db, file).resolved {
@@ -203,19 +199,35 @@ pub fn import_map_of(db: &dyn RootDb, root: SourceRootId) -> ImportMap {
     map
 }
 
-/// Every local root's inversion, merged.
+/// Every file that transitively imports `anchor`.
 ///
-/// Dependency roots are skipped: a dependency file cannot depend on a file in a non-dep root.
+/// One walk across the per-root inversions. A workspace anchor stays in
+/// workspace roots: a dependency cannot depend on a file in a non-dep root. A
+/// dependency anchor includes dependency roots, because dependency files can
+/// import one another.
 #[salsa::tracked(returns(ref))]
-pub fn import_map(db: &dyn RootDb) -> ImportMap {
-    let mut map = ImportMap::default();
-    for &root in db.source_roots() {
-        if root.is_dependency(db) {
-            continue;
+pub fn dependents_of(db: &dyn RootDb, anchor: File) -> FxHashSet<File> {
+    let include_dependencies = anchor.root(db).is_dependency(db);
+    let maps: Vec<&ImportMap> = db
+        .source_roots()
+        .iter()
+        .copied()
+        .filter(|&root| include_dependencies || !root.is_dependency(db))
+        .map(|root| import_map(db, root))
+        .collect();
+
+    let mut dependents = FxHashSet::default();
+    let mut pending = vec![anchor];
+    while let Some(file) = pending.pop() {
+        for map in &maps {
+            for &importer in map.of(file) {
+                if dependents.insert(importer) {
+                    pending.push(importer);
+                }
+            }
         }
-        map.merge(import_map_of(db, root));
     }
-    map
+    dependents
 }
 
 /// `entry` and everything it reaches, named relative to the entry's package

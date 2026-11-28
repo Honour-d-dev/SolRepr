@@ -1,9 +1,8 @@
 use crate::capabilities::completion::completion;
 use crate::capabilities::definition::definition;
-use crate::capabilities::diagnostics::{
-    DiagnosedFile, DiagnosticRequest, DiagnosticResult, DiagnosticsWorker,
-};
+use crate::capabilities::diagnostics::{DiagnosedFile, DiagnosticRequest, DiagnosticResult, DiagnosticsWorker};
 use crate::capabilities::hover::hover;
+use crate::capabilities::references::references;
 use crate::capabilities::rename::{prepare_rename, rename};
 use crate::capabilities::view_ast::{ViewAstRequest, view_ast};
 use crate::capabilities::view_hir::{ViewHirRequest, view_hir};
@@ -21,20 +20,18 @@ use crate::workspace::{LoadedFile, discover_workspaces, workspace_roots};
 use anyhow::Context;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidChangeWatchedFiles, DidChangeWorkspaceFolders, DidCloseTextDocument,
-    DidOpenTextDocument, Exit, Notification as LspNotification, PublishDiagnostics,
+    DidChangeTextDocument, DidChangeWatchedFiles, DidChangeWorkspaceFolders, DidCloseTextDocument, DidOpenTextDocument, Exit,
+    Notification as LspNotification, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion as CompletionRequest, GotoDefinition, HoverRequest, PrepareRenameRequest, Rename,
-    Request as LspRequest, Shutdown,
+    Completion as CompletionRequest, GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as LspRequest,
+    Shutdown,
 };
 use lsp_types::{
-    CompletionOptions, Diagnostic as LspDiagnostic, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, HoverProviderCapability, InitializeParams, InitializeResult, OneOf,
-    PublishDiagnosticsParams, RenameOptions, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, WorkspaceFolder, WorkspaceFoldersServerCapabilities,
-    WorkspaceServerCapabilities,
+    CompletionOptions, Diagnostic as LspDiagnostic, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, HoverProviderCapability, InitializeParams,
+    InitializeResult, OneOf, PublishDiagnosticsParams, RenameOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+    WorkspaceFolder, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
 };
 use triomphe::Arc;
 
@@ -50,15 +47,11 @@ pub struct LspServer {
 }
 
 impl LspServer {
-    pub fn new(
-        connection: Connection,
-    ) -> anyhow::Result<(Self, crossbeam_channel::Receiver<Message>)> {
-        let (initialize_id, initialize_params) = connection
-            .initialize_start()
-            .context("failed to start LSP initialize handshake")?;
+    pub fn new(connection: Connection) -> anyhow::Result<(Self, crossbeam_channel::Receiver<Message>)> {
+        let (initialize_id, initialize_params) = connection.initialize_start().context("failed to start LSP initialize handshake")?;
 
-        let params: InitializeParams = serde_json::from_value(initialize_params)
-            .context("failed to deserialize InitializeParams from client")?;
+        let params: InitializeParams =
+            serde_json::from_value(initialize_params).context("failed to deserialize InitializeParams from client")?;
 
         // Block on workspace discovery; file contents are read when the
         // database is built, after the handshake is answered.
@@ -66,29 +59,20 @@ impl LspServer {
         let workspace = discover_workspaces(&roots);
         log_info("Workspace discovered");
 
-        let ignored_roots: Vec<String> = workspace
-            .ignored_roots
-            .iter()
-            .map(|root| to_url(root).to_string())
-            .collect();
+        let ignored_roots: Vec<String> = workspace.ignored_roots.iter().map(|root| to_url(root).to_string()).collect();
 
         let initialize_result = InitializeResult {
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::INCREMENTAL,
-                )),
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::INCREMENTAL)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![
-                        ".".to_string(),
-                        "{".to_string(),
-                        ",".to_string(),
-                    ]),
+                    trigger_characters: Some(vec![".".to_string(), "{".to_string(), ",".to_string()]),
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
@@ -119,8 +103,7 @@ impl LspServer {
 
         // This is the first moment the spec allows a server-to-client request
         // The client owns the watch; this only tells it what to watch
-        watch::register_watchers(&connection.sender, &params, &roots)
-            .context("failed to register watched files")?;
+        watch::register_watchers(&connection.sender, &params, &roots).context("failed to register watched files")?;
         let watch_folders = watch::registers_per_folder(&params);
 
         let db = Db::new(workspace);
@@ -195,6 +178,7 @@ impl LspServer {
         let result = match request.method.as_str() {
             HoverRequest::METHOD => hover(&self.db, request),
             GotoDefinition::METHOD => definition(&self.db, request),
+            References::METHOD => references(&self.db, request),
             PrepareRenameRequest::METHOD => prepare_rename(&self.db, request),
             Rename::METHOD => rename(&self.db, request),
             CompletionRequest::METHOD => completion(&self.db, request),
@@ -212,10 +196,7 @@ impl LspServer {
             DidCloseTextDocument::METHOD => self.did_close(&notification),
             DidChangeWatchedFiles::METHOD => self.did_change_watched_files(&notification),
             DidChangeWorkspaceFolders::METHOD => self.did_change_workspace_folders(&notification),
-            _ => log_info(format!(
-                "Ignoring unsupported notification: {}",
-                notification.method
-            )),
+            _ => log_info(format!("Ignoring unsupported notification: {}", notification.method)),
         }
     }
 
@@ -239,11 +220,7 @@ impl LspServer {
             && params.text_document.version > current
         {
             self.live_docs.touch(file, params.text_document.version);
-            if self
-                .db
-                .apply_changes(path, params.content_changes)
-                .is_some()
-            {
+            if self.db.apply_changes(path, params.content_changes).is_some() {
                 self.run_diagnostics();
             }
         }
@@ -274,8 +251,7 @@ impl LspServer {
     /// operation — and an open document is never re-read, because the client
     /// owns its text.
     fn did_change_watched_files(&mut self, notification: &Notification) {
-        let Some(params) = self.notification_params::<DidChangeWatchedFilesParams>(notification)
-        else {
+        let Some(params) = self.notification_params::<DidChangeWatchedFilesParams>(notification) else {
             return;
         };
 
@@ -311,9 +287,7 @@ impl LspServer {
     /// The watchers are per folder, so the same delta registers and revokes
     /// them.
     fn did_change_workspace_folders(&mut self, notification: &Notification) {
-        let Some(params) =
-            self.notification_params::<DidChangeWorkspaceFoldersParams>(notification)
-        else {
+        let Some(params) = self.notification_params::<DidChangeWorkspaceFoldersParams>(notification) else {
             return;
         };
 
@@ -382,17 +356,11 @@ impl LspServer {
 
     /// A notification's params, or `None` when they do not fit. A notification
     /// has no reply, so a malformed one is only logged.
-    fn notification_params<T: serde::de::DeserializeOwned>(
-        &self,
-        notification: &Notification,
-    ) -> Option<T> {
+    fn notification_params<T: serde::de::DeserializeOwned>(&self, notification: &Notification) -> Option<T> {
         match serde_json::from_value(notification.params.clone()) {
             Ok(params) => Some(params),
             Err(error) => {
-                log_info(format!(
-                    "ignoring malformed {}: {error}",
-                    notification.method
-                ));
+                log_info(format!("ignoring malformed {}: {error}", notification.method));
                 None
             }
         }
@@ -433,21 +401,14 @@ impl LspServer {
     fn handle_diagnostic_result(&mut self, result: DiagnosticResult) {
         // Closed, evicted, or edited again in the gap after the worker's own
         // coalesce check: the newer edit already queued its own pass.
-        if !self.live_docs.is_live(&result.file)
-            || self.live_docs.version(&result.file) != Some(result.version)
-        {
+        if !self.live_docs.is_live(&result.file) || self.live_docs.version(&result.file) != Some(result.version) {
             return;
         }
 
         self.publish_diagnostics(result.file, Some(result.version), result.diagnostics);
     }
 
-    fn publish_diagnostics(
-        &self,
-        file: File,
-        version: Option<i32>,
-        diagnostics: Arc<[LspDiagnostic]>,
-    ) {
+    fn publish_diagnostics(&self, file: File, version: Option<i32>, diagnostics: Arc<[LspDiagnostic]>) {
         self.send(Message::Notification(Notification::new(
             PublishDiagnostics::METHOD.to_string(),
             PublishDiagnosticsParams {
@@ -479,10 +440,7 @@ impl LspServer {
     /// `shutdown` is the client's warning that `exit` comes next.
     fn shutdown(&mut self, id: RequestId) {
         self.shutdown_requested = true;
-        self.send(Message::Response(Response::new_ok(
-            id,
-            serde_json::Value::Null,
-        )));
+        self.send(Message::Response(Response::new_ok(id, serde_json::Value::Null)));
     }
 
     /// After `shutdown` the only message left is `exit`; a late request is a
@@ -500,8 +458,5 @@ impl LspServer {
 /// The `file:` folders among `folders`, in order. A folder the server cannot
 /// read is skipped — it has no files to discover.
 fn folder_paths(folders: Vec<WorkspaceFolder>) -> Vec<NormalizedPath> {
-    folders
-        .iter()
-        .filter_map(|folder| to_utf8path(&folder.uri).ok())
-        .collect()
+    folders.iter().filter_map(|folder| to_utf8path(&folder.uri).ok()).collect()
 }
