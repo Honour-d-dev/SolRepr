@@ -4,7 +4,8 @@ use std::ops::Deref;
 use std::path::Path;
 
 use anyhow::Context;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
+use lsp_types::Url;
 
 /// A filesystem path normalized by [`normalize_path`].
 ///
@@ -30,6 +31,20 @@ impl NormalizedPath {
 
     pub fn into_inner(self) -> Utf8PathBuf {
         self.0
+    }
+
+    pub fn to_url(&self) -> Url {
+        Url::from_file_path(self.as_path()).expect("failed to convert path to url")
+    }
+}
+
+impl TryFrom<&Url> for NormalizedPath {
+    type Error = anyhow::Error;
+
+    fn try_from(uri: &Url) -> Result<Self, Self::Error> {
+        let path = uri.to_file_path().map_err(|_| anyhow::anyhow!("failed to convert URI to path"))?;
+        let path = Utf8PathBuf::from_path_buf(path).map_err(|_| anyhow::anyhow!("path is not valid UTF-8"))?;
+        Ok(Self::new(path))
     }
 }
 
@@ -119,24 +134,56 @@ impl From<NormalizedPath> for Utf8PathBuf {
     }
 }
 
-pub(crate) fn canonicalize_path(path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
+fn canonicalize(path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
     let path = dunce::canonicalize(path).context("failed to canonicalize path")?;
     Utf8PathBuf::from_path_buf(path).map_err(|path| anyhow::anyhow!("path is not valid UTF-8: {path:?}"))
 }
 
+fn lexicalize(path: &Utf8Path) -> Utf8PathBuf {
+    let mut out = Utf8PathBuf::new();
+    for component in path.components() {
+        match component {
+            Utf8Component::CurDir => {}
+            Utf8Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Utf8Component::Normal(_))) {
+                    out.pop();
+                } else if !matches!(out.components().next_back(), Some(Utf8Component::RootDir)) {
+                    out.push(component.as_str());
+                }
+            }
+            other => out.push(other.as_str()),
+        }
+    }
+    if out.as_str().is_empty() && !path.as_str().is_empty() {
+        out.push(".");
+    }
+    out
+}
+
 pub(crate) fn normalize_path(path: &Utf8Path) -> Utf8PathBuf {
-    if let Ok(path) = canonicalize_path(path) {
+    if let Ok(path) = canonicalize(path) {
         return path;
     }
 
     // Canonicalizing can fail when the file has not been saved to disk.
-    let Some(parent) = path.parent() else {
-        return path.to_path_buf();
-    };
-    let Ok(normalized_parent) = canonicalize_path(parent) else {
-        return path.to_path_buf();
-    };
-    normalized_parent.join(path.file_name().unwrap_or_default())
+    let lexical = lexicalize(path);
+    if let Ok(path) = canonicalize(&lexical) {
+        return path;
+    }
+
+    let mut tail = Vec::new();
+    let mut ancestor = lexical.as_path();
+    while let (Some(parent), Some(name)) = (ancestor.parent(), ancestor.file_name()) {
+        tail.push(name);
+        if let Ok(mut canonical) = canonicalize(parent) {
+            for component in tail.into_iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+        ancestor = parent;
+    }
+    lexical
 }
 
 #[cfg(test)]
@@ -150,6 +197,30 @@ mod tests {
         assert!(
             !(normalized.as_str().contains('/') && normalized.as_str().contains('\\')),
             "normalizing a missing path mixed separators: {normalized}"
+        );
+    }
+
+    #[test]
+    fn a_nested_missing_path_normalizes_its_existing_ancestor() {
+        let temp_dir = Utf8PathBuf::from_path_buf(std::env::temp_dir()).expect("temp dir is UTF-8");
+        let missing = format!("solrepr_missing_{}", std::process::id());
+        let normalized = NormalizedPath::new(temp_dir.join(format!("{missing}/lib/dep/D.sol")));
+
+        assert!(normalized.starts_with(NormalizedPath::new(temp_dir.join(&missing))));
+        assert!(
+            !(normalized.as_str().contains('/') && normalized.as_str().contains('\\')),
+            "normalizing a missing path mixed separators: {normalized}"
+        );
+    }
+
+    #[test]
+    fn a_missing_path_collapses_parent_segments() {
+        let temp_dir = Utf8PathBuf::from_path_buf(std::env::temp_dir()).expect("temp dir is UTF-8");
+        let missing = format!("solrepr_missing_{}", std::process::id());
+
+        assert_eq!(
+            NormalizedPath::new(temp_dir.join(format!("{missing}/a/b/../c.sol"))),
+            NormalizedPath::new(temp_dir.join(format!("{missing}/a/c.sol")))
         );
     }
 }

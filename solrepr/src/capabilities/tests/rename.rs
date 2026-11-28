@@ -16,7 +16,7 @@ use crate::ir::def_map::DefId;
 use crate::paths::NormalizedPath;
 use crate::salsa::root_db::RootDb;
 use crate::salsa::{Db, HirDb};
-use crate::utilities::{byte_to_position, to_url};
+use crate::utilities::byte_to_position;
 use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles};
 
 fn root() -> Utf8PathBuf {
@@ -235,7 +235,7 @@ fn keywords_builtins_and_paths_are_not_renameable() {
             "import \"./B.sol\";\ncontract C { function f() external { msg.sender; this; uint256 x = 1; } }",
         ),
     ]);
-    let main = db.file(&path("Main.sol")).unwrap();
+    let main = db.file(path("Main.sol")).unwrap();
     let f = find_function(&db, main, "f");
     let DefId::Function(id) = f else { unreachable!() };
     let map = db.body_source_map(BodyOwnerId::Function(id));
@@ -289,7 +289,7 @@ fn keywords_builtins_and_paths_are_not_renameable() {
             method: PrepareRenameRequest::METHOD.to_string(),
             params: serde_json::to_value(TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier {
-                    uri: to_url(main.path(&db)),
+                    uri: main.path(&db).to_url(),
                 },
                 position: byte_to_position(&db.rope(main), path.start as usize),
             })
@@ -314,7 +314,7 @@ fn prepare_rename_returns_the_identifier_range_and_its_spelling() {
             method: PrepareRenameRequest::METHOD.to_string(),
             params: serde_json::to_value(TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier {
-                    uri: to_url(file.path(&db)),
+                    uri: file.path(&db).to_url(),
                 },
                 position,
             })
@@ -345,7 +345,7 @@ fn prepare_rename_is_null_where_nothing_is_renameable() {
             method: PrepareRenameRequest::METHOD.to_string(),
             params: serde_json::to_value(TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier {
-                    uri: to_url(file.path(&db)),
+                    uri: file.path(&db).to_url(),
                 },
                 position,
             })
@@ -403,8 +403,8 @@ fn a_state_variable_renames_its_uses_across_files() {
             "import \"./A.sol\";\ncontract D { function f(C c) external { uint256 v = c.state(); } }",
         ),
     ]);
-    let a = db.file(&path("A.sol")).unwrap();
-    let b = db.file(&path("B.sol")).unwrap();
+    let a = db.file(path("A.sol")).unwrap();
+    let b = db.file(path("B.sol")).unwrap();
     let var = defs_of(&db, a, |def| matches!(def, DefId::Var(_)))
         .into_iter()
         .next()
@@ -476,8 +476,8 @@ fn a_contract_renames_every_spelling_across_files() {
             "import {Base} from \"./Base.sol\";\ncontract D is Base { function f() external { new Base(); } }",
         ),
     ]);
-    let base_file = db.file(&path("Base.sol")).unwrap();
-    let main = db.file(&path("Main.sol")).unwrap();
+    let base_file = db.file(path("Base.sol")).unwrap();
+    let main = db.file(path("Main.sol")).unwrap();
     let base = find_contract(&db, base_file, "Base");
     let range = def_name_range(&db, base_file, base).expect("the contract has a name");
 
@@ -497,8 +497,8 @@ fn a_struct_field_renames_its_member_uses() {
             "import \"./S.sol\";\ncontract C { function f(S s) external { s.a = 1; } }",
         ),
     ]);
-    let s_file = db.file(&path("S.sol")).unwrap();
-    let main = db.file(&path("Main.sol")).unwrap();
+    let s_file = db.file(path("S.sol")).unwrap();
+    let main = db.file(path("Main.sol")).unwrap();
     let structure = defs_of(&db, s_file, |def| matches!(def, DefId::Struct(_)))
         .into_iter()
         .next()
@@ -529,7 +529,7 @@ fn an_import_alias_is_not_mistaken_for_the_imported_name() {
             "import {A as B} from \"./A.sol\";\ncontract D { function f() external { new B(); } }",
         ),
     ]);
-    let a_file = db.file(&path("A.sol")).unwrap();
+    let a_file = db.file(path("A.sol")).unwrap();
     let a = find_contract(&db, a_file, "A");
     let range = def_name_range(&db, a_file, a).expect("the contract has a name");
 
@@ -574,7 +574,7 @@ fn a_dependency_root_is_never_edited() {
             },
         ],
     });
-    let dep_file = db.file(&root.join("lib/dep/D.sol")).unwrap();
+    let dep_file = db.file(root.join("lib/dep/D.sol")).unwrap();
     let dep = find_contract(&db, dep_file, "Dep");
     let range = def_name_range(&db, dep_file, dep).expect("the contract has a name");
 
@@ -592,7 +592,7 @@ fn rename_request(db: &Db, file: crate::salsa::File, position: Position, new_nam
         params: serde_json::to_value(RenameParams {
             text_document_position: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier {
-                    uri: to_url(file.path(db)),
+                    uri: file.path(db).to_url(),
                 },
                 position,
             },
@@ -688,7 +688,7 @@ fn a_namespace_alias_renames_its_spelling() {
             "import \"./B.sol\" as NS;\ncontract D { function f() external { new NS.B(); } }",
         ),
     ]);
-    let main = db.file(&path("Main.sol")).unwrap();
+    let main = db.file(path("Main.sol")).unwrap();
     let import = defs_of(&db, main, |def| matches!(def, DefId::Import(_)))
         .into_iter()
         .next()
@@ -714,8 +714,8 @@ fn two_importers_aliasing_one_file_stay_independent() {
             "import \"./B.sol\" as NS;\ncontract T { function g() external { new NS.B(); } }",
         ),
     ]);
-    let one = db.file(&path("One.sol")).unwrap();
-    let two = db.file(&path("Two.sol")).unwrap();
+    let one = db.file(path("One.sol")).unwrap();
+    let two = db.file(path("Two.sol")).unwrap();
     let import = defs_of(&db, one, |def| matches!(def, DefId::Import(_)))
         .into_iter()
         .next()
@@ -744,8 +744,8 @@ fn a_named_alias_is_file_local() {
             "import {A as B} from \"./A.sol\";\ncontract T { function g() external { new B(); } }",
         ),
     ]);
-    let one = db.file(&path("One.sol")).unwrap();
-    let two = db.file(&path("Two.sol")).unwrap();
+    let one = db.file(path("One.sol")).unwrap();
+    let two = db.file(path("Two.sol")).unwrap();
     let import = defs_of(&db, one, |def| matches!(def, DefId::Import(_)))
         .into_iter()
         .next()
@@ -795,7 +795,7 @@ fn a_dependency_declaration_is_not_renamed_from_the_workspace() {
             },
         ],
     });
-    let main = db.file(&root.join("src/Main.sol")).unwrap();
+    let main = db.file(root.join("src/Main.sol")).unwrap();
     let import = defs_of(&db, main, |def| matches!(def, DefId::Import(_)))
         .into_iter()
         .next()
@@ -844,7 +844,7 @@ fn a_namespace_alias_to_a_dependency_file_is_renameable() {
             },
         ],
     });
-    let main = db.file(&root.join("src/Main.sol")).unwrap();
+    let main = db.file(root.join("src/Main.sol")).unwrap();
     let import = defs_of(&db, main, |def| matches!(def, DefId::Import(_)))
         .into_iter()
         .next()

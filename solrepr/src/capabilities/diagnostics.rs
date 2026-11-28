@@ -9,11 +9,9 @@ use triomphe::Arc;
 
 use crate::ast::NodeRange;
 use crate::ast::kinds::NodeKind;
-use crate::hir::diagnostics::{
-    Diagnostic, DiagnosticCode, Severity, collect_diagnostics, normalize_diagnostics,
-};
+use crate::hir::diagnostics::{Diagnostic, DiagnosticCode, Severity, collect_diagnostics, normalize_diagnostics};
 use crate::salsa::{DbSnapshot, File, HirDb};
-use crate::utilities::{byte_to_position, to_url};
+use crate::utilities::byte_to_position;
 use crate::worker::{Job, coalesce, debounce};
 
 /// A pass answers an edit, so it is worth waiting out a burst of keystrokes
@@ -45,7 +43,7 @@ pub(crate) struct DiagnosticResult {
 /// Converts diagnostics off the main loop, streaming one result per document.
 ///
 /// `published` is what the client was last sent, per document. Without it every
-/// pass republishes every open document, and one keystroke 
+/// pass republishes every open document, and one keystroke
 /// costs a conversion, a copy and a notification per tab.
 #[derive(Default)]
 pub(crate) struct DiagnosticsWorker {
@@ -61,11 +59,9 @@ struct Published {
 
 impl DiagnosticsWorker {
     fn unchanged(&self, file: File, epoch: u64, version: i32, diagnostics: &Arc<[LspDiagnostic]>) -> bool {
-        self.published.get(&file).is_some_and(|published| {
-            published.epoch == epoch
-                && published.version == version
-                && same(&published.diagnostics, diagnostics)
-        })
+        self.published
+            .get(&file)
+            .is_some_and(|published| published.epoch == epoch && published.version == version && same(&published.diagnostics, diagnostics))
     }
 
     /// Drops entries for documents that left the diagnosed set since the last
@@ -109,7 +105,8 @@ impl DiagnosticsWorker {
                     diagnostics: diagnostics.clone(),
                 },
             );
-            if tx.send(DiagnosticResult {
+            if tx
+                .send(DiagnosticResult {
                     file: diagnosed.file,
                     version: diagnosed.version,
                     diagnostics,
@@ -148,13 +145,11 @@ impl Job for DiagnosticsWorker {
     }
 }
 
-
 fn same(a: &Arc<[LspDiagnostic]>, b: &Arc<[LspDiagnostic]>) -> bool {
     Arc::ptr_eq(a, b) || a == b
 }
 
 pub(crate) const MAX_PARSE_DIAGNOSTICS: usize = 100;
-
 
 #[salsa::tracked]
 pub fn lsp_diagnostics(db: &dyn HirDb, file: File) -> Arc<[LspDiagnostic]> {
@@ -162,13 +157,11 @@ pub fn lsp_diagnostics(db: &dyn HirDb, file: File) -> Arc<[LspDiagnostic]> {
     let diagnostics = diagnostics(db, file);
     let mut converted = Vec::with_capacity(diagnostics.len());
     for diagnostic in diagnostics.iter() {
-        
         db.unwind_if_revision_cancelled();
         converted.push(to_lsp_diagnostic(db, &rope, diagnostic));
     }
     Arc::from(converted)
 }
-
 
 /// Every diagnostic for a file: parse errors plus semantic errors.
 pub(crate) fn diagnostics(db: &dyn HirDb, file: File) -> Vec<Diagnostic> {
@@ -177,7 +170,6 @@ pub(crate) fn diagnostics(db: &dyn HirDb, file: File) -> Vec<Diagnostic> {
     normalize_diagnostics(&mut diagnostics);
     diagnostics
 }
-
 
 /// Parse errors for one file.
 fn parse_errors(db: &dyn HirDb, file: File) -> Vec<Diagnostic> {
@@ -195,7 +187,6 @@ fn parse_errors(db: &dyn HirDb, file: File) -> Vec<Diagnostic> {
     }
     diagnostics
 }
-
 
 pub(crate) fn collect_parse_errors(node: Node<'_>, source: &str, diagnostics: &mut Vec<Diagnostic>) {
     if node.kind_id() == NodeKind::INCOMPLETE_MEMBER_EXPRESSION {
@@ -239,14 +230,16 @@ pub(crate) fn collect_parse_errors(node: Node<'_>, source: &str, diagnostics: &m
     }
 }
 
-
 fn to_lsp_diagnostic(db: &dyn HirDb, rope: &Rope, diagnostic: &Diagnostic) -> LspDiagnostic {
     let related_information = if diagnostic.related.is_empty() {
         None
     } else {
         Some(
-            diagnostic.related.iter().map(|r| {
-                    let uri = to_url(r.file.path(db).as_path());
+            diagnostic
+                .related
+                .iter()
+                .map(|r| {
+                    let uri = r.file.path(db).to_url();
                     let related_rope = r.file.text(db);
                     lsp_types::DiagnosticRelatedInformation {
                         location: lsp_types::Location {
@@ -282,7 +275,3 @@ fn to_lsp_diagnostic(db: &dyn HirDb, rope: &Rope, diagnostic: &Diagnostic) -> Ls
         data: None,
     }
 }
-
-
-
-

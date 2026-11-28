@@ -83,7 +83,7 @@ fn adding_a_dependency_root_clears_an_unresolved_import() {
     tree.write("src/A.sol", "import \"../lib/dep/Dep.sol\";\ncontract A {}\n");
 
     let mut db = Db::new(tree.discover());
-    let a = db.file(&tree.path("src/A.sol")).expect("A is indexed");
+    let a = db.file(tree.path("src/A.sol")).expect("A is indexed");
     assert!(unresolved(&db, a), "the dependency does not exist yet");
 
     with_dependency(&tree);
@@ -112,8 +112,8 @@ fn removing_a_root_reports_the_import_as_unresolved() {
     with_dependency(&tree);
 
     let mut db = Db::new(tree.discover());
-    let a = db.file(&tree.path("src/A.sol")).expect("A is indexed");
-    let dep = db.file(&tree.path("lib/dep/Dep.sol")).expect("Dep is indexed");
+    let a = db.file(tree.path("src/A.sol")).expect("A is indexed");
+    let dep = db.file(tree.path("lib/dep/Dep.sol")).expect("Dep is indexed");
     assert!(!unresolved(&db, a));
 
     fs::remove_dir_all(tree.root.join("lib/dep")).expect("remove the dependency");
@@ -121,7 +121,7 @@ fn removing_a_root_reports_the_import_as_unresolved() {
 
     assert_eq!(diff.removed, FxHashSet::from_iter([tree.path("lib/dep")]));
     assert!(unresolved(&db, a));
-    assert!(db.file(&tree.path("lib/dep/Dep.sol")).is_none());
+    assert!(db.file(tree.path("lib/dep/Dep.sol")).is_none());
 
     // The handle outlives the index, so a queued diagnostics request holding it
     // still resolves its root.
@@ -214,7 +214,7 @@ fn a_nested_root_takes_its_files_from_the_surviving_parent() {
         "/proj",
         &[("/proj/A.sol", "contract A {}"), ("/proj/lib/dep/Dep.sol", "contract Dep {}")],
     ));
-    let dep = db.file(&Utf8PathBuf::from("/proj/lib/dep/Dep.sol")).expect("Dep is indexed");
+    let dep = db.file(Utf8PathBuf::from("/proj/lib/dep/Dep.sol")).expect("Dep is indexed");
     let parent = db.file_source_root(dep);
     assert!(parent.files(&db).contains(&dep), "the parent owns it to begin with");
 
@@ -291,7 +291,7 @@ fn a_file_created_on_disk_clears_an_unresolved_import() {
     tree.write("src/A.sol", "import \"./B.sol\";\ncontract A {}\n");
 
     let mut db = Db::new(tree.discover());
-    let a = db.file(&tree.path("src/A.sol")).expect("A is indexed");
+    let a = db.file(tree.path("src/A.sol")).expect("A is indexed");
     assert!(unresolved(&db, a), "B does not exist yet");
 
     tree.write("src/B.sol", "contract B {}\n");
@@ -299,7 +299,7 @@ fn a_file_created_on_disk_clears_an_unresolved_import() {
         panic!("the new file is indexed");
     };
 
-    assert_eq!(db.file(&tree.path("src/B.sol")), Some(b));
+    assert_eq!(db.file(tree.path("src/B.sol")), Some(b));
     assert!(!unresolved(&db, a), "the import resolves");
     assert_eq!(
         db.apply_file_change(&tree.path("src/B.sol")),
@@ -324,8 +324,8 @@ fn a_file_deleted_on_disk_reports_the_import_as_unresolved() {
     tree.write("src/B.sol", "contract B {}\n");
 
     let mut db = Db::new(tree.discover());
-    let a = db.file(&tree.path("src/A.sol")).expect("A is indexed");
-    let b = db.file(&tree.path("src/B.sol")).expect("B is indexed");
+    let a = db.file(tree.path("src/A.sol")).expect("A is indexed");
+    let b = db.file(tree.path("src/B.sol")).expect("B is indexed");
     assert!(!unresolved(&db, a));
 
     fs::remove_file(tree.path("src/B.sol")).expect("remove B");
@@ -334,7 +334,7 @@ fn a_file_deleted_on_disk_reports_the_import_as_unresolved() {
         ChangeEvent::Removed(b),
         "the vanished path is retired"
     );
-    assert!(db.file(&tree.path("src/B.sol")).is_none());
+    assert!(db.file(tree.path("src/B.sol")).is_none());
     assert_eq!(
         db.file_source_root(b).root(&db).as_path(),
         tree.path("src").as_path(),

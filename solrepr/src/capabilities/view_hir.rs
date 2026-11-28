@@ -14,8 +14,9 @@ use crate::hir::exprs::{Expr, ExprId, Literal};
 use crate::hir::syntax_store::{SourceMap, SyntaxStore};
 use crate::ir::def_map::DefId;
 use crate::map_def_id;
+use crate::paths::NormalizedPath;
 use crate::salsa::{Db, File, HirDb, RootDb};
-use crate::utilities::{log_info, to_utf8path};
+use crate::utilities::log_info;
 
 /// Custom LSP request: `solidity/viewHir`
 ///
@@ -31,15 +32,11 @@ use crate::utilities::{log_info, to_utf8path};
 /// state variable initializers, struct fields, contract bases, etc.
 pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
     let params: ViewHirParams = serde_json::from_value(request.params)?;
-    let path = to_utf8path(&params.text_document.uri)?;
+    let path = NormalizedPath::try_from(&params.text_document.uri)?;
     log_info(format!("viewHir request for {path}"));
 
-    let (file, start_off) = db
-        .convert(&path, params.start)
-        .context("document is not loaded")?;
-    let (_, end_off) = db
-        .convert(&path, params.end)
-        .context("document is not loaded")?;
+    let (file, start_off) = db.convert(&path, params.start).context("document is not loaded")?;
+    let (_, end_off) = db.convert(&path, params.end).context("document is not loaded")?;
     let selection = NodeRange {
         start: start_off,
         end: end_off,
@@ -52,13 +49,7 @@ pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
     let ast = db.ast(file);
     let ast_id_map = db.ast_id_map(file);
     let mut containers = Vec::new();
-    collect_containers(
-        &ast_id_map,
-        file,
-        ast.root().node(),
-        selection,
-        &mut containers,
-    );
+    collect_containers(&ast_id_map, file, ast.root().node(), selection, &mut containers);
 
     let mut out = String::new();
     let mut found_any = false;
@@ -81,12 +72,7 @@ pub fn view_hir(db: &Db, request: Request) -> anyhow::Result<Response> {
 /// Dump the expressions the selection encloses in one container's store.
 /// A function's or modifier's body store extends its header, so it is the only
 /// store either owns.
-fn process_container(
-    db: &Db,
-    container: &DefId,
-    selection: NodeRange,
-    out: &mut String,
-) -> bool {
+fn process_container(db: &Db, container: &DefId, selection: NodeRange, out: &mut String) -> bool {
     let mut found = false;
     macro_rules! process_store {
         ($store:expr, $map:expr) => {
@@ -105,17 +91,11 @@ fn process_container(
     match container {
         DefId::Function(id) => {
             let body = db.body_map(BodyOwnerId::Function(*id));
-            process_store!(
-                &body.syntax_store,
-                db.body_source_map(BodyOwnerId::Function(*id))
-            );
+            process_store!(&body.syntax_store, db.body_source_map(BodyOwnerId::Function(*id)));
         }
         DefId::Modifier(id) => {
             let body = db.body_map(BodyOwnerId::Modifier(*id));
-            process_store!(
-                &body.syntax_store,
-                db.body_source_map(BodyOwnerId::Modifier(*id))
-            );
+            process_store!(&body.syntax_store, db.body_source_map(BodyOwnerId::Modifier(*id)));
         }
         DefId::Var(id) => {
             let data = db.var_data(*id);
@@ -195,13 +175,7 @@ pub struct ViewHirParams {
 /// prunes non-overlapping subtrees, so it costs the selection's size rather
 /// than the file's. Overlap — not enclosure — is the test: a selection inside
 /// a body must still reach the function that owns it.
-fn collect_containers(
-    ast_id_map: &AstIdMap,
-    file: File,
-    node: Node,
-    selection: NodeRange,
-    out: &mut Vec<DefId>,
-) {
+fn collect_containers(ast_id_map: &AstIdMap, file: File, node: Node, selection: NodeRange, out: &mut Vec<DefId>) {
     if !ranges_overlap(&NodeRange::from(&node), &selection) {
         return;
     }
@@ -235,29 +209,17 @@ fn collect_containers(
 
 /// Build a map from `ExprId` to its source `NodeRange`.
 fn build_expr_ranges(map: &SourceMap) -> HashMap<ExprId, NodeRange> {
-    map
-        .expr_ranges
-        .iter()
-        .map(|(id, range)| (id, *range))
-        .collect()
+    map.expr_ranges.iter().map(|(id, range)| (id, *range)).collect()
 }
 
 // ── Tree printing ────────────────────────────────────────────────────
 
 /// Recursively print an `Expr` and its children as an indented tree,
 /// mirroring `print_named_tree`'s style.
-fn print_expr_tree(
-    id: ExprId,
-    store: &SyntaxStore,
-    ranges: &HashMap<ExprId, NodeRange>,
-    indent: usize,
-    out: &mut String,
-) {
+fn print_expr_tree(id: ExprId, store: &SyntaxStore, ranges: &HashMap<ExprId, NodeRange>, indent: usize, out: &mut String) {
     let expr = &store.exprs[id];
     let pad = "  ".repeat(indent);
-    let loc = ranges
-        .get(&id)
-        .map_or(String::new(), |r| format!("  @{:?}..{:?}", r.start, r.end));
+    let loc = ranges.get(&id).map_or(String::new(), |r| format!("  @{:?}..{:?}", r.start, r.end));
 
     match expr {
         Expr::Ident(name) => {
@@ -395,11 +357,7 @@ fn print_expr_tree(
 /// Find the largest expressions fully enclosed by the selection. An expression
 /// is a "root" if it is enclosed and no other enclosed expression strictly
 /// contains it.
-fn find_root_exprs(
-    store: &SyntaxStore,
-    ranges: &HashMap<ExprId, NodeRange>,
-    selection: NodeRange,
-) -> Vec<ExprId> {
+fn find_root_exprs(store: &SyntaxStore, ranges: &HashMap<ExprId, NodeRange>, selection: NodeRange) -> Vec<ExprId> {
     // Collect (id, range) for all expressions fully inside the selection.
     let enclosed: Vec<(ExprId, NodeRange)> = store
         .exprs

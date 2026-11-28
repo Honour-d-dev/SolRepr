@@ -59,7 +59,7 @@ fn file_outside_every_source_root_is_not_indexed() {
 fn remappings_only_workspace_resolves_vendored_imports() {
     let fixture = fixture_path("fixtures/workspaces/foundry/remappings/vendor");
     let db = Db::new(load_roots(fixture.clone()));
-    let main = db.file(&fixture.join("Main.sol")).expect("the workspace indexes Main.sol");
+    let main = db.file(fixture.join("Main.sol")).expect("the workspace indexes Main.sol");
     let dep = db
         .resolve_to_file(main, "dep/Dep.sol")
         .expect("dep/ resolves through remappings.txt");
@@ -73,7 +73,7 @@ fn remappings_only_workspace_resolves_vendored_imports() {
 fn namespace_import_qualifies_type_references() {
     let root = fixture_path("fixtures/workspaces/namespaces");
     let db = Db::new(load_roots(root.clone()));
-    let user = db.file(&root.join("src/User.sol")).expect("the workspace indexes User.sol");
+    let user = db.file(root.join("src/User.sol")).expect("the workspace indexes User.sol");
 
     let diagnostics = crate::hir::diagnostics::collect_diagnostics(&db, user);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -86,7 +86,7 @@ fn namespace_import_qualifies_type_references() {
 fn namespace_alias_cannot_type_a_declaration() {
     let root = fixture_path("fixtures/workspaces/namespaces");
     let db = Db::new(load_roots(root.clone()));
-    let bad = db.file(&root.join("src/Bad.sol")).expect("the workspace indexes Bad.sol");
+    let bad = db.file(root.join("src/Bad.sol")).expect("the workspace indexes Bad.sol");
 
     let diagnostics = crate::hir::diagnostics::collect_diagnostics(&db, bad);
     let refusals = diagnostics
@@ -110,7 +110,7 @@ fn a_refused_namespace_type_leaves_no_namespace_behind() {
 
     let root = fixture_path("fixtures/workspaces/namespaces");
     let db = Db::new(load_roots(root.clone()));
-    let bad = db.file(&root.join("src/Bad.sol")).expect("the workspace indexes Bad.sol");
+    let bad = db.file(root.join("src/Bad.sol")).expect("the workspace indexes Bad.sol");
 
     for name in ["local", "param", "array"] {
         let DefId::Function(id) = find_function(&db, bad, name) else {
@@ -141,7 +141,7 @@ fn a_refused_namespace_type_leaves_no_namespace_behind() {
 fn manifestless_library_resolves_through_the_synthesized_remapping() {
     let fixture = fixture_path("fixtures/workspaces/foundry/nested");
     let db = Db::new(load_roots(fixture.clone()));
-    let main = db.file(&fixture.join("src/Root.sol")).expect("the workspace indexes src/Root.sol");
+    let main = db.file(fixture.join("src/Root.sol")).expect("the workspace indexes src/Root.sol");
     let dep = db
         .resolve_to_file(main, "plain/Plain.sol")
         .expect("plain/ resolves into the named dependency");
@@ -154,7 +154,7 @@ fn manifestless_library_resolves_through_the_synthesized_remapping() {
 fn remapping_into_src_dir_resolves_imports() {
     let fixture = fixture_path("fixtures/workspaces/foundry/nested");
     let db = Db::new(load_roots(fixture.clone()));
-    let main = db.file(&fixture.join("src/Root.sol")).expect("the workspace indexes src/Root.sol");
+    let main = db.file(fixture.join("src/Root.sol")).expect("the workspace indexes src/Root.sol");
     let dep = db
         .resolve_to_file(main, "fs/Lib.sol")
         .expect("fs/ resolves into the library's src dir");
@@ -247,7 +247,7 @@ fn a_project_rooted_import_resolves_against_the_package_root() {
         ],
     };
     let db = Db::new(workspace);
-    let from = db.file(&root.join("test/Foo.t.sol")).expect("test file is indexed");
+    let from = db.file(root.join("test/Foo.t.sol")).expect("test file is indexed");
     let resolved = db.resolve_to_file(from, "src/Foo.sol");
     assert_eq!(
         resolved.map(|file| file.path(&db).clone()),

@@ -20,9 +20,7 @@ use crate::paths::NormalizedPath;
 use crate::utilities::{logger, to_rope_idx};
 use crate::workspace::diff::WorkspaceDiff;
 use crate::workspace::watch::ChangeEvent;
-use crate::workspace::{
-    LoadedFile, Package, PackageId, Workspace, WorkspaceWithFiles, loader, loader::FileContent,
-};
+use crate::workspace::{LoadedFile, Package, PackageId, Workspace, WorkspaceWithFiles, loader, loader::FileContent};
 
 #[macro_export]
 macro_rules! map_def_id {
@@ -109,20 +107,14 @@ impl Db {
 
     /// A database whose salsa events are collected by `recorder`. (for testing only)
     #[cfg(test)]
-    pub(crate) fn with_events<F: FileContent, R>(
-        workspace: WorkspaceWithFiles<F>,
-        recorder: R,
-    ) -> Self
+    pub(crate) fn with_events<F: FileContent, R>(workspace: WorkspaceWithFiles<F>, recorder: R) -> Self
     where
         R: Fn(salsa::Event) + Send + Sync + 'static,
     {
         Self::build(workspace, salsa::Storage::new(Some(Box::new(recorder))))
     }
 
-    fn build<F: FileContent>(
-        mut workspace: WorkspaceWithFiles<F>,
-        storage: salsa::Storage<Self>,
-    ) -> Self {
+    fn build<F: FileContent>(mut workspace: WorkspaceWithFiles<F>, storage: salsa::Storage<Self>) -> Self {
         let mut db = Self {
             storage,
             files: Arc::new(Files::default()),
@@ -132,9 +124,7 @@ impl Db {
         let _ = Packages::builder(std::mem::take(&mut workspace.packages).into())
             .durability(Durability::MEDIUM)
             .new(&db);
-        let _ = RootSet::builder(Arc::from(Vec::new()))
-            .durability(Durability::HIGH)
-            .new(&db);
+        let _ = RootSet::builder(Arc::from(Vec::new())).durability(Durability::HIGH).new(&db);
 
         let files = db.files.clone();
         db.files = Arc::new(files.add_roots(&mut db, workspace.into()));
@@ -156,8 +146,8 @@ impl Db {
         DbSnapshot { db: self.clone() }
     }
 
-    pub fn file(&self, path: &Utf8Path) -> Option<File> {
-        self.files.file(path)
+    pub fn file(&self, path: impl Into<NormalizedPath>) -> Option<File> {
+        self.files.file(&path.into())
     }
 
     pub fn file_source_root(&self, file: FileId) -> SourceRootId {
@@ -207,12 +197,8 @@ impl Db {
         file.text(self)
     }
 
-    pub fn convert(
-        &self,
-        path: &Utf8Path,
-        position: lsp_types::Position,
-    ) -> Option<(File, ByteOffset)> {
-        let file = self.file(path)?;
+    pub fn convert(&self, path: &NormalizedPath, position: lsp_types::Position) -> Option<(File, ByteOffset)> {
+        let file = self.files.file(path)?;
         let rope = self.rope(file);
         let char_idx = to_rope_idx(&rope, position);
         let byte_offset = rope.char_to_byte(char_idx);
@@ -220,11 +206,7 @@ impl Db {
     }
 
     #[allow(dead_code)]
-    pub fn node_at_position(
-        &self,
-        path: &Utf8Path,
-        position: lsp_types::Position,
-    ) -> Option<AstNode> {
+    pub fn node_at_position(&self, path: &NormalizedPath, position: lsp_types::Position) -> Option<AstNode> {
         let (file, offset) = self.convert(path, position)?;
         self.named_node_at(file, offset)
     }
@@ -329,11 +311,7 @@ impl Db {
         files.open_file(self, path.into(), text)
     }
 
-    pub fn apply_changes(
-        &mut self,
-        path: impl Into<NormalizedPath>,
-        changes: Vec<TextDocumentContentChangeEvent>,
-    ) -> Option<File> {
+    pub fn apply_changes(&mut self, path: impl Into<NormalizedPath>, changes: Vec<TextDocumentContentChangeEvent>) -> Option<File> {
         let files = self.files.clone();
         files.apply_changes(self, path.into(), changes)
     }

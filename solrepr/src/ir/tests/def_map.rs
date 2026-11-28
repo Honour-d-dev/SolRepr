@@ -35,7 +35,7 @@ fn db_with(files: &[(&str, &str)]) -> Db {
 }
 
 fn analysis_of(db: &Db) -> Analysis<DefMap> {
-    let file = db.file(&Utf8PathBuf::from(format!("{ROOT}/src/Test.sol"))).unwrap();
+    let file = db.file(Utf8PathBuf::from(format!("{ROOT}/src/Test.sol"))).unwrap();
     db.root_def_map_analysis(RootDb::file_source_root(db, file))
 }
 
@@ -260,7 +260,7 @@ fn defs_in_file_are_the_files_own_declarations() {
              contract C { struct S { uint256 a; } uint256 x; function f() external {} }",
         ),
     ]);
-    let file = db.file(&Utf8PathBuf::from(format!("{ROOT}/src/Test.sol"))).unwrap();
+    let file = db.file(Utf8PathBuf::from(format!("{ROOT}/src/Test.sol"))).unwrap();
     let defmap = db.file_def_map(file);
 
     let mut kinds = defmap
@@ -285,7 +285,7 @@ fn defs_in_file_are_the_files_own_declarations() {
 
     // The named import binds `Dep` into this file's scope; it belongs to its own
     // file's collection.
-    let dep = db.file(&Utf8PathBuf::from(format!("{ROOT}/src/Dep.sol"))).unwrap();
+    let dep = db.file(Utf8PathBuf::from(format!("{ROOT}/src/Dep.sol"))).unwrap();
     let imported = defmap
         .defs
         .keys()

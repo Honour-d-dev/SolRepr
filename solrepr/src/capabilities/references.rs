@@ -1,5 +1,4 @@
 use anyhow::Result;
-use camino::Utf8Path;
 use lsp_server::{Request, Response};
 use lsp_types::{Location, Position, ReferenceParams};
 use rustc_hash::FxHashSet;
@@ -11,10 +10,10 @@ use crate::hir::syntax_store::{for_each_semantic, semantic_at};
 use crate::hir::types::Primitive;
 use crate::ir::def_map::DefId;
 use crate::ir::item_tree::ItemId;
+use crate::paths::NormalizedPath;
 use crate::salsa::hir_db::{container_at, def_name};
 use crate::salsa::root_db::def_range;
 use crate::salsa::{Db, File, HirDb, RootDb};
-use crate::utilities::{to_url, to_utf8path};
 
 use super::definition::local_range;
 use super::{Identity, identity_of_semantic, lsp_range};
@@ -50,7 +49,7 @@ impl Target {
 /// The def and spelling range at the cursor — the locate both requests share.
 /// `file` is not returned: it is `def.file()` by construction. What the
 /// spelling denotes is `Target::at`'s question, composed by each caller.
-pub(crate) fn locate(db: &Db, path: &Utf8Path, position: Position) -> Option<(DefId, NodeRange)> {
+pub(crate) fn locate(db: &Db, path: &NormalizedPath, position: Position) -> Option<(DefId, NodeRange)> {
     if db.is_ignored_path(path) {
         return None;
     }
@@ -111,7 +110,7 @@ fn scan_def(db: &Db, def: DefId, target: &Target, hits: &mut Hits) {
 
 pub fn references(db: &Db, request: Request) -> Result<Response> {
     let params: ReferenceParams = serde_json::from_value(request.params)?;
-    let path = to_utf8path(&params.text_document_position.text_document.uri)?;
+    let path = NormalizedPath::try_from(&params.text_document_position.text_document.uri)?;
     let result = locate(db, &path, params.text_document_position.position)
         .and_then(|(def, range)| {
             let target = Target::at(db, def, range)?;
@@ -127,7 +126,7 @@ pub fn references(db: &Db, request: Request) -> Result<Response> {
             let mut locations: Vec<Location> = hits
                 .into_iter()
                 .map(|(file, range)| Location {
-                    uri: to_url(file.path(db)),
+                    uri: file.path(db).to_url(),
                     range: lsp_range(db, file, range),
                 })
                 .collect();

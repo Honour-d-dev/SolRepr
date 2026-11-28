@@ -21,7 +21,6 @@ use camino::Utf8PathBuf;
 use lsp_types::InitializeParams;
 
 use crate::paths::NormalizedPath;
-use crate::utilities::to_utf8path;
 
 use discover::discover_workspace;
 
@@ -36,7 +35,7 @@ pub(crate) use ws_types::{Root, RootWithFiles, Workspace, WorkspaceWithFiles};
 pub(crate) fn workspace_roots(params: &InitializeParams) -> anyhow::Result<Box<[NormalizedPath]>> {
     let mut roots: Vec<NormalizedPath> = Vec::new();
     for folder in params.workspace_folders.as_deref().unwrap_or_default() {
-        if let Ok(path) = to_utf8path(&folder.uri)
+        if let Ok(path) = NormalizedPath::try_from(&folder.uri)
             && !roots.contains(&path)
         {
             roots.push(path);
@@ -45,14 +44,11 @@ pub(crate) fn workspace_roots(params: &InitializeParams) -> anyhow::Result<Box<[
 
     if roots.is_empty() {
         match params.root_uri {
-            Some(ref uri) => roots.push(to_utf8path(uri)?),
+            Some(ref uri) => roots.push(NormalizedPath::try_from(uri)?),
             None => {
-                let cwd = std::env::current_dir()
-                    .context("no workspace root and no working directory")?;
+                let cwd = std::env::current_dir().context("no workspace root and no working directory")?;
                 roots.push(NormalizedPath::new(
-                    Utf8PathBuf::from_path_buf(cwd).map_err(|path| {
-                        anyhow::anyhow!("working directory is not valid UTF-8: {path:?}")
-                    })?,
+                    Utf8PathBuf::from_path_buf(cwd).map_err(|path| anyhow::anyhow!("working directory is not valid UTF-8: {path:?}"))?,
                 ));
             }
         }

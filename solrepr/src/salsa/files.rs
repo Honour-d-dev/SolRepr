@@ -138,7 +138,7 @@ impl Files {
     // Reads ------------------------------------------------------------------------------------------
 
     /// The file indexed at `path`.
-    pub fn file(&self, path: &Utf8Path) -> Option<File> {
+    pub fn file(&self, path: &NormalizedPath) -> Option<File> {
         self.index.get(path).map(|file| *file)
     }
 

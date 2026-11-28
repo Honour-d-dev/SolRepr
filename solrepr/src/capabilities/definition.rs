@@ -6,10 +6,10 @@ use crate::ast::NodeRange;
 use crate::hir::body_map::{BodyOwnerId, LocalId};
 use crate::hir::syntax_store::semantic_at;
 use crate::ir::def_map::DefId;
+use crate::paths::NormalizedPath;
 use crate::salsa::hir_db::container_at;
 use crate::salsa::root_db::RootDb;
 use crate::salsa::{Db, File, HirDb};
-use crate::utilities::{to_url, to_utf8path};
 
 use super::{Identity, identity_of_semantic, lsp_range};
 
@@ -18,7 +18,7 @@ use super::{Identity, identity_of_semantic, lsp_range};
 /// it answers null instead of picking one.
 pub fn definition(db: &Db, request: Request) -> Result<Response> {
     let params: GotoDefinitionParams = serde_json::from_value(request.params)?;
-    let path = to_utf8path(&params.text_document_position_params.text_document.uri)?;
+    let path = NormalizedPath::try_from(&params.text_document_position_params.text_document.uri)?;
     if db.is_ignored_path(&path) {
         return Ok(Response {
             id: request.id,
@@ -91,7 +91,7 @@ pub(crate) fn local_range(db: &Db, def: DefId, local: LocalId) -> Option<NodeRan
 
 fn location_for_range(db: &Db, file: File, range: NodeRange) -> Option<LspLocation> {
     Some(LspLocation {
-        uri: to_url(file.path(db)),
+        uri: file.path(db).to_url(),
         range: lsp_range(db, file, range),
     })
 }

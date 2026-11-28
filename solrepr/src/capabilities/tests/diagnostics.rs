@@ -9,9 +9,7 @@ use tree_sitter::Parser;
 fn collects_error_nodes() {
     let source = "contract C { function f() public {";
     let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_solidity::LANGUAGE.into())
-        .unwrap();
+    parser.set_language(&tree_sitter_solidity::LANGUAGE.into()).unwrap();
     let tree = parser.parse(source, None).unwrap();
     let mut diagnostics = Vec::new();
 
@@ -19,9 +17,11 @@ fn collects_error_nodes() {
 
     assert!(!diagnostics.is_empty());
     assert!(diagnostics.len() <= MAX_PARSE_DIAGNOSTICS);
-    assert!(diagnostics.iter().all(|diagnostic| {
-        diagnostic.code == DiagnosticCode::SyntaxError && diagnostic.severity == Severity::Error
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| { diagnostic.code == DiagnosticCode::SyntaxError && diagnostic.severity == Severity::Error })
+    );
 }
 
 #[test]
@@ -40,11 +40,7 @@ fn normalizes_diagnostics_in_source_order_and_removes_duplicates() {
     );
     let mut diagnostics = vec![
         duplicate.clone(),
-        diagnostic(
-            NodeRange { start: 0, end: 1 },
-            DiagnosticCode::SyntaxError,
-            "syntax error",
-        ),
+        diagnostic(NodeRange { start: 0, end: 1 }, DiagnosticCode::SyntaxError, "syntax error"),
         duplicate,
     ];
 
@@ -61,10 +57,7 @@ fn identical_diagnostics_merge_and_deduplicate_related_links() {
     let range = NodeRange { start: 4, end: 5 };
     let link = |start: u32, message: &str| RelatedDiagnostic {
         file,
-        range: NodeRange {
-            start,
-            end: start + 1,
-        },
+        range: NodeRange { start, end: start + 1 },
         message: message.to_string(),
     };
     let mut diagnostics = vec![
@@ -128,10 +121,7 @@ fn same_range_conflicts_keep_distinct_messages_and_links() {
     let mut messages: Vec<_> = conflicts.iter().map(|d| d.message.as_str()).collect();
     messages.sort();
     assert_eq!(conflicts.len(), 2, "{messages:?}");
-    assert!(
-        messages[0].contains("`f`") && messages[1].contains("`g`"),
-        "{messages:?}"
-    );
+    assert!(messages[0].contains("`f`") && messages[1].contains("`g`"), "{messages:?}");
     for conflict in conflicts {
         assert_eq!(conflict.related.len(), 2, "{:?}", conflict.related);
     }
@@ -194,12 +184,7 @@ fn overloaded_conflicts_on_one_name_merge_related_links() {
         .iter()
         .filter(|diagnostic| diagnostic.code == DiagnosticCode::OverrideConflict)
         .collect();
-    assert_eq!(
-        conflicts.len(),
-        1,
-        "{:?}",
-        conflicts.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    assert_eq!(conflicts.len(), 1, "{:?}", conflicts.iter().map(|d| &d.message).collect::<Vec<_>>());
     assert_eq!(
         conflicts[0].message,
         "derived contract must override `f`: two or more bases define it with the same parameter types"
@@ -224,19 +209,10 @@ fn redeclaration_is_reported_at_the_rejected_name_with_the_previous_declaration(
         .collect();
 
     assert_eq!(redeclared.len(), 1);
-    assert_eq!(
-        redeclared[0].range.start as usize,
-        source.rfind('x').unwrap()
-    );
+    assert_eq!(redeclared[0].range.start as usize, source.rfind('x').unwrap());
     assert_eq!(redeclared[0].related.len(), 1);
-    assert_eq!(
-        redeclared[0].related[0].range.start as usize,
-        source.find('x').unwrap()
-    );
-    assert_eq!(
-        redeclared[0].related[0].message,
-        "previous declaration is here"
-    );
+    assert_eq!(redeclared[0].related[0].range.start as usize, source.find('x').unwrap());
+    assert_eq!(redeclared[0].related[0].message, "previous declaration is here");
 }
 
 #[test]
@@ -257,12 +233,18 @@ fn ambiguous_overload_formats_each_signature_as_plain_text() {
 
     assert_eq!(ambiguity.message, "ambiguous overload (2 candidates)");
     assert_eq!(ambiguity.related.len(), 2);
-    assert!(ambiguity.related.iter().any(|link| {
-        link.message == "function f(uint8 a) public pure returns (uint8) — Test.sol:3"
-    }));
-    assert!(ambiguity.related.iter().any(|link| {
-        link.message == "function f(uint16 a) public pure returns (uint16) — Test.sol:4"
-    }));
+    assert!(
+        ambiguity
+            .related
+            .iter()
+            .any(|link| { link.message == "function f(uint8 a) public pure returns (uint8) — Test.sol:3" })
+    );
+    assert!(
+        ambiguity
+            .related
+            .iter()
+            .any(|link| { link.message == "function f(uint16 a) public pure returns (uint16) — Test.sol:4" })
+    );
     assert!(!ambiguity.message.contains("```"));
     assert!(!ambiguity.message.contains("publicpure"));
 }
@@ -285,10 +267,7 @@ fn access_failure_includes_declaration_location() {
     assert!(failure.message.contains("internalOnly"));
     assert!(failure.message.contains("internal"));
     assert_eq!(failure.related.len(), 1);
-    assert_eq!(
-        failure.related[0].range.start as usize,
-        source.find("internalOnly").unwrap()
-    );
+    assert_eq!(failure.related[0].range.start as usize, source.find("internalOnly").unwrap());
     assert!(failure.related[0].message.contains("internalOnly"));
 }
 
@@ -296,9 +275,7 @@ fn access_failure_includes_declaration_location() {
 fn collects_incomplete_member_expressions() {
     let source = "contract C { function f() public { msg.; } }";
     let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_solidity::LANGUAGE.into())
-        .unwrap();
+    parser.set_language(&tree_sitter_solidity::LANGUAGE.into()).unwrap();
     let tree = parser.parse(source, None).unwrap();
     let mut diagnostics = Vec::new();
 
@@ -333,7 +310,7 @@ fn two_documents() -> (Db, File, File, NormalizedPath) {
     });
 
     let db = Db::new(workspace);
-    let a = db.file(&root.join("src/Test.sol")).expect("A is indexed");
+    let a = db.file(root.join("src/Test.sol")).expect("A is indexed");
     let b = db.file(&other).expect("B is indexed");
     (db, a, b, NormalizedPath::new(root.join("src/Test.sol")))
 }
@@ -343,11 +320,7 @@ fn request(db: &Db, files: &[(File, i32, u64)]) -> DiagnosticRequest {
         snapshot: db.snapshot(),
         files: files
             .iter()
-            .map(|&(file, version, epoch)| DiagnosedFile {
-                file,
-                version,
-                epoch,
-            })
+            .map(|&(file, version, epoch)| DiagnosedFile { file, version, epoch })
             .collect(),
     }
 }
@@ -363,25 +336,11 @@ fn a_pass_republishes_only_what_changed() {
     let (tx, rx) = unbounded();
     let (_requests, no_requests) = unbounded::<DiagnosticRequest>();
 
-    assert!(
-        job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx)
-            .is_none()
-    );
-    assert_eq!(
-        rx.try_iter().count(),
-        2,
-        "both documents are published once"
-    );
+    assert!(job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
+    assert_eq!(rx.try_iter().count(), 2, "both documents are published once");
 
-    assert!(
-        job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx)
-            .is_none()
-    );
-    assert_eq!(
-        rx.try_iter().count(),
-        0,
-        "nothing changed, so nothing is sent"
-    );
+    assert!(job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
+    assert_eq!(rx.try_iter().count(), 0, "nothing changed, so nothing is sent");
 
     // Only A is edited.
     db.apply_changes(
@@ -393,10 +352,7 @@ fn a_pass_republishes_only_what_changed() {
         }],
     );
 
-    assert!(
-        job.pass(&request(&db, &[(a, 2, 0), (b, 1, 0)]), &no_requests, &tx)
-            .is_none()
-    );
+    assert!(job.pass(&request(&db, &[(a, 2, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
     let sent = rx.try_iter().collect::<Vec<_>>();
     assert_eq!(sent.len(), 1, "only the edited document is republished");
     assert_eq!(sent[0].file, a);
@@ -412,17 +368,11 @@ fn a_reopened_document_is_republished() {
     let (tx, rx) = unbounded();
     let (_requests, no_requests) = unbounded::<DiagnosticRequest>();
 
-    assert!(
-        job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx)
-            .is_none()
-    );
+    assert!(job.pass(&request(&db, &[(a, 1, 0), (b, 1, 0)]), &no_requests, &tx).is_none());
     assert_eq!(rx.try_iter().count(), 2);
 
     // Same version, same content, new open.
-    assert!(
-        job.pass(&request(&db, &[(a, 1, 1), (b, 1, 0)]), &no_requests, &tx)
-            .is_none()
-    );
+    assert!(job.pass(&request(&db, &[(a, 1, 1), (b, 1, 0)]), &no_requests, &tx).is_none());
     let sent = rx.try_iter().collect::<Vec<_>>();
     assert_eq!(sent.len(), 1, "the reopened document is republished");
     assert_eq!(sent[0].file, a);

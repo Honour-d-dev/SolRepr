@@ -14,9 +14,10 @@ use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::syntax_store::semantic_at;
 use crate::hir::types::{Location, Mutability, RefKind, Ty, TyKind, TyName, VariableKind, Visibility};
 use crate::ir::def_map::DefId;
+use crate::paths::NormalizedPath;
 use crate::salsa::hir_db::container_at;
 use crate::salsa::{Db, File, HirDb, RootDb};
-use crate::utilities::{log_info, to_url, to_utf8path};
+use crate::utilities::log_info;
 
 pub fn code_block(code: &str) -> String {
     format!("```solidity \n\n{code}\n```")
@@ -154,7 +155,7 @@ impl<'db> Hover<'db> {
                 title: format!("File: {file_name}"),
                 signature: None,
                 documentation: None,
-                definition_link: Some(to_url(path.as_path()).to_string()),
+                definition_link: Some(path.to_url().to_string()),
             }
             .render(),
         )
@@ -692,7 +693,7 @@ impl<'db> Hover<'db> {
             .named_child_node(range)
             .map(|node| node.node().start_position().row + 1)
             .unwrap_or(1);
-        let mut uri = to_url(path.as_path());
+        let mut uri = path.to_url();
         uri.set_fragment(Some(&format!("L{line}")));
         uri.to_string()
     }
@@ -700,7 +701,7 @@ impl<'db> Hover<'db> {
 
 pub fn hover(db: &Db, request: Request) -> anyhow::Result<Response> {
     let params: HoverParams = serde_json::from_value(request.params)?;
-    let path = to_utf8path(&params.text_document_position_params.text_document.uri)?;
+    let path = NormalizedPath::try_from(&params.text_document_position_params.text_document.uri)?;
     log_info(format!("Hover request for {path}"));
     if db.is_ignored_path(&path) {
         return Ok(Response {

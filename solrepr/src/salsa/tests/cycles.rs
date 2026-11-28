@@ -17,14 +17,14 @@ fn roots_that_import_each_other_converge() {
     assert_eq!(workspace.roots.len(), 2, "src and test are separate roots");
 
     let db = Db::new(workspace);
-    let a = db.file(&root.join("src/A.sol")).expect("A is indexed");
+    let a = db.file(root.join("src/A.sol")).expect("A is indexed");
 
     // The path the crash came through: diagnostics collect A's root, which
     // reaches into B's root, which reaches back into A's.
     let _ = lsp_diagnostics(&db, a);
 
     for relative in ["src/A.sol", "test/B.sol"] {
-        let file = db.file(&root.join(relative)).expect("indexed");
+        let file = db.file(root.join(relative)).expect("indexed");
         let root_id = db.file_source_root(file);
         let unresolved = db
             .root_def_map_analysis(root_id)

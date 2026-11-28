@@ -9,7 +9,7 @@ use crate::capabilities::view_hir::{ViewHirRequest, view_hir};
 use crate::live_docs::LiveDocs;
 use crate::paths::NormalizedPath;
 use crate::salsa::{Db, File};
-use crate::utilities::{document_path, log_info, to_url, to_utf8path};
+use crate::utilities::log_info;
 use crate::worker::Worker;
 use crate::workspace::diff::WorkspaceDiff;
 use crate::workspace::watch::{self, ChangeEvent, Watched};
@@ -59,7 +59,7 @@ impl LspServer {
         let workspace = discover_workspaces(&roots);
         log_info("Workspace discovered");
 
-        let ignored_roots: Vec<String> = workspace.ignored_roots.iter().map(|root| to_url(root).to_string()).collect();
+        let ignored_roots: Vec<String> = workspace.ignored_roots.iter().map(|root| root.to_url().to_string()).collect();
 
         let initialize_result = InitializeResult {
             capabilities: ServerCapabilities {
@@ -202,7 +202,7 @@ impl LspServer {
 
     fn did_open(&mut self, notification: &Notification) {
         if let Some(params) = self.notification_params::<DidOpenTextDocumentParams>(notification)
-            && let Some(path) = document_path(&params.text_document.uri)
+            && let Some(path) = NormalizedPath::try_from(&params.text_document.uri).ok()
             && let Some(file) = self.db.open_file(path, params.text_document.text)
         {
             // An eviction only leaves the diagnosed set — the evicted
@@ -214,7 +214,7 @@ impl LspServer {
 
     fn did_change(&mut self, notification: &Notification) {
         if let Some(params) = self.notification_params::<DidChangeTextDocumentParams>(notification)
-            && let Some(path) = document_path(&params.text_document.uri)
+            && let Some(path) = NormalizedPath::try_from(&params.text_document.uri).ok()
             && let Some(file) = self.db.file(&path)
             && let Some(current) = self.live_docs.version(&file)
             && params.text_document.version > current
@@ -228,7 +228,7 @@ impl LspServer {
 
     fn did_close(&mut self, notification: &Notification) {
         if let Some(params) = self.notification_params::<DidCloseTextDocumentParams>(notification)
-            && let Some(path) = document_path(&params.text_document.uri)
+            && let Some(path) = NormalizedPath::try_from(&params.text_document.uri).ok()
             && let Some(file) = self.db.file(&path)
             && self.live_docs.is_open(&file)
         {
@@ -346,7 +346,7 @@ impl LspServer {
             "solrepr/ignoredRoots".to_string(),
             serde_json::json!({
                 "roots": self.db.ignored_paths().iter()
-                    .map(|root| to_url(root).to_string())
+                    .map(|root| root.to_url().to_string())
                     .collect::<Vec<_>>(),
             }),
         )));
@@ -412,7 +412,7 @@ impl LspServer {
         self.send(Message::Notification(Notification::new(
             PublishDiagnostics::METHOD.to_string(),
             PublishDiagnosticsParams {
-                uri: to_url(file.path(&self.db)),
+                uri: file.path(&self.db).to_url(),
                 diagnostics: diagnostics.to_vec(),
                 version,
             },
@@ -458,5 +458,8 @@ impl LspServer {
 /// The `file:` folders among `folders`, in order. A folder the server cannot
 /// read is skipped — it has no files to discover.
 fn folder_paths(folders: Vec<WorkspaceFolder>) -> Vec<NormalizedPath> {
-    folders.iter().filter_map(|folder| to_utf8path(&folder.uri).ok()).collect()
+    folders
+        .iter()
+        .filter_map(|folder| NormalizedPath::try_from(&folder.uri).ok())
+        .collect()
 }

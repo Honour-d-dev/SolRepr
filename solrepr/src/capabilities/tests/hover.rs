@@ -2,14 +2,12 @@ use crate::capabilities::hover::*;
 use crate::hir::body_map::BodyOwnerId;
 use crate::hir::tests::helper::make_test_db;
 use crate::ir::def_map::DefId;
-use crate::salsa::root_db::RootDb;
 use crate::salsa::HirDb;
+use crate::salsa::root_db::RootDb;
 
 #[test]
 fn struct_hover_formats_one_field_per_line() {
-    let (db, file) = make_test_db(
-        "struct Position { uint256 amount; address owner; } contract C {}",
-    );
+    let (db, file) = make_test_db("struct Position { uint256 amount; address owner; } contract C {}");
     let id = db
         .file_def_map(file)
         .defs
@@ -49,9 +47,7 @@ fn local_hover_drops_stack_and_notes_pointer_kinds() {
         .map(|(_, local)| hover.format_local(local, &fn_data.syntax_store))
         .collect::<Vec<_>>();
     assert!(
-        params[0].contains("### Parameter")
-            && params[0].contains("S storage sp")
-            && params[0].contains("*storage pointer*"),
+        params[0].contains("### Parameter") && params[0].contains("S storage sp") && params[0].contains("*storage pointer*"),
         "{}",
         params[0]
     );
@@ -72,10 +68,7 @@ fn local_hover_drops_stack_and_notes_pointer_kinds() {
         .expect("fixture declares x");
     let hover_x = hover.format_local(local, &body.syntax_store);
     assert!(
-        hover_x.contains("### Local Variable")
-            && hover_x.contains("uint256 x")
-            && !hover_x.contains("stack")
-            && !hover_x.contains('*'),
+        hover_x.contains("### Local Variable") && hover_x.contains("uint256 x") && !hover_x.contains("stack") && !hover_x.contains('*'),
         "{hover_x}"
     );
 }
@@ -135,17 +128,12 @@ fn enum_hover_formats_one_variant_per_line() {
         .expect("fixture declares Status");
 
     let hover = Hover { db: &db }.hover_enum(&id).unwrap();
-    assert!(
-        hover.contains("enum Status {\n    Pending,\n    Active,\n    Closed\n}"),
-        "{hover}"
-    );
+    assert!(hover.contains("enum Status {\n    Pending,\n    Active,\n    Closed\n}"), "{hover}");
 }
 
 #[test]
 fn contract_hover_formats_bare_and_argumented_bases() {
-    let (db, file) = make_test_db(
-        "contract A {} contract B { constructor(uint256) {} } contract C is A, B(1) {}",
-    );
+    let (db, file) = make_test_db("contract A {} contract B { constructor(uint256) {} } contract C is A, B(1) {}");
     let id = db
         .file_def_map(file)
         .defs
@@ -202,11 +190,9 @@ fn hover_after_an_unrelated_edit_reads_no_stale_type() {
     use lsp_server::{Request, RequestId};
     use serde_json::json;
 
-    use crate::utilities::to_url;
-
     let source = "contract C {\n    function f(uint256 amount) public returns (uint256) {\n        return amount;\n    }\n}\n";
     let (mut db, file) = make_test_db(source);
-    let path = file.path(&db).to_path_buf();
+    let path = file.path(&db).clone();
 
     let hover_at = |db: &crate::salsa::Db, line: u32| {
         let response = hover(
@@ -215,7 +201,7 @@ fn hover_after_an_unrelated_edit_reads_no_stale_type() {
                 id: RequestId::from(1),
                 method: "textDocument/hover".to_string(),
                 params: json!({
-                    "textDocument": { "uri": to_url(&path) },
+                    "textDocument": { "uri": path.to_url() },
                     "position": { "line": line, "character": 16 },
                 }),
             },
@@ -265,12 +251,7 @@ fn enum_variant_hover_names_the_qualified_member() {
         .find(|(_, variant)| variant.name == "Active")
         .expect("Status has Active");
 
-    let hover = Hover { db: &db }.format_variant(
-        &enum_data,
-        variant_id,
-        file,
-        crate::ast::NodeRange { start: 0, end: 0 },
-    );
+    let hover = Hover { db: &db }.format_variant(&enum_data, variant_id, file, crate::ast::NodeRange { start: 0, end: 0 });
     assert!(hover.contains("### Enum_variant"), "{hover}");
     assert!(hover.contains("Status.Active"), "{hover}");
     assert!(!hover.contains("enum variant"), "{hover}");

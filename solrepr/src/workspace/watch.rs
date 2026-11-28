@@ -3,20 +3,15 @@ use camino::Utf8Path;
 use crossbeam_channel::Sender;
 use lsp_server::{Message, Request};
 use lsp_types::{
-    DidChangeWatchedFilesClientCapabilities, DidChangeWatchedFilesRegistrationOptions, FileEvent,
-    FileSystemWatcher, GlobPattern, InitializeParams, OneOf, Registration, RegistrationParams,
-    RelativePattern, Unregistration, UnregistrationParams,
+    DidChangeWatchedFilesClientCapabilities, DidChangeWatchedFilesRegistrationOptions, FileEvent, FileSystemWatcher, GlobPattern,
+    InitializeParams, OneOf, Registration, RegistrationParams, RelativePattern, Unregistration, UnregistrationParams,
     notification::{DidChangeWatchedFiles, Notification as _},
     request::{RegisterCapability, Request as _, UnregisterCapability},
 };
 use rustc_hash::FxHashSet;
 
 use super::is_manifest;
-use crate::{
-    paths::NormalizedPath,
-    salsa::File,
-    utilities::{to_url, to_utf8path},
-};
+use crate::{paths::NormalizedPath, salsa::File};
 
 /// The globs the server asks the client to watch. A manifest can add or remove
 /// roots; a `.sol` file is one path in or out of an existing root.
@@ -63,7 +58,7 @@ pub(crate) fn changed_paths(changes: &[FileEvent]) -> Vec<NormalizedPath> {
     let mut seen = FxHashSet::default();
     changes
         .iter()
-        .filter_map(|event| to_utf8path(&event.uri).ok())
+        .filter_map(|event| NormalizedPath::try_from(&event.uri).ok())
         .filter(|path| seen.insert(path.clone()))
         .collect()
 }
@@ -93,13 +88,12 @@ fn capabilities(params: &InitializeParams) -> Option<&DidChangeWatchedFilesClien
 /// Relative patterns are folder-scoped, so the folder set is the registration
 /// set. Without them one folder-independent registration covers everything.
 pub(crate) fn registers_per_folder(params: &InitializeParams) -> bool {
-    capabilities(params)
-        .is_some_and(|capabilities| capabilities.relative_pattern_support == Some(true))
+    capabilities(params).is_some_and(|capabilities| capabilities.relative_pattern_support == Some(true))
 }
 
 /// The registration id for one folder, derived from its path so it can be
 /// revoked without a map.
-fn watch_registration(root: &Utf8Path) -> String {
+fn watch_registration(root: &NormalizedPath) -> String {
     format!("{WATCHED_FILES_REGISTRATION}:{root}")
 }
 
@@ -112,8 +106,8 @@ fn watcher(glob_pattern: GlobPattern) -> FileSystemWatcher {
 }
 
 /// The globs, scoped to one folder.
-fn folder_watchers(root: &Utf8Path) -> Vec<FileSystemWatcher> {
-    let base_uri = OneOf::Right(to_url(root));
+fn folder_watchers(root: &NormalizedPath) -> Vec<FileSystemWatcher> {
+    let base_uri = OneOf::Right(root.to_url());
     WATCHED_FILES
         .iter()
         .map(|pattern| {
@@ -135,11 +129,7 @@ fn plain_watchers() -> Vec<FileSystemWatcher> {
 
 /// Ask the client to watch the globs the server cares about, so no client has
 /// to hand-roll the list.
-pub(crate) fn register_watchers(
-    sender: &Sender<Message>,
-    params: &InitializeParams,
-    roots: &[NormalizedPath],
-) -> anyhow::Result<()> {
+pub(crate) fn register_watchers(sender: &Sender<Message>, params: &InitializeParams, roots: &[NormalizedPath]) -> anyhow::Result<()> {
     let Some(capabilities) = capabilities(params) else {
         return Ok(());
     };
@@ -150,21 +140,17 @@ pub(crate) fn register_watchers(
         }
         Ok(())
     } else {
-        register(
-            sender,
-            WATCHED_FILES_REGISTRATION.to_string(),
-            plain_watchers(),
-        )
+        register(sender, WATCHED_FILES_REGISTRATION.to_string(), plain_watchers())
     }
 }
 
 /// Watch one folder. The id is the folder's, so it can be revoked on its own.
-pub(crate) fn register_folder(sender: &Sender<Message>, root: &Utf8Path) -> anyhow::Result<()> {
+pub(crate) fn register_folder(sender: &Sender<Message>, root: &NormalizedPath) -> anyhow::Result<()> {
     register(sender, watch_registration(root), folder_watchers(root))
 }
 
 /// Stop watching one folder.
-pub(crate) fn unregister_folder(sender: &Sender<Message>, root: &Utf8Path) -> anyhow::Result<()> {
+pub(crate) fn unregister_folder(sender: &Sender<Message>, root: &NormalizedPath) -> anyhow::Result<()> {
     let id = watch_registration(root);
     let params = UnregistrationParams {
         unregisterations: vec![Unregistration {
@@ -175,11 +161,7 @@ pub(crate) fn unregister_folder(sender: &Sender<Message>, root: &Utf8Path) -> an
     request(sender, id, UnregisterCapability::METHOD, params)
 }
 
-fn register(
-    sender: &Sender<Message>,
-    id: String,
-    watchers: Vec<FileSystemWatcher>,
-) -> anyhow::Result<()> {
+fn register(sender: &Sender<Message>, id: String, watchers: Vec<FileSystemWatcher>) -> anyhow::Result<()> {
     let options = DidChangeWatchedFilesRegistrationOptions { watchers };
     let params = RegistrationParams {
         registrations: vec![Registration {
@@ -194,19 +176,10 @@ fn register(
 /// Send a `client/*Capability` request.
 ///
 /// The request id is the registration id: unique per folder, and named in a log.
-fn request(
-    sender: &Sender<Message>,
-    id: String,
-    method: &'static str,
-    params: impl serde::Serialize,
-) -> anyhow::Result<()> {
+fn request(sender: &Sender<Message>, id: String, method: &'static str, params: impl serde::Serialize) -> anyhow::Result<()> {
     let params = serde_json::to_value(params)?;
     sender
-        .send(Message::Request(Request::new(
-            id.into(),
-            method.to_string(),
-            params,
-        )))
+        .send(Message::Request(Request::new(id.into(), method.to_string(), params)))
         .context("the client connection is gone")?;
     Ok(())
 }

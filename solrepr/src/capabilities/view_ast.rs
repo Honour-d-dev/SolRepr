@@ -4,8 +4,9 @@ use lsp_types::{Position, TextDocumentIdentifier};
 use tree_sitter::Node;
 
 use crate::ast::NodeRange;
-use crate::salsa::{RootDb, Db};
-use crate::utilities::{log_info, print_named_tree, to_utf8path};
+use crate::paths::NormalizedPath;
+use crate::salsa::{Db, RootDb};
+use crate::utilities::{log_info, print_named_tree};
 
 /// Custom LSP request: `solidity/viewAst`
 ///
@@ -17,14 +18,10 @@ use crate::utilities::{log_info, print_named_tree, to_utf8path};
 /// produced by `print_named_tree`.
 pub fn view_ast(db: &Db, request: Request) -> anyhow::Result<Response> {
     let params: ViewAstParams = serde_json::from_value(request.params)?;
-    let path = to_utf8path(&params.text_document.uri)?;
+    let path = NormalizedPath::try_from(&params.text_document.uri)?;
 
-    let (file, start_off) = db
-        .convert(&path, params.start)
-        .context("document is not loaded")?;
-    let (_, end_off) = db
-        .convert(&path, params.end)
-        .context("document is not loaded")?;
+    let (file, start_off) = db.convert(&path, params.start).context("document is not loaded")?;
+    let (_, end_off) = db.convert(&path, params.end).context("document is not loaded")?;
     let selection = NodeRange {
         start: start_off,
         end: end_off,

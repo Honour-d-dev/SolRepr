@@ -13,7 +13,7 @@ use crate::ir::def_map::DefId;
 use crate::paths::NormalizedPath;
 use crate::salsa::root_db::RootDb;
 use crate::salsa::{Db, File, HirDb};
-use crate::utilities::{byte_to_position, to_url};
+use crate::utilities::byte_to_position;
 use crate::workspace::{LoadedFile, Package as WsPackage, PackageId, RootWithFiles, WorkspaceWithFiles};
 
 fn root() -> Utf8PathBuf {
@@ -58,7 +58,7 @@ fn references_request(db: &Db, file: File, position: Position, include_declarati
         params: serde_json::to_value(ReferenceParams {
             text_document_position: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier {
-                    uri: to_url(file.path(db)),
+                    uri: file.path(db).to_url(),
                 },
                 position,
             },
@@ -113,8 +113,8 @@ fn a_dependency_symbol_reports_uses_in_other_dependency_files() {
             },
         ],
     });
-    let dep_file = db.file(&root.join("lib/dep/D.sol")).unwrap();
-    let other = db.file(&root.join("lib/dep/Other.sol")).unwrap();
+    let dep_file = db.file(root.join("lib/dep/D.sol")).unwrap();
+    let other = db.file(root.join("lib/dep/Other.sol")).unwrap();
     let dep = find_contract(&db, dep_file, "Dep");
     let range = def_name_range(&db, dep_file, dep).expect("the contract has a name");
 
@@ -138,8 +138,8 @@ fn references_can_omit_the_declaration() {
             "import \"./A.sol\";\ncontract D { function f(C c) external { uint256 v = c.state(); } }",
         ),
     ]);
-    let a = db.file(&path("A.sol")).unwrap();
-    let b = db.file(&path("B.sol")).unwrap();
+    let a = db.file(path("A.sol")).unwrap();
+    let b = db.file(path("B.sol")).unwrap();
     let var = defs_of(&db, a, |def| matches!(def, DefId::Var(_)))
         .into_iter()
         .next()
@@ -155,7 +155,7 @@ fn references_can_omit_the_declaration() {
     let locations = without_declaration.result.unwrap();
     let locations = locations.as_array().unwrap();
     assert_eq!(locations.len(), 1, "{locations:?}");
-    assert_eq!(locations[0]["uri"], to_url(b.path(&db)).as_str());
+    assert_eq!(locations[0]["uri"], b.path(&db).to_url().as_str());
 }
 
 #[test]

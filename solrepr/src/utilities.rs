@@ -1,7 +1,8 @@
 use anyhow::Context;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
+#[cfg(test)]
+use camino::Utf8PathBuf;
 use lsp_types::Position;
-use lsp_types::Url;
 use ropey::Rope;
 use tree_sitter::Point;
 
@@ -13,36 +14,8 @@ pub(crate) fn fixture_path(path: &str) -> NormalizedPath {
     NormalizedPath::new(Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path))
 }
 
-pub(crate) fn to_utf8path(uri: &Url) -> anyhow::Result<NormalizedPath> {
-    let path = uri
-        .to_file_path()
-        .map_err(|_| anyhow::anyhow!("failed to convert URI to path"))?;
-    let path =
-        Utf8PathBuf::from_path_buf(path).map_err(|_| anyhow::anyhow!("path is not valid UTF-8"))?;
-    Ok(NormalizedPath::new(path))
-}
-
-pub(crate) fn to_url(path: &Utf8Path) -> Url {
-    Url::from_file_path(path).expect("failed to convert path to url")
-}
-
-/// A document's path, or `None` when the client used a non-`file:` URI.
-/// Notifications have no reply, so this only logs.
-pub(crate) fn document_path(uri: &lsp_types::Url) -> Option<NormalizedPath> {
-    match to_utf8path(uri) {
-        Ok(path) => Some(path),
-        Err(error) => {
-            log_info(format!("ignoring non-file document URI {uri}: {error:#}"));
-            None
-        }
-    }
-}
-
 ///Resolves to a new path relative to a base path
-pub(crate) fn resolve_path(
-    base: &Utf8Path,
-    rel_path: impl AsRef<Utf8Path>,
-) -> anyhow::Result<NormalizedPath> {
+pub(crate) fn resolve_path(base: &Utf8Path, rel_path: impl AsRef<Utf8Path>) -> anyhow::Result<NormalizedPath> {
     let resolved_path = base
         .parent()
         .context("Error: can't resolve path, base path has no parent")?
@@ -51,11 +24,7 @@ pub(crate) fn resolve_path(
 }
 
 /// Resolves a Solidity import string, checking remappings first, then falling back to relative resolution.
-pub(crate) fn resolve_import(
-    base: &Utf8Path,
-    import_str: &str,
-    remappings: &[Remapping],
-) -> anyhow::Result<NormalizedPath> {
+pub(crate) fn resolve_import(base: &Utf8Path, import_str: &str, remappings: &[Remapping]) -> anyhow::Result<NormalizedPath> {
     // Relative imports
     if import_str.starts_with("./") || import_str.starts_with("../") {
         return resolve_path(base, import_str);
@@ -64,18 +33,11 @@ pub(crate) fn resolve_import(
     let best_match = remappings
         .iter()
         .filter(|remapping| {
-            import_str.starts_with(&remapping.prefix)
-                && remapping
-                    .context
-                    .as_ref()
-                    .is_none_or(|context| base.starts_with(context))
+            import_str.starts_with(&remapping.prefix) && remapping.context.as_ref().is_none_or(|context| base.starts_with(context))
         })
         .max_by_key(|remapping| {
             (
-                remapping
-                    .context
-                    .as_ref()
-                    .map_or(0, |context| context.as_str().len()),
+                remapping.context.as_ref().map_or(0, |context| context.as_str().len()),
                 remapping.prefix.len(),
                 // A manifest can declare one prefix twice with different targets — Foundry's are relative to
                 // the package root and may miss the installed layout, while the resolver found the real one.
@@ -94,10 +56,7 @@ pub(crate) fn resolve_import(
 
 #[inline]
 pub(crate) fn to_rope_idx(file: &Rope, pos: Position) -> usize {
-    file.line_to_char(pos.line as usize)
-        + file
-            .line(pos.line as usize)
-            .utf16_cu_to_char(pos.character as usize)
+    file.line_to_char(pos.line as usize) + file.line(pos.line as usize).utf16_cu_to_char(pos.character as usize)
 }
 
 #[inline]
@@ -125,9 +84,7 @@ pub(crate) fn byte_to_position(rope: &Rope, byte: usize) -> Position {
 pub(crate) fn position_to_point(r: &Rope, position: Position) -> Point {
     Point {
         row: position.line as usize,
-        column: r
-            .line(position.line as usize)
-            .utf16_cu_to_char(position.character as usize),
+        column: r.line(position.line as usize).utf16_cu_to_char(position.character as usize),
     }
 }
 
@@ -181,11 +138,7 @@ pub(crate) fn logger(event: salsa::Event) {
     }
 }
 
-pub(crate) fn print_tree(
-    cursor: &mut tree_sitter::TreeCursor,
-    source_code: &str,
-    indentation: usize,
-) -> String {
+pub(crate) fn print_tree(cursor: &mut tree_sitter::TreeCursor, source_code: &str, indentation: usize) -> String {
     let indent = "  ".repeat(indentation);
     let kind = cursor.node().kind();
     let text = &source_code[cursor.node().byte_range()].replace('\n', &format!("\n {indent} "));
@@ -198,11 +151,7 @@ pub(crate) fn print_tree(
     result
 }
 
-pub(crate) fn print_named_tree(
-    cursor: &mut tree_sitter::TreeCursor,
-    source_code: &str,
-    indentation: usize,
-) -> String {
+pub(crate) fn print_named_tree(cursor: &mut tree_sitter::TreeCursor, source_code: &str, indentation: usize) -> String {
     if !cursor.node().is_named() {
         return "".to_string();
     }
@@ -287,10 +236,7 @@ mod tests {
 
         let base = root.join("Main.sol");
         let resolved = resolve_import(&base, "@oz/Dependency.sol", &remappings).expect("resolves");
-        assert_eq!(
-            resolved,
-            crate::paths::normalize_path(&root.join("Dependency.sol"))
-        );
+        assert_eq!(resolved, crate::paths::normalize_path(&root.join("Dependency.sol")));
     }
 
     #[test]
@@ -333,50 +279,17 @@ mod tests {
         let cases = [
             ("this_dot", "contract A { function f() { this.token. } }"),
             ("msg_dot", "contract A { function f() { msg. } }"),
-            (
-                "token_dot",
-                "contract A { function f(IERC20 token) { token. } }",
-            ),
-            (
-                "cast_dot",
-                "contract A { function f(address token) { token.IERC20(token)..some } }",
-            ),
-            (
-                "emit",
-                "contract A { event E(); function f() { emit E(); } }",
-            ),
-            (
-                "emit_incomplete",
-                "contract A { event E(); function f() { emit } }",
-            ),
-            (
-                "revert",
-                "contract A { error E(); function f() { revert E(); } }",
-            ),
-            (
-                "revert_incomplete",
-                "contract A { error E(); function f() { revert } }",
-            ),
-            (
-                "type",
-                "contract A { function f() public returns (uint256) { return 0; } }",
-            ),
-            (
-                "type_incomplete",
-                "contract A { function f() public returns ( { return 0; } }",
-            ),
-            (
-                "expression",
-                "contract A { function f(uint256 value) { value; } }",
-            ),
-            (
-                "expression_incomplete",
-                "contract A { function f(uint256 value) { value + } }",
-            ),
-            (
-                "call_incomplete",
-                "contract A { function f(uint256 value) { foo( } }",
-            ),
+            ("token_dot", "contract A { function f(IERC20 token) { token. } }"),
+            ("cast_dot", "contract A { function f(address token) { token.IERC20(token)..some } }"),
+            ("emit", "contract A { event E(); function f() { emit E(); } }"),
+            ("emit_incomplete", "contract A { event E(); function f() { emit } }"),
+            ("revert", "contract A { error E(); function f() { revert E(); } }"),
+            ("revert_incomplete", "contract A { error E(); function f() { revert } }"),
+            ("type", "contract A { function f() public returns (uint256) { return 0; } }"),
+            ("type_incomplete", "contract A { function f() public returns ( { return 0; } }"),
+            ("expression", "contract A { function f(uint256 value) { value; } }"),
+            ("expression_incomplete", "contract A { function f(uint256 value) { value + } }"),
+            ("call_incomplete", "contract A { function f(uint256 value) { foo( } }"),
             ("item_list", "contract A { }"),
         ];
 
@@ -400,21 +313,15 @@ mod tests {
             target: NormalizedPath::new("/workspace/lib/openzeppelin-contracts/contracts"),
         };
         let nested_remapping = Remapping {
-            context: Some(NormalizedPath::new(
-                "/workspace/lib/openzeppelin-contracts-upgradeable",
-            )),
+            context: Some(NormalizedPath::new("/workspace/lib/openzeppelin-contracts-upgradeable")),
             prefix: "@openzeppelin/contracts/".to_string(),
-            target: NormalizedPath::new(
-                "/workspace/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts",
-            ),
+            target: NormalizedPath::new("/workspace/lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts"),
         };
         let remappings = [root_remapping, nested_remapping];
         let import = "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
         let nested = resolve_import(
-            &Utf8PathBuf::from(
-                "/workspace/lib/openzeppelin-contracts-upgradeable/contracts/ERC721.sol",
-            ),
+            &Utf8PathBuf::from("/workspace/lib/openzeppelin-contracts-upgradeable/contracts/ERC721.sol"),
             import,
             &remappings,
         )
@@ -426,17 +333,10 @@ mod tests {
             )
         );
 
-        let root = resolve_import(
-            &Utf8PathBuf::from("/workspace/src/MyNFT.sol"),
-            import,
-            &remappings,
-        )
-        .unwrap();
+        let root = resolve_import(&Utf8PathBuf::from("/workspace/src/MyNFT.sol"), import, &remappings).unwrap();
         assert_eq!(
             root,
-            Utf8PathBuf::from(
-                "/workspace/lib/openzeppelin-contracts/contracts/token/ERC721/IERC721.sol"
-            )
+            Utf8PathBuf::from("/workspace/lib/openzeppelin-contracts/contracts/token/ERC721/IERC721.sol")
         );
     }
 }

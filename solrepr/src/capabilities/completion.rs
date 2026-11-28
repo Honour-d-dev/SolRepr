@@ -12,9 +12,10 @@ use crate::hir::syntax_store::SyntaxStore;
 use crate::hir::syntax_store::{callee_at, semantic_at};
 use crate::hir::types::{EXTERNAL_CALL_OPTIONS, Primitive, Ty, TyKind, option_type};
 use crate::ir::def_map::{DefId, DefNamespace, TypeDefId};
+use crate::paths::NormalizedPath;
 use crate::salsa::hir_db::container_at;
 use crate::salsa::{Db, HirDb};
-use crate::utilities::{log_info, print_tree, to_utf8path};
+use crate::utilities::{log_info, print_tree};
 use anyhow::{Context as _, Result};
 use lsp_server::{Request, Response};
 use lsp_types::{
@@ -61,7 +62,7 @@ enum CalleeKind {
 pub fn completion(db: &Db, request: Request) -> Result<Response> {
     log_info("Completion triggered");
     let params: CompletionParams = serde_json::from_value(request.params)?;
-    let path = to_utf8path(&params.text_document_position.text_document.uri)?;
+    let path = NormalizedPath::try_from(&params.text_document_position.text_document.uri)?;
     if db.is_ignored_path(&path) {
         return Ok(Response {
             id: request.id,
@@ -419,7 +420,11 @@ fn key_items(keys: Vec<Key>, existing: &FxHashSet<Name>, kind: CompletionItemKin
     keys.into_iter()
         .filter(|key| !existing.contains(&key.name))
         .map(|key| LspCompletionItem {
-            label: if key.optional { format!("?{}", key.name) } else { key.name.to_string() },
+            label: if key.optional {
+                format!("?{}", key.name)
+            } else {
+                key.name.to_string()
+            },
             kind: Some(kind),
             label_details: Some(CompletionItemLabelDetails {
                 detail: None,

@@ -311,14 +311,14 @@ fn a_new_file_re_collects_one_roots_inversion() {
     // The untouched root: neither its map nor its files' imports re-run.
     let _ = import_map(&db, test);
     let events = recorder.take();
-    assert_eq!(ran(&events, "import_map_of"), 0, "{events:#?}");
+    assert_eq!(ran(&events, "import_map"), 0, "{events:#?}");
     assert_eq!(ran(&events, "imports"), 0, "{events:#?}");
 
     // The root that gained the file: its map re-collects, and only `A`
     // re-resolves — `New.sol` is computed for the first time.
     let _ = import_map(&db, src);
     let events = recorder.take();
-    assert_eq!(ran(&events, "import_map_of"), 1, "{events:#?}");
+    assert_eq!(ran(&events, "import_map"), 1, "{events:#?}");
     assert_eq!(ran(&events, "imports"), 2, "{events:#?}");
 }
 
@@ -330,7 +330,7 @@ fn an_unresolved_import_resolves_when_the_file_appears() {
         vec![loaded("/w/src/A.sol", "import \"./Missing.sol\";\ncontract A {}\n")],
     )]);
     let (mut db, recorder) = recording(workspace);
-    let a = db.file(&Utf8PathBuf::from("/w/src/A.sol")).unwrap();
+    let a = db.file(Utf8PathBuf::from("/w/src/A.sol")).unwrap();
     assert!(imports(&db, a).resolved.is_empty());
     recorder.take();
 
@@ -360,7 +360,7 @@ fn manifest_only_reload_does_not_invalidate_root_set() {
     reloaded
         .packages
         .iter_mut()
-        .find(|package| package.root.as_path() == "/w/src")
+        .find(|package| package.root == NormalizedPath::new("/w/src"))
         .unwrap()
         .remappings
         .push(Remapping {
@@ -376,7 +376,7 @@ fn manifest_only_reload_does_not_invalidate_root_set() {
 
     let events = recorder.take();
     assert_eq!(ran(&events, "root_count"), 0, "{events:#?}");
-    assert_eq!(ran(&events, "import_map_of"), 0, "{events:#?}");
+    assert_eq!(ran(&events, "import_map"), 0, "{events:#?}");
 }
 
 /// A root appearing elsewhere is not an edge of an import that already resolved.
@@ -391,7 +391,7 @@ fn adding_a_new_root_does_not_re_run_resolved_imports() {
     )]);
     let (mut db, recorder) = recording(workspace);
     let src = db.source_roots()[0];
-    let a = db.file(&Utf8PathBuf::from("/w/src/A.sol")).unwrap();
+    let a = db.file(Utf8PathBuf::from("/w/src/A.sol")).unwrap();
     let _ = imports(&db, a);
     let _ = import_map(&db, src);
     recorder.take();
@@ -414,7 +414,7 @@ fn adding_a_new_root_does_not_re_run_resolved_imports() {
 
     let events = recorder.take();
     assert_eq!(ran(&events, "imports"), 0, "{events:#?}");
-    assert_eq!(ran(&events, "import_map_of"), 0, "{events:#?}");
+    assert_eq!(ran(&events, "import_map"), 0, "{events:#?}");
 }
 
 /// Re-parenting a file to a narrower root moves the handle, not its text: the
@@ -423,7 +423,7 @@ fn adding_a_new_root_does_not_re_run_resolved_imports() {
 fn re_parenting_a_file_does_not_re_parse_it() {
     let workspace = workspace_of(vec![root("/w", vec![loaded("/w/lib/dep/Dep.sol", "contract Dep {}\n")])]);
     let (mut db, recorder) = recording(workspace);
-    let dep = db.file(&Utf8PathBuf::from("/w/lib/dep/Dep.sol")).unwrap();
+    let dep = db.file(Utf8PathBuf::from("/w/lib/dep/Dep.sol")).unwrap();
     let _ = db.item_tree(dep);
     recorder.take();
 
@@ -434,8 +434,8 @@ fn re_parenting_a_file_does_not_re_parse_it() {
     let (_, prepared) = diff(&db.workspace(), narrowed);
     db.reload_workspace(prepared);
     assert_eq!(
-        db.file_source_root(dep).root(&db).as_path(),
-        Utf8PathBuf::from("/w/lib/dep").as_path(),
+        db.file_source_root(dep).root(&db),
+        &NormalizedPath::new("/w/lib/dep"),
         "the handle moved to the narrower root"
     );
 

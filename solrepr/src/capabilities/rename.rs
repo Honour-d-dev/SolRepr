@@ -1,19 +1,18 @@
 use anyhow::Result;
-use camino::Utf8Path;
 use lsp_server::{ErrorCode, Request, Response};
 use lsp_types::{Position, PrepareRenameResponse, RenameParams, TextDocumentPositionParams, TextEdit, WorkspaceEdit};
 
 use crate::ast::NodeRange;
 use crate::ir::def_map::DefId;
+use crate::paths::NormalizedPath;
 use crate::salsa::{Db, File};
-use crate::utilities::{to_url, to_utf8path};
 
 use super::lsp_range;
 use super::references::{Hits, Target, is_reserved, locate, occurrences};
 
 pub fn prepare_rename(db: &Db, request: Request) -> Result<Response> {
     let params: TextDocumentPositionParams = serde_json::from_value(request.params)?;
-    let path = to_utf8path(&params.text_document.uri)?;
+    let path = NormalizedPath::try_from(&params.text_document.uri)?;
     let result = rename_target(db, &path, params.position)
         .map(|(def, range, target)| {
             serde_json::to_value(PrepareRenameResponse::RangeWithPlaceholder {
@@ -32,7 +31,7 @@ pub fn prepare_rename(db: &Db, request: Request) -> Result<Response> {
 
 pub fn rename(db: &Db, request: Request) -> Result<Response> {
     let params: RenameParams = serde_json::from_value(request.params)?;
-    let path = to_utf8path(&params.text_document_position.text_document.uri)?;
+    let path = NormalizedPath::try_from(&params.text_document_position.text_document.uri)?;
     let Some((origin, target)) =
         rename_target(db, &path, params.text_document_position.position).map(|(def, _, target)| (def.file(), target))
     else {
@@ -58,7 +57,7 @@ fn is_dependency(db: &Db, file: File) -> bool {
 
 /// The cursor target, plus rename's writability gate: a declaration in a
 /// dependency root is read-only, unless the spelling is a file-local alias.
-pub(crate) fn rename_target(db: &Db, path: &Utf8Path, position: Position) -> Option<(DefId, NodeRange, Target)> {
+pub(crate) fn rename_target(db: &Db, path: &NormalizedPath, position: Position) -> Option<(DefId, NodeRange, Target)> {
     let (def, range) = locate(db, path, position)?;
     if is_dependency(db, def.file()) {
         return None;
@@ -70,7 +69,7 @@ pub(crate) fn rename_target(db: &Db, path: &Utf8Path, position: Position) -> Opt
 fn workspace_edit(db: &Db, hits: Hits, new_name: &str) -> WorkspaceEdit {
     let mut changes: std::collections::HashMap<lsp_types::Url, Vec<TextEdit>> = Default::default();
     for (file, range) in hits {
-        changes.entry(to_url(file.path(db))).or_default().push(TextEdit {
+        changes.entry(file.path(db).to_url()).or_default().push(TextEdit {
             range: lsp_range(db, file, range),
             new_text: new_name.to_string(),
         });
